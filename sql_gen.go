@@ -29,10 +29,21 @@ func validateIdent(name string) error {
 	return nil
 }
 
-// quoteIdent wraps name in double-quotes for Postgres. Caller must have
-// validated name first via validateIdent to prevent injection.
+// quoteIdent folds name to lower case and wraps it in double-quotes for
+// Postgres. Lower-casing makes the case-preserving quoted form agree with the
+// unquoted references that dalgo2sql's DML and dal's structured-query
+// rendering emit (Postgres folds those to lower case), so DDL and DML always
+// address the same physical identifier. Quoting is retained so reserved words
+// and otherwise-illegal names remain usable. Caller must have validated name
+// first via validateIdent to prevent injection.
+//
+// Consequence: collection and column names are stored lower-cased. Typed
+// clients round-trip transparently (JSON unmarshalling is case-insensitive);
+// consumers reading raw records observe lower-cased field names. Case-
+// preserving storage would require dal's structured-query String() to quote
+// column identifiers — tracked upstream.
 func quoteIdent(name string) string {
-	return `"` + name + `"`
+	return `"` + strings.ToLower(name) + `"`
 }
 
 func buildCreateTableSQL(c dbschema.CollectionDef, opts ddl.Options) (string, error) {

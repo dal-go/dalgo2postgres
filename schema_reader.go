@@ -40,12 +40,12 @@ func (d *Database) ListCollections(ctx context.Context, parent *dal.Key) ([]dal.
 // DescribeCollection returns the full schema definition for the named table.
 // It queries information_schema for columns and primary-key membership.
 func (d *Database) DescribeCollection(ctx context.Context, ref *dal.CollectionRef) (*dbschema.CollectionDef, error) {
-	return describeCollectionImpl(ctx, d.sqlDB, ref.Name())
+	return describeCollectionImpl(ctx, d.sqlDB, strings.ToLower(ref.Name()))
 }
 
 // ListIndexes returns the non-primary-key indexes on the named table via pg_indexes.
 func (d *Database) ListIndexes(ctx context.Context, ref *dal.CollectionRef) ([]dbschema.IndexDef, error) {
-	return listIndexesImpl(ctx, d.sqlDB, ref.Name())
+	return listIndexesImpl(ctx, d.sqlDB, strings.ToLower(ref.Name()))
 }
 
 // ---- DescribeCollection impl ----

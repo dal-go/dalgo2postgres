@@ -64,7 +64,10 @@ func NewDatabase(dsn string) (*Database, error) {
 //	        },
 //	    })
 func NewDatabaseWithOptions(dsn string, schema dal.Schema, opts dalgo2sql.DbOptions) (*Database, error) {
-	// Force Postgres placeholder dialect so dalgo2sql emits $1/$2/… instead of ?.
+	// Force the Postgres placeholder dialect ($1/$2/…) regardless of caller.
+	// Identifiers are folded to lowercase by the DDL (see quoteIdent), so the
+	// unquoted identifiers dalgo2sql's DML and dal's structured-query
+	// rendering emit — which Postgres also folds to lowercase — always match.
 	opts.Placeholder = dalgo2sql.PlaceholderDollar
 
 	sqlDB, err := sql.Open("pgx", dsn)

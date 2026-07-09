@@ -85,3 +85,18 @@ PostgreSQL requires positional parameter markers `$1`, `$2`, … rather than the
 SQL emitted through `dalgo2sql` uses the correct form. This field was added to
 `dalgo2sql` as a minimal backward-compatible extension; the zero value
 (`PlaceholderQuestion`) preserves the existing behavior for all other drivers.
+
+### Identifier case folding
+
+PostgreSQL folds unquoted identifiers to lower case. `dalgo2postgres` quotes
+identifiers (so reserved words and otherwise-illegal names stay usable) but
+**lower-cases them first**, so the case-preserving quoted form agrees with the
+unquoted references that `dalgo2sql`'s DML and dalgo's structured-query
+rendering emit (which PostgreSQL also folds to lower case). DDL and DML thus
+always address the same physical identifier.
+
+Consequence: collection (table) and field (column) names are stored
+lower-cased. Typed clients round-trip transparently because `encoding/json`
+unmarshalling is case-insensitive; consumers reading raw records observe
+lower-cased field names. Fully case-preserving storage would require dalgo's
+structured-query `String()` to quote column identifiers, tracked upstream.

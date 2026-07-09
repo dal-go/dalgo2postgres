@@ -1,6 +1,7 @@
 package dalgo2postgres
 
 import (
+	"strings"
 	"context"
 	"fmt"
 
@@ -24,7 +25,7 @@ func (d *Database) ListConstraints(ctx context.Context, ref *dal.CollectionRef) 
 		   AND table_name   = $1
 		   AND constraint_type IN ('PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY')
 		 ORDER BY constraint_type, constraint_name`,
-		ref.Name(),
+		strings.ToLower(ref.Name()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dalgo2postgres: ListConstraints %q: %w", ref.Name(), err)
@@ -69,7 +70,7 @@ func (d *Database) ListReferrers(ctx context.Context, ref *dal.CollectionRef) ([
 		 WHERE rc.constraint_schema    = 'public'
 		   AND ccu.table_name          = $1
 		 ORDER BY referrer_table, referrer_col`,
-		ref.Name(),
+		strings.ToLower(ref.Name()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dalgo2postgres: ListReferrers %q: %w", ref.Name(), err)
