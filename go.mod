@@ -3,14 +3,15 @@ module github.com/dal-go/dalgo2postgres
 go 1.26
 
 require (
-	github.com/dal-go/dalgo v0.62.10
-	github.com/dal-go/dalgo2sql v0.9.0
+	github.com/dal-go/dalgo v0.63.1
+	github.com/dal-go/dalgo2sql v0.9.7
+	github.com/dal-go/record v0.1.0
 	github.com/jackc/pgx/v5 v5.10.0
 )
 
 require (
-	github.com/RoaringBitmap/roaring/v2 v2.19.0 // indirect
-	github.com/bits-and-blooms/bitset v1.24.4 // indirect
+	github.com/RoaringBitmap/roaring/v2 v2.22.0 // indirect
+	github.com/bits-and-blooms/bitset v1.24.6 // indirect
 	github.com/georgysavva/scany/v2 v2.1.4 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect

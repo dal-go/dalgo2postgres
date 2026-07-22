@@ -6,6 +6,7 @@ import (
 
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/dalgo2sql"
+	dalrecord "github.com/dal-go/record"
 )
 
 // buildOpts constructs DbOptions with the given table's primary key configured.
@@ -37,9 +38,9 @@ func TestRecord_MapRoundTrip(t *testing.T) {
 
 	db := openTestDBWithOpts(t, buildOpts(tbl, "id"))
 
-	// Insert via dal.Record with map[string]any data.
-	key1 := dal.NewKeyWithID(tbl, "r1")
-	rec1 := dal.NewRecordWithData(key1, map[string]any{
+	// Insert via dalrecord.Record with map[string]any data.
+	key1 := dalrecord.NewKeyWithID(tbl, "r1")
+	rec1 := dalrecord.NewRecordWithData(key1, map[string]any{
 		"name":  "Alice",
 		"score": int64(42),
 	})
@@ -48,8 +49,8 @@ func TestRecord_MapRoundTrip(t *testing.T) {
 	}
 
 	// Get back.
-	getKey := dal.NewKeyWithID(tbl, "r1")
-	getRec := dal.NewRecordWithData(getKey, make(map[string]any))
+	getKey := dalrecord.NewKeyWithID(tbl, "r1")
+	getRec := dalrecord.NewRecordWithData(getKey, make(map[string]any))
 	if err := db.Get(ctx, getRec); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -58,15 +59,15 @@ func TestRecord_MapRoundTrip(t *testing.T) {
 		t.Errorf("name = %v, want Alice", data["name"])
 	}
 
-	// dal.IsNotFound on missing.
-	missingKey := dal.NewKeyWithID(tbl, "missing_xyz")
-	missingRec := dal.NewRecordWithData(missingKey, make(map[string]any))
-	if err := db.Get(ctx, missingRec); !dal.IsNotFound(err) {
+	// dalrecord.IsNotFound on missing.
+	missingKey := dalrecord.NewKeyWithID(tbl, "missing_xyz")
+	missingRec := dalrecord.NewRecordWithData(missingKey, make(map[string]any))
+	if err := db.Get(ctx, missingRec); !dalrecord.IsNotFound(err) {
 		t.Errorf("expected IsNotFound for missing key, got %v", err)
 	}
 
 	// Set-upsert: update name.
-	upsertRec := dal.NewRecordWithData(dal.NewKeyWithID(tbl, "r1"), map[string]any{
+	upsertRec := dalrecord.NewRecordWithData(dalrecord.NewKeyWithID(tbl, "r1"), map[string]any{
 		"name":  "Alice Updated",
 		"score": int64(99),
 	})
@@ -74,8 +75,8 @@ func TestRecord_MapRoundTrip(t *testing.T) {
 		t.Fatalf("Set (upsert): %v", err)
 	}
 
-	getKey2 := dal.NewKeyWithID(tbl, "r1")
-	getRec2 := dal.NewRecordWithData(getKey2, make(map[string]any))
+	getKey2 := dalrecord.NewKeyWithID(tbl, "r1")
+	getRec2 := dalrecord.NewRecordWithData(getKey2, make(map[string]any))
 	if err := db.Get(ctx, getRec2); err != nil {
 		t.Fatalf("Get after Set: %v", err)
 	}
@@ -85,11 +86,11 @@ func TestRecord_MapRoundTrip(t *testing.T) {
 	}
 
 	// Delete.
-	if err := db.Delete(ctx, dal.NewKeyWithID(tbl, "r1")); err != nil {
+	if err := db.Delete(ctx, dalrecord.NewKeyWithID(tbl, "r1")); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	delRec := dal.NewRecordWithData(dal.NewKeyWithID(tbl, "r1"), make(map[string]any))
-	if err := db.Get(ctx, delRec); !dal.IsNotFound(err) {
+	delRec := dalrecord.NewRecordWithData(dalrecord.NewKeyWithID(tbl, "r1"), make(map[string]any))
+	if err := db.Get(ctx, delRec); !dalrecord.IsNotFound(err) {
 		t.Errorf("expected IsNotFound after Delete, got %v", err)
 	}
 }
@@ -120,8 +121,8 @@ func TestRecord_WhereFieldQuery(t *testing.T) {
 	db := openTestDBWithOpts(t, buildOpts(tbl, "id"))
 
 	collRef := dal.NewRootCollectionRef(tbl, "")
-	q := dal.From(&collRef).NewQuery().WhereField("name", dal.Equal, "Alice").SelectIntoRecord(func() dal.Record {
-		return dal.NewRecordWithData(dal.NewKeyWithID(tbl, ""), make(map[string]any))
+	q := dal.From(&collRef).NewQuery().WhereField("name", dal.Equal, "Alice").SelectIntoRecord(func() dalrecord.Record {
+		return dalrecord.NewRecordWithData(dalrecord.NewKeyWithID(tbl, ""), make(map[string]any))
 	})
 
 	reader, err := db.ExecuteQueryToRecordsReader(ctx, q)
@@ -169,21 +170,21 @@ func TestRunReadwriteTransaction(t *testing.T) {
 
 	err := db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
 		// Set a new record.
-		setRec := dal.NewRecordWithData(dal.NewKeyWithID(tbl, "tx1"), map[string]any{
+		setRec := dalrecord.NewRecordWithData(dalrecord.NewKeyWithID(tbl, "tx1"), map[string]any{
 			"name": "TransactionUser",
 		})
 		if err := tx.Set(ctx, setRec); err != nil {
 			return err
 		}
 		// Insert another.
-		insRec := dal.NewRecordWithData(dal.NewKeyWithID(tbl, "tx2"), map[string]any{
+		insRec := dalrecord.NewRecordWithData(dalrecord.NewKeyWithID(tbl, "tx2"), map[string]any{
 			"name": "Inserted",
 		})
 		if err := tx.Insert(ctx, insRec); err != nil {
 			return err
 		}
 		// Delete the pre-inserted record.
-		if err := tx.Delete(ctx, dal.NewKeyWithID(tbl, "del_me")); err != nil {
+		if err := tx.Delete(ctx, dalrecord.NewKeyWithID(tbl, "del_me")); err != nil {
 			return err
 		}
 		return nil
@@ -194,13 +195,13 @@ func TestRunReadwriteTransaction(t *testing.T) {
 
 	// Verify post-transaction state.
 	for _, id := range []string{"tx1", "tx2"} {
-		rec := dal.NewRecordWithData(dal.NewKeyWithID(tbl, id), make(map[string]any))
+		rec := dalrecord.NewRecordWithData(dalrecord.NewKeyWithID(tbl, id), make(map[string]any))
 		if err := db.Get(ctx, rec); err != nil {
 			t.Errorf("Get %q after tx: %v", id, err)
 		}
 	}
-	delRec := dal.NewRecordWithData(dal.NewKeyWithID(tbl, "del_me"), make(map[string]any))
-	if err := db.Get(ctx, delRec); !dal.IsNotFound(err) {
+	delRec := dalrecord.NewRecordWithData(dalrecord.NewKeyWithID(tbl, "del_me"), make(map[string]any))
+	if err := db.Get(ctx, delRec); !dalrecord.IsNotFound(err) {
 		t.Errorf("expected 'del_me' to be deleted, got %v", err)
 	}
 }
