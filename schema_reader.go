@@ -8,12 +8,13 @@ import (
 
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/dalgo/dbschema"
+	dalrecord "github.com/dal-go/record"
 )
 
 // ListCollections returns user-defined tables in the current schema ('public')
-// in alphabetical order. The parent *dal.Key is ignored — Postgres has a flat
+// in alphabetical order. The parent *dalrecord.Key is ignored — Postgres has a flat
 // table namespace within a schema.
-func (d *Database) ListCollections(ctx context.Context, parent *dal.Key) ([]dal.CollectionRef, error) {
+func (d *Database) ListCollections(ctx context.Context, parent *dalrecord.Key) ([]dal.CollectionRef, error) {
 	_ = parent // ignored
 	rows, err := d.sqlDB.QueryContext(ctx,
 		`SELECT table_name

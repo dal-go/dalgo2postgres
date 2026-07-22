@@ -1,9 +1,9 @@
 package dalgo2postgres
 
 import (
-	"strings"
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/dalgo/dbschema"
