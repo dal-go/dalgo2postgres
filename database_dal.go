@@ -15,38 +15,54 @@ var _ dal.DB = (*Database)(nil)
 // --- dal.DB delegation ---
 
 func (d *Database) RunReadonlyTransaction(ctx context.Context, f dal.ROTxWorker, opts ...dal.TransactionOption) error {
-	return d.innerDB.RunReadonlyTransaction(ctx, f, opts...)
+	return d.DB.RunReadonlyTransaction(ctx, f, opts...)
 }
 
 func (d *Database) RunReadwriteTransaction(ctx context.Context, f dal.RWTxWorker, opts ...dal.TransactionOption) error {
-	return d.innerDB.RunReadwriteTransaction(ctx, f, opts...)
+	return d.DB.RunReadwriteTransaction(ctx, f, opts...)
 }
 
 func (d *Database) Get(ctx context.Context, record dalrecord.Record) error {
-	return d.innerDB.Get(ctx, record)
+	return d.DB.Get(ctx, record)
 }
 
 func (d *Database) GetMulti(ctx context.Context, records []dalrecord.Record) error {
-	return d.innerDB.GetMulti(ctx, records)
+	return d.DB.GetMulti(ctx, records)
 }
 
 func (d *Database) Exists(ctx context.Context, key *dalrecord.Key) (bool, error) {
-	return d.innerDB.Exists(ctx, key)
+	return d.DB.Exists(ctx, key)
 }
 
 func (d *Database) ExecuteQueryToRecordsReader(ctx context.Context, query dal.Query) (dal.RecordsReader, error) {
-	return d.innerDB.ExecuteQueryToRecordsReader(ctx, query)
+	return d.DB.ExecuteQueryToRecordsReader(ctx, query)
 }
 
 func (d *Database) ExecuteQueryToRecordsetReader(ctx context.Context, query dal.Query, opts ...recordset.Option) (dal.RecordsetReader, error) {
-	return d.innerDB.ExecuteQueryToRecordsetReader(ctx, query, opts...)
+	return d.DB.ExecuteQueryToRecordsetReader(ctx, query, opts...)
 }
 
 // --- extra write methods delegated from dalgo2sql ---
 
-// writeDB is the extended interface exposed by dalgo2sql's concrete type.
-// Note: UpdateRecord is intentionally excluded — dalgo2sql's database type
-// implements it only on transactions, not on the top-level database object.
+// writeDB is the extended interface exposed by dalgo2sql's concrete backend
+// type. Note: UpdateRecord is intentionally excluded — dalgo2sql's database
+// type implements it only on transactions, not on the top-level database
+// object.
+//
+// None of these methods are part of dal.Backend, and dalgo2sql's backend
+// does not satisfy dal.WriteSession in full at the database level either
+// (it has no database-level InsertMulti or UpdateRecord), so dal.NewDB never
+// wraps it in the validating write pipeline at this level: d.DB's dynamic
+// type has none of these methods at all, and a plain "d.DB.(writeDB)"
+// assertion always fails. dal.As is what recovers the concrete backend that
+// does implement them, via dal.BackendOf — visibly and deliberately, the same
+// way dal.WithoutValidation recovers an unvalidated write session.
+//
+// These direct, non-transactional writes were never run through validation
+// before the sealed dal.DB change either, since dalgo2sql's database-level
+// write path has no BeforeSave call of its own. Writes made through
+// RunReadwriteTransaction above are validated, because that goes through
+// d.DB's own RunReadwriteTransaction.
 type writeDB interface {
 	Set(ctx context.Context, record dalrecord.Record) error
 	SetMulti(ctx context.Context, records []dalrecord.Record) error
@@ -58,36 +74,75 @@ type writeDB interface {
 	UpdateMulti(ctx context.Context, keys []*dalrecord.Key, updates []update.Update, preconditions ...dal.Precondition) error
 }
 
+// backendWriter recovers writeDB from dalgo2sql's concrete backend via
+// dal.As — see the writeDB doc comment above for why a plain assertion
+// against d.DB itself cannot reach it.
+func (d *Database) backendWriter() (writeDB, bool) {
+	return dal.As[writeDB](d.DB)
+}
+
 func (d *Database) Set(ctx context.Context, record dalrecord.Record) error {
-	return d.innerDB.(writeDB).Set(ctx, record)
+	w, ok := d.backendWriter()
+	if !ok {
+		return dal.ErrNotImplementedYet
+	}
+	return w.Set(ctx, record)
 }
 
 func (d *Database) SetMulti(ctx context.Context, records []dalrecord.Record) error {
-	return d.innerDB.(writeDB).SetMulti(ctx, records)
+	w, ok := d.backendWriter()
+	if !ok {
+		return dal.ErrNotImplementedYet
+	}
+	return w.SetMulti(ctx, records)
 }
 
 func (d *Database) Insert(ctx context.Context, record dalrecord.Record, opts ...dal.InsertOption) error {
-	return d.innerDB.(writeDB).Insert(ctx, record, opts...)
+	w, ok := d.backendWriter()
+	if !ok {
+		return dal.ErrNotImplementedYet
+	}
+	return w.Insert(ctx, record, opts...)
 }
 
 func (d *Database) Upsert(ctx context.Context, record dalrecord.Record) error {
-	return d.innerDB.(writeDB).Upsert(ctx, record)
+	w, ok := d.backendWriter()
+	if !ok {
+		return dal.ErrNotImplementedYet
+	}
+	return w.Upsert(ctx, record)
 }
 
 func (d *Database) Delete(ctx context.Context, key *dalrecord.Key) error {
-	return d.innerDB.(writeDB).Delete(ctx, key)
+	w, ok := d.backendWriter()
+	if !ok {
+		return dal.ErrNotImplementedYet
+	}
+	return w.Delete(ctx, key)
 }
 
 func (d *Database) DeleteMulti(ctx context.Context, keys []*dalrecord.Key) error {
-	return d.innerDB.(writeDB).DeleteMulti(ctx, keys)
+	w, ok := d.backendWriter()
+	if !ok {
+		return dal.ErrNotImplementedYet
+	}
+	return w.DeleteMulti(ctx, keys)
 }
 
 func (d *Database) Update(ctx context.Context, key *dalrecord.Key, updates []update.Update, preconditions ...dal.Precondition) error {
-	return d.innerDB.(writeDB).Update(ctx, key, updates, preconditions...)
+	w, ok := d.backendWriter()
+	if !ok {
+		return dal.ErrNotImplementedYet
+	}
+	return w.Update(ctx, key, updates, preconditions...)
 }
 
 func (d *Database) UpdateMulti(ctx context.Context, keys []*dalrecord.Key, updates []update.Update, preconditions ...dal.Precondition) error {
-	return d.innerDB.(writeDB).UpdateMulti(ctx, keys, updates, preconditions...)
+	w, ok := d.backendWriter()
+	if !ok {
+		return dal.ErrNotImplementedYet
+	}
+	return w.UpdateMulti(ctx, keys, updates, preconditions...)
 }
 
 // UpdateRecord is not supported at the database level by dalgo2sql; use
