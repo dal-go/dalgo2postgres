@@ -22,10 +22,14 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib" // register the "pgx" driver (pure Go, CGO_ENABLED=0)
 )
 
-// Database is the dalgo2postgres driver instance. It implements
-// [dal.DB] by delegating to an inner [dal.DB] obtained from
-// [dalgo2sql.NewDatabase], and adds PostgreSQL-specific dbschema, ddl,
-// and concurrency surfaces.
+// Database is the dalgo2postgres driver instance. It implements [dal.DB] by
+// embedding a [dal.DB] obtained from [dalgo2sql.NewDatabase], and adds
+// PostgreSQL-specific dbschema, ddl, and concurrency surfaces.
+//
+// The embedded dal.DB (rather than a named field) is what lets Database
+// satisfy dal.DB itself: dal.DB is sealed by an unexported marker method,
+// and embedding is the only way for that method to be promoted onto a
+// decorating type — see dal.NewDB's doc comment.
 //
 // Construct via [NewDatabase]. Database values are safe for concurrent
 // use — the underlying PostgreSQL server and pgx connection pool both
@@ -33,9 +37,9 @@ import (
 type Database struct {
 	dal.ConcurrencyAvailable // SupportsConcurrentConnections() = true
 
-	innerDB dal.DB  // delegate for the dal.DB surface
-	sqlDB   *sql.DB // direct handle for DDL + introspection queries
-	dsn     string  // remembered for diagnostics
+	dal.DB         // delegate for the dal.DB surface
+	sqlDB  *sql.DB // direct handle for DDL + introspection queries
+	dsn    string  // remembered for diagnostics
 }
 
 // NewDatabase opens a connection to the PostgreSQL server identified by dsn
@@ -80,9 +84,9 @@ func NewDatabaseWithOptions(dsn string, schema dal.Schema, opts dalgo2sql.DbOpti
 	}
 	innerDB := dalgo2sql.NewDatabase(sqlDB, schema, opts)
 	return &Database{
-		innerDB: innerDB,
-		sqlDB:   sqlDB,
-		dsn:     dsn,
+		DB:    innerDB,
+		sqlDB: sqlDB,
+		dsn:   dsn,
 	}, nil
 }
 
@@ -96,8 +100,18 @@ func (d *Database) Close() error {
 	return d.sqlDB.Close()
 }
 
+// SupportsConcurrentConnections reports PostgreSQL's own concurrency
+// behaviour (always true — see dal.ConcurrencyAvailable), not dalgo2sql's.
+// An explicit method is required here: dal.ConcurrencyAvailable and the
+// embedded dal.DB (whose Backend requirement embeds dal.ConcurrencyAware)
+// both declare this method at the same promotion depth, which Go otherwise
+// treats as an ambiguous selector.
+func (d *Database) SupportsConcurrentConnections() bool {
+	return d.ConcurrencyAvailable.SupportsConcurrentConnections()
+}
+
 // ID returns the driver-issued database ID (delegated to dalgo2sql).
-func (d *Database) ID() string { return d.innerDB.ID() }
+func (d *Database) ID() string { return d.DB.ID() }
 
 // Adapter returns the driver/version identifier.
 func (d *Database) Adapter() dal.Adapter {
@@ -105,7 +119,7 @@ func (d *Database) Adapter() dal.Adapter {
 }
 
 // Schema returns the dal-level Schema (delegated to dalgo2sql).
-func (d *Database) Schema() dal.Schema { return d.innerDB.Schema() }
+func (d *Database) Schema() dal.Schema { return d.DB.Schema() }
 
 // Version is the dalgo2postgres package version. Updated by hand on
 // each release; consumed by Adapter.Version().
