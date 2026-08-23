@@ -18,3 +18,54 @@ jobs:
     with:
       cgo_enabled: false
       disable-version-bumping: true
+
+  # Runs the shared dalgotest conformance suite against a real PostgreSQL.
+  #
+  # This lives here rather than in strongo/cicd on purpose: service containers
+  # cannot be passed into a reusable workflow by its caller, and `services:`
+  # cannot be made conditional — putting Postgres there would impose a database
+  # container on every fleet repo that uses the shared workflow.
+  #
+  # No test code needed changing: the DB-backed tests already skip unless
+  # DALGO2POSTGRES_TEST_DSN is set, and TestConformance creates and drops its
+  # own table, so a running server and a DSN are the whole requirement.
+  integration:
+    name: Conformance (PostgreSQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: dalgo_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go test (with a live PostgreSQL)
+        # `go test` prints "ok" for a package whose tests all SKIPPED, so a
+        # green job here would not by itself prove the conformance suite ran —
+        # which is exactly the vacuously-green outcome this job exists to
+        # prevent. Run verbose and assert on the result line.
+        run: |
+          set -o pipefail
+          go test -race -v ./... 2>&1 | tee /tmp/gotest.log
+          if grep -qE '^\s*--- SKIP: TestConformance' /tmp/gotest.log; then
+            echo "::error::TestConformance SKIPPED - the DSN did not reach the tests"
+            exit 1
+          fi
+          if ! grep -qE '^\s*--- PASS: TestConformance' /tmp/gotest.log; then
+            echo "::error::TestConformance did not run"
+            exit 1
+          fi
+        env:
+          DALGO2POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/dalgo_test?sslmode=disable
