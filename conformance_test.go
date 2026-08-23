@@ -13,11 +13,10 @@ import (
 // DALGO2POSTGRES_TEST_DSN (see testDSN in database_test.go) and skips when
 // that is not set.
 //
-// This repo has no CI service container wired up for PostgreSQL, so as of
-// this change the suite has been exercised locally only where
-// DALGO2POSTGRES_TEST_DSN happened to be set — it has not been run in CI.
-// Wiring a PostgreSQL service container into .github/workflows/ci.yml is a
-// separate follow-up.
+// CI runs this for real: the `integration` job in .github/workflows/ci.yml
+// brings up a PostgreSQL service container and sets DALGO2POSTGRES_TEST_DSN,
+// so the suite is exercised on every pull request rather than only wherever a
+// developer happened to have a DSN exported.
 func TestConformance(t *testing.T) {
 	tbl := uniqueTable(t, "conformance")
 	opts := dalgo2sql.DbOptions{
