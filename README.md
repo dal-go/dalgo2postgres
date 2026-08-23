@@ -86,6 +86,33 @@ SQL emitted through `dalgo2sql` uses the correct form. This field was added to
 `dalgo2sql` as a minimal backward-compatible extension; the zero value
 (`PlaceholderQuestion`) preserves the existing behavior for all other drivers.
 
+### Duplicate-key classification
+
+`record.ErrRecordExists` / `record.IsAlreadyExists` let callers detect an
+`Insert` over an existing key without depending on driver-specific error
+types or message text. `dalgo2sql` owns the wrapping (it applies
+`fmt.Errorf("%w: %w", record.ErrRecordExists, err)` at its single
+`execInsert` choke point, covering `Insert`, `InsertMulti`, and their
+transactional variants) but delegates the one question only a driver knows
+the answer to — is this particular error a unique-key violation? — to
+`dalgo2sql.DbOptions.IsAlreadyExists`.
+
+`dalgo2postgres` supplies that hook: `NewDatabase` and
+`NewDatabaseWithOptions` default `DbOptions.IsAlreadyExists` to
+`dalgo2postgres.IsAlreadyExists` whenever the caller leaves it nil (a
+caller-supplied hook is never overridden). It reports true when the error is
+a `*pgconn.PgError` (from `github.com/jackc/pgx/v5/pgconn`, the driver this
+package uses) whose `Code` is the PostgreSQL SQLSTATE `23505`
+(`unique_violation`) — matched on the SQLSTATE code via `errors.As`, never
+the error message. Sibling class-23 codes such as `23503`
+(`foreign_key_violation`) and `23514` (`check_violation`) are integrity
+violations but not duplicate keys, and are deliberately reported as false.
+
+`dalgo2postgres.IsAlreadyExists` is exported so callers who construct their
+own `dalgo2sql.DbOptions` directly (e.g. calling `dalgo2sql.NewDatabase`
+themselves) can reuse it instead of rewriting the same `*pgconn.PgError`
+check.
+
 ### Identifier case folding
 
 PostgreSQL folds unquoted identifiers to lower case. `dalgo2postgres` quotes
