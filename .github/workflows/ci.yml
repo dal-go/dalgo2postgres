@@ -52,6 +52,20 @@ jobs:
         with:
           go-version-file: go.mod
       - name: go test (with a live PostgreSQL)
-        run: go test -race ./...
+        # `go test` prints "ok" for a package whose tests all SKIPPED, so a
+        # green job here would not by itself prove the conformance suite ran —
+        # which is exactly the vacuously-green outcome this job exists to
+        # prevent. Run verbose and assert on the result line.
+        run: |
+          set -o pipefail
+          go test -race -v ./... 2>&1 | tee /tmp/gotest.log
+          if grep -qE '^\s*--- SKIP: TestConformance' /tmp/gotest.log; then
+            echo "::error::TestConformance SKIPPED - the DSN did not reach the tests"
+            exit 1
+          fi
+          if ! grep -qE '^\s*--- PASS: TestConformance' /tmp/gotest.log; then
+            echo "::error::TestConformance did not run"
+            exit 1
+          fi
         env:
           DALGO2POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/dalgo_test?sslmode=disable
