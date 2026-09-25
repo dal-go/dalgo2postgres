@@ -159,12 +159,17 @@ func describeCollectionImpl(ctx context.Context, db *sql.DB, name string) (*dbsc
 	if err != nil {
 		return nil, err
 	}
+	foreignKeys, err := readForeignKeys(ctx, db, name)
+	if err != nil {
+		return nil, err
+	}
 
 	return &dbschema.CollectionDef{
-		Name:       name,
-		Fields:     fields,
-		PrimaryKey: pk,
-		Indexes:    indexes,
+		Name:        name,
+		Fields:      fields,
+		PrimaryKey:  pk,
+		Indexes:     indexes,
+		ForeignKeys: foreignKeys,
 	}, nil
 }
 
