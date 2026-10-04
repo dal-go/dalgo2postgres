@@ -13,6 +13,12 @@ on:
 # tag (strongo/cicd go_bump) and must complete for every merge. The literal
 # `true` below only ever applies to pull_request groups, which are keyed by
 # pull request number.
+#
+# Do not re-run an older main run after a later merge has been tagged: the
+# shared go_bump job tags the highest existing tag plus one onto the commit it
+# runs for, not the newest commit, so the older commit would be tagged last and
+# `go get @latest` would resolve to it. The fix belongs in strongo/cicd (skip
+# the tag when the previous tag is not an ancestor of HEAD) and is not made here.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || format('{0}-{1}', github.ref, github.sha) }}
   cancel-in-progress: true
@@ -35,12 +41,15 @@ jobs:
       cgo_enabled: false
       code_coverage: true
       # Backstop floor. This job runs without a database, so the DB-backed
-      # tests skip here; the real floor is in the integration job below.
-      # Measured on this branch's head (go test ./... -coverprofile, CI log
-      # "Total coverage: 7.6%"), rounded down. Deleting version_test.go drops
-      # the total to 4.5%, below this floor. Must rise with every pull request
-      # of the PostgreSQL wave; never lower it.
-      min_test_coverage_percent: 7
+      # tests skip here and only the unit and sqlmock tests count; the real
+      # floor is in the integration job below. Measured on this branch's head
+      # (`go test -count=1 -cover ./...`): 62.6%, rounded down. With both
+      # version tests skipped (-skip 'TestResolveVersion|TestAdapterReportsVersion')
+      # the total is 61.0%, below this floor, so deleting version_test.go fails
+      # here. Skipping only TestAdapterReportsVersion leaves 62.5%, which passes:
+      # this floor does not protect that one test. Must rise with every pull
+      # request of the PostgreSQL wave; never lower it.
+      min_test_coverage_percent: 62
 
   # Runs the shared dalgotest conformance suite against a real PostgreSQL.
   #
@@ -88,6 +97,18 @@ jobs:
           fi
           if ! grep -qE '^\s*--- PASS: TestConformance' /tmp/gotest.log; then
             echo "::error::TestConformance did not run"
+            exit 1
+          fi
+          # The schema-reader integration tests skip on their own when the DSN
+          # does not reach them, and a skip leaves the job green. Match the
+          # prefix, not the names, so a new TestSchemaReaderIntegration_ test
+          # is covered without touching this guard.
+          if grep -qE '^\s*--- SKIP: TestSchemaReaderIntegration_' /tmp/gotest.log; then
+            echo "::error::a TestSchemaReaderIntegration_ test SKIPPED - the DSN did not reach the tests"
+            exit 1
+          fi
+          if ! grep -qE '^\s*--- PASS: TestSchemaReaderIntegration_' /tmp/gotest.log; then
+            echo "::error::no TestSchemaReaderIntegration_ test ran"
             exit 1
           fi
         env:

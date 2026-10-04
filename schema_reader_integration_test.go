@@ -259,8 +259,8 @@ func TestSchemaReaderIntegration_SecondSchemaIsKeptApart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(viaFirst) != 1 || viaFirst[0].Collection.Name() != "Tour" {
-		t.Errorf("qualified ListReferrers through the first schema = %+v, want Tour from the second schema", viaFirst)
+	if len(viaFirst) != 1 || viaFirst[0].Collection.Name() != "Tour" || viaFirst[0].Collection.Schema() != second {
+		t.Errorf("qualified ListReferrers through the first schema = %+v, want Tour in schema %q", viaFirst, second)
 	}
 	qualifiedTour := dal.NewQualifiedRootCollectionRef(second, "Tour", "")
 	if constraints, err := db1.ListConstraints(ctx, &qualifiedTour); err != nil || len(constraints) != 2 {

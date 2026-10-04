@@ -48,19 +48,22 @@ func (d *Database) ListCollections(ctx context.Context, parent *dalrecord.Key) (
 // jsonb, arrays, enums, interval, inet, money, ...) is reported as a String
 // field rather than failing the whole table.
 func (d *Database) DescribeCollection(ctx context.Context, ref *dal.CollectionRef) (*dbschema.CollectionDef, error) {
-	return describeCollectionImpl(ctx, d.sqlDB, d.schemaFor(ref), d.resolveName(ref.Name()))
+	name := d.resolveName(ref.Name())
+	return describeCollectionImpl(ctx, d.sqlDB, d.schemaFor(ref), name, collectionLabel(ref.Schema(), name))
 }
 
 // ListIndexes returns the non-primary-key indexes on the named table via
 // pg_indexes, from the schema the reference names, else the configured schema.
 func (d *Database) ListIndexes(ctx context.Context, ref *dal.CollectionRef) ([]dbschema.IndexDef, error) {
-	return listIndexesImpl(ctx, d.sqlDB, d.schemaFor(ref), d.resolveName(ref.Name()))
+	name := d.resolveName(ref.Name())
+	return listIndexesImpl(ctx, d.sqlDB, d.schemaFor(ref), name, collectionLabel(ref.Schema(), name))
 }
 
 // ---- DescribeCollection impl ----
 
 // describeCollectionImpl is the inner reader, factored so tests can reuse it.
-func describeCollectionImpl(ctx context.Context, db *sql.DB, schema, name string) (*dbschema.CollectionDef, error) {
+// label names the collection in error messages (see [collectionLabel]).
+func describeCollectionImpl(ctx context.Context, db *sql.DB, schema, name, label string) (*dbschema.CollectionDef, error) {
 	// 1. Confirm the table or view exists.
 	var found string
 	probeErr := db.QueryRowContext(ctx,
@@ -69,10 +72,10 @@ func describeCollectionImpl(ctx context.Context, db *sql.DB, schema, name string
 		schema, name,
 	).Scan(&found)
 	if probeErr == sql.ErrNoRows {
-		return nil, newCollectionNotFoundError(name)
+		return nil, newCollectionNotFoundError(label)
 	}
 	if probeErr != nil {
-		return nil, fmt.Errorf("dalgo2postgres: DescribeCollection probe %q: %w", name, probeErr)
+		return nil, fmt.Errorf("dalgo2postgres: DescribeCollection probe %s: %w", label, probeErr)
 	}
 
 	// 2. Enumerate primary key columns.
@@ -156,7 +159,7 @@ func describeCollectionImpl(ctx context.Context, db *sql.DB, schema, name string
 		pk[i] = dal.FieldName(c)
 	}
 
-	indexes, err := listIndexesImpl(ctx, db, schema, name)
+	indexes, err := listIndexesImpl(ctx, db, schema, name, label)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +210,8 @@ func listPrimaryKeyColumns(ctx context.Context, db *sql.DB, schema, table string
 // ---- ListIndexes impl ----
 
 // listIndexesImpl returns non-primary-key indexes on the table via pg_indexes.
-func listIndexesImpl(ctx context.Context, db *sql.DB, schema, name string) ([]dbschema.IndexDef, error) {
+// label names the collection in error messages (see [collectionLabel]).
+func listIndexesImpl(ctx context.Context, db *sql.DB, schema, name, label string) ([]dbschema.IndexDef, error) {
 	// pg_indexes holds precomputed indexdef DDL. We exclude indexes that are
 	// the backing store for PRIMARY KEY constraints by joining to pg_constraint.
 	rows, err := db.QueryContext(ctx,
@@ -229,7 +233,7 @@ func listIndexesImpl(ctx context.Context, db *sql.DB, schema, name string) ([]db
 		schema, name,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("dalgo2postgres: listIndexesImpl %q: %w", name, err)
+		return nil, fmt.Errorf("dalgo2postgres: listIndexesImpl %s: %w", label, err)
 	}
 	defer func() { _ = rows.Close() }()
 

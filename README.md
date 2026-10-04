@@ -74,7 +74,19 @@ below), and record operations (`Get`, `Insert`, queries) address tables as
 `search_path`.
 
 `ListReferrers` returns one `Referrer` per foreign key, with the referencing
-columns in key order.
+columns in key order. A table with two foreign keys into the queried table is
+therefore two entries with the same `Collection` (a `Referrer` carries no
+constraint name); callers that want one entry per table group by
+`Collection.Name()`. When the queried reference names its schema, each
+referrer's `Collection` names it too, so passing it back to `DescribeCollection`
+reads the table that was found.
+
+Error messages name the collection (`"sales"."Album"` when the reference named
+its schema) and never contain a connection string. A failure to connect names
+only the host and the database name; the user, password, port and any other
+part of the DSN are removed from the driver's error text, and a DSN that cannot
+be parsed is not named at all. `errors.Is` and `errors.As` still reach the
+driver's own error through `Unwrap`, so do not print the unwrapped error.
 
 A column whose type has no `dbschema.Type` (uuid, json, jsonb, arrays, enums,
 interval, inet, money, ...) is described as a `String` field; it never fails the

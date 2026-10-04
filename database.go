@@ -17,7 +17,6 @@ package dalgo2postgres
 import (
 	"context"
 	"database/sql"
-	"fmt"
 
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/dalgo2sql"
@@ -86,15 +85,34 @@ func NewDatabaseWithOptions(dsn string, schema dal.Schema, opts dalgo2sql.DbOpti
 	}
 	applyPostgresDbOptionDefaults(&opts)
 
-	sqlDB, err := sql.Open("pgx", dsn)
+	sqlDB, err := openVerified(dsn, sql.Open)
 	if err != nil {
-		return nil, fmt.Errorf("dalgo2postgres: sql.Open(%q): %w", dsn, err)
+		return nil, err
+	}
+	return newDatabaseFromSQL(sqlDB, dsn, schema, opts, options), nil
+}
+
+// sqlOpener is [sql.Open]; it is a seam so tests can make the driver fail.
+type sqlOpener func(driverName, dataSourceName string) (*sql.DB, error)
+
+// openVerified opens dsn through open and pings it. No part of the connection
+// string other than the host and the database name reaches an error's text: a
+// DSN that cannot be parsed is named not at all, and the driver's own error
+// text, which may echo the string, is redacted (see [connectionError]).
+func openVerified(dsn string, open sqlOpener) (*sql.DB, error) {
+	details := inspectDSN(dsn)
+	if !details.parsed {
+		return nil, details.unparsable()
+	}
+	sqlDB, err := open("pgx", dsn)
+	if err != nil {
+		return nil, details.wrap("sql.Open", err)
 	}
 	if pingErr := sqlDB.PingContext(context.Background()); pingErr != nil {
 		_ = sqlDB.Close()
-		return nil, fmt.Errorf("dalgo2postgres: PingContext(%q): %w", dsn, pingErr)
+		return nil, details.wrap("PingContext", pingErr)
 	}
-	return newDatabaseFromSQL(sqlDB, dsn, schema, opts, options), nil
+	return sqlDB, nil
 }
 
 // Close closes the underlying *sql.DB. After Close the Database value

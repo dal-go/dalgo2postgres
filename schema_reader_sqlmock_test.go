@@ -249,6 +249,10 @@ func TestDescribeCollection_MockedMissingTable(t *testing.T) {
 	if got != nil || err == nil || !strings.Contains(err.Error(), "not found") || !strings.Contains(err.Error(), "Nope") {
 		t.Fatalf("got %v, %v; want nil and a not-found error naming Nope", got, err)
 	}
+	// A schema that only came from configuration is not repeated.
+	if want := `dalgo2postgres: collection "Nope" not found`; err.Error() != want {
+		t.Errorf("err = %q, want %q", err, want)
+	}
 }
 
 func TestDescribeCollection_FailureAtEveryStage(t *testing.T) {
@@ -458,6 +462,33 @@ func TestQualifiedReference_SchemaOnTheReferenceIsHonoured(t *testing.T) {
 		mock.ExpectQuery(qProbe).WithArgs("sales", "Album").WillReturnError(sql.ErrNoRows)
 		if got, err := d.DescribeCollection(context.Background(), &ref); got != nil || err == nil || !strings.Contains(err.Error(), "not found") {
 			t.Fatalf("got %v, %v; want not found", got, err)
+		} else if !strings.Contains(err.Error(), `collection "sales"."Album" not found`) {
+			t.Errorf("err = %q, want it to name the schema that was searched", err)
+		}
+	})
+	t.Run("errors name the schema of the reference", func(t *testing.T) {
+		boom := errors.New("boom")
+		want := `"sales"."Album"`
+		d, mock := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
+		mock.ExpectQuery(qProbe).WillReturnError(boom)
+		_, err := d.DescribeCollection(context.Background(), &ref)
+		if err == nil || !strings.Contains(err.Error(), "probe "+want) {
+			t.Errorf("DescribeCollection probe: err = %v, want %s", err, want)
+		}
+		d, mock = newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
+		mock.ExpectQuery(`pg_indexes`).WillReturnError(boom)
+		if _, err = d.ListIndexes(context.Background(), &ref); err == nil || !strings.Contains(err.Error(), "listIndexesImpl "+want) {
+			t.Errorf("ListIndexes: err = %v, want %s", err, want)
+		}
+		d, mock = newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
+		mock.ExpectQuery(`table_constraints`).WillReturnError(boom)
+		if _, err = d.ListConstraints(context.Background(), &ref); err == nil || !strings.Contains(err.Error(), "ListConstraints "+want) {
+			t.Errorf("ListConstraints: err = %v, want %s", err, want)
+		}
+		d, mock = newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
+		mock.ExpectQuery(`referrer_table`).WillReturnError(boom)
+		if _, err = d.ListReferrers(context.Background(), &ref); err == nil || !strings.Contains(err.Error(), "ListReferrers "+want) {
+			t.Errorf("ListReferrers: err = %v, want %s", err, want)
 		}
 	})
 	t.Run("ListIndexes", func(t *testing.T) {
@@ -479,9 +510,16 @@ func TestQualifiedReference_SchemaOnTheReferenceIsHonoured(t *testing.T) {
 	t.Run("ListReferrers", func(t *testing.T) {
 		d, mock := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
 		mock.ExpectQuery(`referrer_table`).WithArgs("sales", "Album").
-			WillReturnRows(sqlmock.NewRows([]string{"oid", "referrer_table", "referrer_col"}))
-		if _, err := d.ListReferrers(context.Background(), &ref); err != nil {
+			WillReturnRows(sqlmock.NewRows([]string{"oid", "referrer_table", "referrer_col"}).AddRow(int64(1), "Track", "AlbumId"))
+		got, err := d.ListReferrers(context.Background(), &ref)
+		if err != nil {
 			t.Fatalf("ListReferrers: %v", err)
+		}
+		// The referrer lives in the schema of the queried reference, and says so:
+		// handed back to the reader it must address that table, not a same-named
+		// one in the configured schema.
+		if len(got) != 1 || got[0].Collection.Name() != "Track" || got[0].Collection.Schema() != "sales" {
+			t.Errorf("referrers = %+v, want Track in schema sales", got)
 		}
 	})
 }

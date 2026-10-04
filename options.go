@@ -46,6 +46,13 @@ func (m IdentifierMode) valid() bool {
 }
 
 // Option customises how a [Database] reads its schema.
+//
+// An option must be free of side effects and must only set fields of the
+// Database it is given: the constructors apply every option twice, first to a
+// zero Database (to reject an invalid set before any connection is attempted,
+// when the embedded dal.DB is still nil), then to the real one. An option that
+// touches anything else, or that does something observable when it runs, would
+// run twice and, the first time, against a Database that has no connection.
 type Option func(*Database)
 
 // WithSchema makes the schema reader inspect the named PostgreSQL schema
