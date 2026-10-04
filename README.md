@@ -86,16 +86,24 @@ its schema) and never contain a connection string.
 
 Connection strings and errors. At construction, a failure to connect names at
 most the host and the database name; the user, password, port and any other part
-of the DSN are removed from the driver's error text. Nothing is named when the
-string cannot be read with confidence: a string that cannot be parsed, or a URL
-whose password was not percent-encoded and so splits at a `/`, `?` or `#` (write
-`p%2Fss`, not `p/ss`). A configuration registered with
+of the DSN are removed from the driver's error text (a credential shorter than
+four bytes only where it stands alone, so it cannot garble the text). Nothing is
+named when the string cannot be read with confidence: a string that cannot be
+parsed (the error also covers a file or service the string names and the driver
+cannot read), or a URL whose password was not percent-encoded and so splits at a
+`/` or `#` (write `p%2Fss`, not `p/ss`). A string the driver would misread is
+refused before any connection is attempted, with an error that names nothing: a
+URL in literal quotes (as `docker --env-file` keeps them), with a leading space,
+in capitals or with another scheme (`postgresql+psycopg2://`), or with an
+unencoded `?` in the password. The driver takes such a string for `key=value`
+pairs and makes the text before the first `=` a setting name, which holds the
+credentials and which a server repeats. A configuration registered with
 `stdlib.RegisterConnConfig` is passed to the driver as before. `errors.Is` and
 `errors.As` still reach the driver's own error through `Unwrap` (except for a
-string that cannot be parsed, whose error carries no cause), so do not print the
-unwrapped error. This covers construction only: a later failure to connect (the
-pool opening a new connection, a dropped connection) comes from the driver
-without redaction and may name the database user, never the password.
+string that cannot be parsed or is refused, whose error carries no cause), so do
+not print the unwrapped error. This covers construction only: a later failure to
+connect (the pool opening a new connection, a dropped connection) comes from the
+driver without redaction and may name the database user, never the password.
 
 A column whose type has no `dbschema.Type` (uuid, json, jsonb, arrays, enums,
 interval, inet, money, ...) is described as a `String` field; it never fails the

@@ -43,11 +43,11 @@ jobs:
       # Backstop floor. This job runs without a database, so the DB-backed
       # tests skip here and only the unit and sqlmock tests count; the real
       # floor is in the integration job below. Measured on this branch's head
-      # (`go test -count=1 -cover ./...`): 65.9%. The floor stays at 62: the
+      # (`go test -count=1 -cover ./...`): 66.3%. The floor stays at 62: the
       # margin is wide enough for a pull request that adds code only a live
       # server tests. With both version tests skipped
       # (-skip 'TestResolveVersion|TestAdapterReportsVersion') the total is
-      # 64.4%, and with only TestAdapterReportsVersion skipped 65.8%, so this
+      # 64.8%, and with only TestAdapterReportsVersion skipped 66.1%, so this
       # floor does not protect the version tests; raise it to 65 once the
       # wave's remaining pull requests have landed, to make it do so. Must rise
       # with the PostgreSQL wave; never lower it.
@@ -117,9 +117,11 @@ jobs:
           DALGO2POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/dalgo_test?sslmode=disable
       - name: Integration coverage floor
         # The floor that matters: this is the only job where the database
-        # tests run. Measured on this branch's head (CI log "Integration
-        # coverage: 85.7%" before the connection-error tests of this change),
-        # rounded down. Must rise with the PostgreSQL wave; never lower it.
+        # tests run. Measured on this branch's head before the review fixes of
+        # round 2 (CI log "Integration coverage: 87.0%"). The floor sits 2 points
+        # under that, to leave room for the remaining pull requests of the wave;
+        # raise it to the measured value, rounded down, once the wave has
+        # landed. Must rise with the PostgreSQL wave; never lower it.
         run: |
           total=$(go tool cover -func=profile.cov | awk '$1 == "total:" {print $3}' | sed 's/%//')
           echo "Integration coverage: $total%"

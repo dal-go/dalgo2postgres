@@ -98,11 +98,18 @@ type sqlOpener func(driverName, dataSourceName string) (*sql.DB, error)
 // string other than the host and the database name reaches an error's text: a
 // DSN that cannot be read with confidence is named not at all, and the driver's
 // own error text, which may echo the string, is redacted (see [connectionError]).
+// A string the driver would misread (a quoted URL, a leading space, another
+// scheme) is refused before the driver is asked, with an error that names
+// nothing: the text the driver takes for a setting name holds the credentials,
+// and a server repeats it.
 //
 // The driver is asked even when pgx cannot parse dsn: the string may be a name
 // registered with stdlib.RegisterConnConfig, which only the driver knows.
 func openVerified(dsn string, open sqlOpener) (*sql.DB, error) {
 	details := inspectDSN(dsn)
+	if details.refusal != nil {
+		return nil, details.refusal
+	}
 	sqlDB, err := open("pgx", dsn)
 	if err != nil {
 		return nil, details.wrap("sql.Open", err)

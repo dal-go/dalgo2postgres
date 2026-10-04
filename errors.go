@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -51,8 +52,26 @@ func (e *connectionError) Unwrap() error { return e.cause }
 
 // errUnparsable is the error for a connection string the driver cannot parse.
 // It names nothing and carries no cause: the driver's parse error holds the
-// whole string, and offers errors.Is and errors.As nothing else.
-var errUnparsable = errors.New("dalgo2postgres: the connection string cannot be parsed")
+// whole string, and offers errors.Is and errors.As nothing else. The driver also
+// reports a file or a service the string names, and cannot find, as a parse
+// error; the text says so rather than blame the syntax.
+var errUnparsable = errors.New("dalgo2postgres: the connection string cannot be parsed, or a file or service it names cannot be read")
+
+// errMisread is the error for a connection string the driver accepts but reads
+// as something else than was meant: it takes the string for key=value pairs and
+// the text before the first equals sign, which holds the user, the password and
+// the host, for the name of a setting. Such a string never connects as meant,
+// and connecting would send that name to whatever server the driver reaches,
+// which repeats it in its error. It names nothing and carries no cause.
+var errMisread = errors.New("dalgo2postgres: the connection string is not read as intended: " +
+	"a URL must start with exactly postgres:// or postgresql:// (no quotes, no leading space, no other scheme), " +
+	"and a password with a special character must be percent-encoded")
+
+// settingName is the spelling of a setting a server accepts: a plain name, with
+// dots for a custom setting of an extension.
+var settingName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.]*$`)
+
+func isSettingName(key string) bool { return settingName.MatchString(key) }
 
 // credentialSettings are the settings whose values are removed wherever they
 // appear in driver text, as substrings. Every other setting value (the port, a
@@ -67,6 +86,7 @@ var credentialSettings = map[string]bool{
 // string in error text. Only the host and the database name may be named, and
 // only when the string can be read with confidence.
 type dsnDetails struct {
+	refusal error    // set when the string is misread: it must not reach the driver
 	parsed  bool     // pgx could parse the string
 	target  string   // `host "h", database "d"`, or the part of it that may be named
 	secrets []string // removed wherever they appear
@@ -75,12 +95,19 @@ type dsnDetails struct {
 
 // inspectDSN reads dsn the way the driver does. It never fails: for a string the
 // driver cannot parse (a name registered with stdlib.RegisterConnConfig, or
-// garbage) nothing is named and the whole string is the only secret known.
+// garbage) nothing is named and the whole string is the only secret known. A
+// string the driver parses into a setting whose name is not a plain name is
+// misread (see [errMisread]): the details carry a refusal.
 func inspectDSN(dsn string) dsnDetails {
 	details := dsnDetails{secrets: []string{dsn}}
 	cfg, err := pgx.ParseConfig(dsn)
 	if err != nil {
 		return details
+	}
+	for key := range cfg.RuntimeParams {
+		if !isSettingName(key) {
+			return dsnDetails{refusal: errMisread}
+		}
 	}
 	details.parsed = true
 	details.secrets = append(details.secrets, cfg.User, cfg.Password)
@@ -127,15 +154,17 @@ func isNameable(value, banned string) bool {
 
 // isMisSplitURL reports whether a URL connection string is read by net/url in a
 // way that cannot be trusted. A password that is not percent-encoded and holds
-// a slash, a question mark or a number sign ends the authority early: the user
-// name becomes the host, and the rest of the password and the real host become
-// the database, the query or the fragment.
+// a slash or a number sign ends the authority early: the user name becomes the
+// host, and the rest of the password and the real host become the database or
+// the fragment. (A question mark does the same into the query, and pgx then
+// reads the query as a setting with a misspelt name: see [errMisread].) The
+// path is read as written: a correctly encoded %40 is not an at sign.
 func isMisSplitURL(dsn string) bool {
 	if !isURL(dsn) {
 		return false
 	}
 	u, err := url.Parse(dsn)
-	return err != nil || strings.Contains(dsn, "#") || strings.Contains(u.Path+u.RawQuery, "@")
+	return err != nil || strings.Contains(dsn, "#") || strings.Contains(u.EscapedPath()+u.RawQuery, "@")
 }
 
 func isURL(dsn string) bool {
@@ -186,32 +215,87 @@ func (d dsnDetails) wrap(op string, cause error) error {
 		where = " (" + d.target + ")"
 	}
 	return &connectionError{
-		msg:   fmt.Sprintf("dalgo2postgres: %s%s: %s", op, where, redactTokens(redact(cause.Error(), secrets), tokens)),
+		msg:   fmt.Sprintf("dalgo2postgres: %s%s: %s", op, where, scrub(cause.Error(), secrets, tokens)),
 		cause: cause,
 	}
 }
 
-// redact replaces each secret, in its plain and its URL-escaped spelling, with
-// [redactedMark]. Longer secrets are replaced first so that one containing
-// another is not left half visible.
-func redact(text string, secrets []string) string {
-	var forms []string
+// shortestSubstringSecret is the length from which a credential is removed
+// wherever it appears. A shorter one (a user "t", a password "e") occurs inside
+// nearly every word of the driver's text, and is removed only where it stands
+// alone, like a port.
+const shortestSubstringSecret = 4
+
+// scrubForm is a value to remove from error text.
+type scrubForm struct {
+	value string
+	whole bool // removed only where it is not part of a word
+}
+
+// scrub replaces secrets and tokens in text with [redactedMark], in one pass: a
+// mark that was inserted is never scanned again, so no value, however short or
+// like the mark itself, can rewrite one. A secret is removed in its plain and
+// its URL-escaped spelling, wherever it appears, unless it is shorter than
+// [shortestSubstringSecret]; a token, and such a short secret, only where the
+// characters on both sides of it are not part of a word (letters, digits, dot,
+// underscore, hyphen), for a value that starts or ends with a word character.
+// At each position the longest value wins.
+//
+// A credential that is a word of the driver's text ("error") is removed from
+// every sentence it occurs in, which tells a reader that it is gone. That oracle
+// is inherent to removing a value by its text, and accepted.
+func scrub(text string, secrets, tokens []string) string {
+	var forms []scrubForm
 	for _, secret := range secrets {
 		if secret == "" {
 			continue
 		}
-		forms = append(forms, secret)
+		whole := len(secret) < shortestSubstringSecret
+		forms = append(forms, scrubForm{secret, whole})
 		for _, escaped := range []string{url.QueryEscape(secret), url.PathEscape(secret)} {
 			if escaped != secret {
-				forms = append(forms, escaped)
+				forms = append(forms, scrubForm{escaped, whole})
 			}
 		}
 	}
-	sort.SliceStable(forms, func(i, j int) bool { return len(forms[i]) > len(forms[j]) })
-	for _, form := range forms {
-		text = strings.ReplaceAll(text, form, redactedMark)
+	for _, token := range tokens {
+		if token != "" {
+			forms = append(forms, scrubForm{token, true})
+		}
 	}
-	return text
+	sort.SliceStable(forms, func(i, j int) bool { return len(forms[i].value) > len(forms[j].value) })
+
+	var out strings.Builder
+	var prev byte // the last byte written; a mark ends in a non-word byte
+	for i := 0; i < len(text); {
+		matched := 0
+		for _, f := range forms {
+			if strings.HasPrefix(text[i:], f.value) && (!f.whole || standsAlone(f.value, prev, text[i+len(f.value):])) {
+				matched = len(f.value)
+				break
+			}
+		}
+		if matched > 0 {
+			out.WriteString(redactedMark)
+			prev = redactedMark[len(redactedMark)-1]
+			i += matched
+		} else {
+			out.WriteByte(text[i])
+			prev = text[i]
+			i++
+		}
+	}
+	return out.String()
+}
+
+// standsAlone reports whether value, preceded by the byte before and followed by
+// the text after, is not part of a word: a side that is itself a non-word
+// character needs no check.
+func standsAlone(value string, before byte, after string) bool {
+	if isWordByte(value[0]) && isWordByte(before) {
+		return false
+	}
+	return !(isWordByte(value[len(value)-1]) && after != "" && isWordByte(after[0]))
 }
 
 // settingsOf returns the settings a connection string carries, best effort:
@@ -280,38 +364,6 @@ func keywordSettings(dsn string) map[string]string {
 		settings[key] = value.String()
 		rest = rest[min(i+1, len(rest)):]
 	}
-}
-
-// redactTokens replaces each value with [redactedMark] where it stands alone,
-// that is where the characters on both sides of it are not part of a word
-// (letters, digits, dot, underscore, hyphen). Short settings such as a port or a
-// timeout would otherwise cut pieces out of an address or a code.
-func redactTokens(text string, values []string) string {
-	for _, value := range values {
-		if value == "" {
-			continue
-		}
-		var out strings.Builder
-		pos := 0
-		for {
-			i := strings.Index(text[pos:], value)
-			if i < 0 {
-				break
-			}
-			start, end := pos+i, pos+i+len(value)
-			if (start == 0 || !isWordByte(text[start-1])) && (end == len(text) || !isWordByte(text[end])) {
-				out.WriteString(text[pos:start])
-				out.WriteString(redactedMark)
-				pos = end
-			} else {
-				out.WriteString(text[pos : start+1])
-				pos = start + 1
-			}
-		}
-		out.WriteString(text[pos:])
-		text = out.String()
-	}
-	return text
 }
 
 func isWordByte(b byte) bool {
