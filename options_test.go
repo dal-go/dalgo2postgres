@@ -1,6 +1,7 @@
 package dalgo2postgres
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -70,5 +71,49 @@ func TestZeroValueDatabaseUsesDefaults(t *testing.T) {
 	var d Database
 	if got := d.schemaName(); got != "public" {
 		t.Errorf("zero Database schemaName() = %q, want public", got)
+	}
+}
+
+func TestNilOptionIsIgnored(t *testing.T) {
+	d, _ := newSchemaMockDatabase(t, nil, WithSchema("sales"), nil)
+	if got := d.schemaName(); got != "sales" {
+		t.Errorf("schemaName() = %q, want sales (nil options skipped, the rest applied)", got)
+	}
+}
+
+func TestCheckOptions(t *testing.T) {
+	if err := checkOptions([]Option{nil, WithSchema("sales"), WithIdentifierMode(IdentifierExact)}); err != nil {
+		t.Errorf("valid options: %v", err)
+	}
+	if err := checkOptions(nil); err != nil {
+		t.Errorf("no options: %v", err)
+	}
+	err := checkOptions([]Option{WithIdentifierMode(IdentifierMode(7))})
+	if err == nil || !strings.Contains(err.Error(), "IdentifierMode") || !strings.Contains(err.Error(), "7") {
+		t.Errorf("out-of-range mode: err = %v, want an error naming IdentifierMode and 7", err)
+	}
+}
+
+func TestNewDatabaseWithOptions_RejectsUnknownIdentifierModeBeforeConnecting(t *testing.T) {
+	// The DSN is unusable on purpose: the error must come from the option check,
+	// before any connection is attempted.
+	db, err := NewDatabaseWithOptions("not-a-dsn", dal.NewSchema(nil, nil), dalgo2sql.DbOptions{}, WithIdentifierMode(IdentifierMode(-1)))
+	if db != nil || err == nil || !strings.Contains(err.Error(), "IdentifierMode") {
+		t.Fatalf("got %v, %v; want nil and an IdentifierMode error", db, err)
+	}
+	if _, err := NewDatabase("not-a-dsn", WithIdentifierMode(IdentifierMode(99))); err == nil || !strings.Contains(err.Error(), "IdentifierMode") {
+		t.Fatalf("NewDatabase: err = %v, want an IdentifierMode error", err)
+	}
+}
+
+func TestSchemaFor(t *testing.T) {
+	d, _ := newSchemaMockDatabase(t, WithSchema("sales"))
+	plain := dal.NewRootCollectionRef("Album", "")
+	qualified := dal.NewQualifiedRootCollectionRef("archive", "Album", "")
+	if got := d.schemaFor(&plain); got != "sales" {
+		t.Errorf("schemaFor(plain) = %q, want sales", got)
+	}
+	if got := d.schemaFor(&qualified); got != "archive" {
+		t.Errorf("schemaFor(qualified) = %q, want archive", got)
 	}
 }

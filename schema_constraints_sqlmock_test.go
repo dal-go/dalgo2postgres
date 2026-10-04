@@ -67,37 +67,47 @@ func TestListConstraints_Errors(t *testing.T) {
 	})
 }
 
-func TestListReferrers_ReportsTheReferencingTable(t *testing.T) {
+func TestListReferrers_OneReferrerPerConstraintInKeyOrder(t *testing.T) {
 	d, mock := newSchemaMockDatabase(t, WithSchema("sales"), WithIdentifierMode(IdentifierExact))
-	// Artist is referenced by Album (two columns) and Tour.
+	// Artist is referenced by two separate foreign keys of Album and by a
+	// composite one of Tour whose columns are not in alphabetical order.
 	mock.ExpectQuery(`source\.relname AS referrer_table`).WithArgs("sales", "Artist").
-		WillReturnRows(sqlmock.NewRows([]string{"referrer_table", "referrer_col"}).
-			AddRow("Album", "ArtistId").
-			AddRow("Album", "FeaturedArtistId").
-			AddRow("Tour", "ArtistId"))
+		WillReturnRows(sqlmock.NewRows([]string{"oid", "referrer_table", "referrer_col"}).
+			AddRow(int64(5), "Album", "ArtistId").
+			AddRow(int64(6), "Album", "FeaturedArtistId").
+			AddRow(int64(7), "Tour", "Zone").
+			AddRow(int64(7), "Tour", "Area"))
 
 	ref := dal.NewRootCollectionRef("Artist", "")
 	got, err := d.ListReferrers(context.Background(), &ref)
 	if err != nil {
 		t.Fatalf("ListReferrers: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("referrers = %+v, want 2", got)
+	type shape struct {
+		name   string
+		fields []dal.FieldName
 	}
-	if got[0].Collection.Name() != "Album" || !reflect.DeepEqual(got[0].Fields, []dal.FieldName{"ArtistId", "FeaturedArtistId"}) {
-		t.Errorf("first referrer = %s %v, want Album [ArtistId FeaturedArtistId]", got[0].Collection.Name(), got[0].Fields)
+	var gotShapes []shape
+	for _, r := range got {
+		gotShapes = append(gotShapes, shape{r.Collection.Name(), r.Fields})
 	}
-	if got[1].Collection.Name() != "Tour" {
-		t.Errorf("second referrer = %s, want Tour", got[1].Collection.Name())
+	want := []shape{
+		{"Album", []dal.FieldName{"ArtistId"}},
+		{"Album", []dal.FieldName{"FeaturedArtistId"}},
+		{"Tour", []dal.FieldName{"Zone", "Area"}},
+	}
+	if !reflect.DeepEqual(gotShapes, want) {
+		t.Errorf("referrers = %+v, want %+v (one per foreign key, columns in key order)", gotShapes, want)
 	}
 }
 
 func TestListReferrers_QuerySelectsSourceNotTarget(t *testing.T) {
-	// The old query selected the referenced table's name as the referrer.
+	// The old query selected the referenced table's name as the referrer, and the
+	// current one must order the key columns by their position in the key.
 	d, mock := newSchemaMockDatabase(t)
-	mock.ExpectQuery(`SELECT DISTINCT source\.relname AS referrer_table, source_column\.attname AS referrer_col`).
+	mock.ExpectQuery(`(?s)SELECT c\.oid, source\.relname AS referrer_table, source_column\.attname AS referrer_col.*WITH ORDINALITY.*ORDER BY source\.relname, c\.conname, c\.oid, source_key\.position`).
 		WithArgs("public", "artist").
-		WillReturnRows(sqlmock.NewRows([]string{"referrer_table", "referrer_col"}))
+		WillReturnRows(sqlmock.NewRows([]string{"oid", "referrer_table", "referrer_col"}))
 	ref := dal.NewRootCollectionRef("Artist", "")
 	got, err := d.ListReferrers(context.Background(), &ref)
 	if err != nil || len(got) != 0 {

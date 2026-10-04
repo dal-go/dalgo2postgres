@@ -350,7 +350,7 @@ func TestListIndexes_ExactNameInSchema(t *testing.T) {
 func TestListIndexes_QueryScopesPrimaryKeyExclusionToSchema(t *testing.T) {
 	// A same-named primary key in another schema must not hide an index.
 	d, mock := newSchemaMockDatabase(t)
-	mock.ExpectQuery(`c\.connamespace = t\.relnamespace`).WillReturnRows(sqlmock.NewRows([]string{"indexname", "indexdef"}))
+	mock.ExpectQuery(`n\.nspname = i\.schemaname`).WillReturnRows(sqlmock.NewRows([]string{"indexname", "indexdef"}))
 	ref := dal.NewRootCollectionRef("t", "")
 	if _, err := d.ListIndexes(context.Background(), &ref); err != nil {
 		t.Fatalf("ListIndexes: %v", err)
@@ -404,5 +404,94 @@ func TestIsUniqueIndexDef(t *testing.T) {
 		if got := isUniqueIndexDef(def); got != want {
 			t.Errorf("isUniqueIndexDef(%q) = %v, want %v", def, got, want)
 		}
+	}
+}
+
+func TestListIndexes_QueryNamesTheCatalogSchema(t *testing.T) {
+	// Every catalog relation is qualified, so a same-named object earlier on the
+	// search_path cannot stand in for the catalog.
+	d, mock := newSchemaMockDatabase(t)
+	for _, relation := range []string{"pg_indexes", "pg_constraint", "pg_class", "pg_namespace"} {
+		mock.ExpectQuery(`(FROM|JOIN) pg_catalog\.` + relation + `\b`).
+			WillReturnRows(sqlmock.NewRows([]string{"indexname", "indexdef"}))
+		ref := dal.NewRootCollectionRef("t", "")
+		if _, err := d.ListIndexes(context.Background(), &ref); err != nil {
+			t.Fatalf("ListIndexes (%s): %v", relation, err)
+		}
+	}
+}
+
+func TestQualifiedReference_SchemaOnTheReferenceIsHonoured(t *testing.T) {
+	// The database is configured for "public"; the reference names "sales". The
+	// reader must ask the server about "sales", never answer from "public".
+	ref := dal.NewQualifiedRootCollectionRef("sales", "Album", "")
+
+	t.Run("DescribeCollection", func(t *testing.T) {
+		d, mock := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
+		// A target in the reference's schema carries no namespace; one in the
+		// configured schema ("public") is another schema as far as "sales" goes.
+		describeAlbum(mock, "sales", "Album", "public")
+		got, err := d.DescribeCollection(context.Background(), &ref)
+		if err != nil {
+			t.Fatalf("DescribeCollection: %v", err)
+		}
+		if ns := got.ForeignKeys[0].ReferencedNamespace; ns != "public" {
+			t.Errorf("ReferencedNamespace = %q, want %q (relative to the reference's schema)", ns, "public")
+		}
+		if ns := got.ForeignKeys[1].ReferencedNamespace; ns != "other" {
+			t.Errorf("ReferencedNamespace = %q, want other", ns)
+		}
+	})
+	t.Run("DescribeCollection same schema as the target", func(t *testing.T) {
+		d, mock := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
+		describeAlbum(mock, "sales", "Album", "sales")
+		got, err := d.DescribeCollection(context.Background(), &ref)
+		if err != nil {
+			t.Fatalf("DescribeCollection: %v", err)
+		}
+		if ns := got.ForeignKeys[0].ReferencedNamespace; ns != "" {
+			t.Errorf("ReferencedNamespace = %q, want empty", ns)
+		}
+	})
+	t.Run("DescribeCollection not found", func(t *testing.T) {
+		d, mock := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
+		mock.ExpectQuery(qProbe).WithArgs("sales", "Album").WillReturnError(sql.ErrNoRows)
+		if got, err := d.DescribeCollection(context.Background(), &ref); got != nil || err == nil || !strings.Contains(err.Error(), "not found") {
+			t.Fatalf("got %v, %v; want not found", got, err)
+		}
+	})
+	t.Run("ListIndexes", func(t *testing.T) {
+		d, mock := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
+		mock.ExpectQuery(`pg_indexes`).WithArgs("sales", "Album").
+			WillReturnRows(sqlmock.NewRows([]string{"indexname", "indexdef"}))
+		if _, err := d.ListIndexes(context.Background(), &ref); err != nil {
+			t.Fatalf("ListIndexes: %v", err)
+		}
+	})
+	t.Run("ListConstraints", func(t *testing.T) {
+		d, mock := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
+		mock.ExpectQuery(`table_constraints`).WithArgs("sales", "Album").
+			WillReturnRows(sqlmock.NewRows([]string{"constraint_name", "constraint_type"}))
+		if _, err := d.ListConstraints(context.Background(), &ref); err != nil {
+			t.Fatalf("ListConstraints: %v", err)
+		}
+	})
+	t.Run("ListReferrers", func(t *testing.T) {
+		d, mock := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
+		mock.ExpectQuery(`referrer_table`).WithArgs("sales", "Album").
+			WillReturnRows(sqlmock.NewRows([]string{"oid", "referrer_table", "referrer_col"}))
+		if _, err := d.ListReferrers(context.Background(), &ref); err != nil {
+			t.Fatalf("ListReferrers: %v", err)
+		}
+	})
+}
+
+func TestUnqualifiedReference_UsesTheConfiguredSchema(t *testing.T) {
+	d, mock := newSchemaMockDatabase(t, WithSchema("sales"), WithIdentifierMode(IdentifierExact))
+	mock.ExpectQuery(`pg_indexes`).WithArgs("sales", "Album").
+		WillReturnRows(sqlmock.NewRows([]string{"indexname", "indexdef"}))
+	ref := dal.NewRootCollectionRef("Album", "")
+	if _, err := d.ListIndexes(context.Background(), &ref); err != nil {
+		t.Fatalf("ListIndexes: %v", err)
 	}
 }

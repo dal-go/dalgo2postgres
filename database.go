@@ -78,8 +78,12 @@ func NewDatabase(dsn string, options ...Option) (*Database, error) {
 //
 // The optional [Option] values choose the PostgreSQL schema the schema reader
 // inspects ([WithSchema]) and whether it matches table names exactly
-// ([WithIdentifierMode]).
+// ([WithIdentifierMode]). A nil option is ignored; an unknown IdentifierMode is
+// an error, returned before any connection is attempted.
 func NewDatabaseWithOptions(dsn string, schema dal.Schema, opts dalgo2sql.DbOptions, options ...Option) (*Database, error) {
+	if err := checkOptions(options); err != nil {
+		return nil, err
+	}
 	applyPostgresDbOptionDefaults(&opts)
 
 	sqlDB, err := sql.Open("pgx", dsn)

@@ -42,16 +42,19 @@ func (d *Database) ListCollections(ctx context.Context, parent *dalrecord.Key) (
 
 // DescribeCollection returns the full schema definition for the named table or
 // view. It queries information_schema for columns and primary-key membership.
+// The table is read from the schema the reference names, else from the
+// configured schema.
 // A column whose PostgreSQL type has no dbschema counterpart (uuid, json,
 // jsonb, arrays, enums, interval, inet, money, ...) is reported as a String
 // field rather than failing the whole table.
 func (d *Database) DescribeCollection(ctx context.Context, ref *dal.CollectionRef) (*dbschema.CollectionDef, error) {
-	return describeCollectionImpl(ctx, d.sqlDB, d.schemaName(), d.resolveName(ref.Name()))
+	return describeCollectionImpl(ctx, d.sqlDB, d.schemaFor(ref), d.resolveName(ref.Name()))
 }
 
-// ListIndexes returns the non-primary-key indexes on the named table via pg_indexes.
+// ListIndexes returns the non-primary-key indexes on the named table via
+// pg_indexes, from the schema the reference names, else the configured schema.
 func (d *Database) ListIndexes(ctx context.Context, ref *dal.CollectionRef) ([]dbschema.IndexDef, error) {
-	return listIndexesImpl(ctx, d.sqlDB, d.schemaName(), d.resolveName(ref.Name()))
+	return listIndexesImpl(ctx, d.sqlDB, d.schemaFor(ref), d.resolveName(ref.Name()))
 }
 
 // ---- DescribeCollection impl ----
@@ -209,13 +212,13 @@ func listIndexesImpl(ctx context.Context, db *sql.DB, schema, name string) ([]db
 	// the backing store for PRIMARY KEY constraints by joining to pg_constraint.
 	rows, err := db.QueryContext(ctx,
 		`SELECT i.indexname, i.indexdef
-		 FROM pg_indexes i
+		 FROM pg_catalog.pg_indexes i
 		 WHERE i.schemaname = $1
 		   AND i.tablename  = $2
 		   AND NOT EXISTS (
-		       SELECT 1 FROM pg_constraint c
-		       JOIN pg_class t ON t.oid = c.conrelid
-		       JOIN pg_namespace n ON n.oid = t.relnamespace
+		       SELECT 1 FROM pg_catalog.pg_constraint c
+		       JOIN pg_catalog.pg_class t ON t.oid = c.conrelid
+		       JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
 		       WHERE c.contype = 'p'
 		         AND c.connamespace = t.relnamespace
 		         AND c.conname = i.indexname

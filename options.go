@@ -2,6 +2,7 @@ package dalgo2postgres
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 
 	"github.com/dal-go/dalgo/dal"
@@ -18,16 +19,31 @@ type IdentifierMode int
 const (
 	// IdentifierFoldLower lower-cases a table name before looking it up. It
 	// matches the DDL this package writes (see quoteIdent), which stores every
-	// name lower-cased. It is the default, so existing callers keep their
-	// behaviour.
+	// name lower-cased. It is the default, so callers that pass no option and
+	// create their tables through this package keep their behaviour. A caller
+	// that reads a database it did not create with this package (mixed-case
+	// table names) must choose [IdentifierExact] explicitly: with the default,
+	// ListCollections reports "Album" but DescribeCollection("Album") looks for
+	// "album" and answers not found.
 	IdentifierFoldLower IdentifierMode = iota
 
 	// IdentifierExact looks a table up under exactly the name it is given.
 	// PostgreSQL names are case-sensitive once quoted, so "Album" and "album"
 	// are different tables; choose this mode to read a database whose tables
 	// were created with mixed-case names.
+	//
+	// The mode affects only the schema reader (ListCollections,
+	// DescribeCollection, ListIndexes, ListConstraints, ListReferrers). The DDL
+	// this package writes still lower-cases every name, and record operations
+	// address tables as dalgo2sql renders them, resolved by the connection's
+	// search_path.
 	IdentifierExact
 )
+
+// valid reports whether m is one of the defined modes.
+func (m IdentifierMode) valid() bool {
+	return m == IdentifierFoldLower || m == IdentifierExact
+}
 
 // Option customises how a [Database] reads its schema.
 type Option func(*Database)
@@ -35,6 +51,14 @@ type Option func(*Database)
 // WithSchema makes the schema reader inspect the named PostgreSQL schema
 // instead of [DefaultSchema]. An empty name keeps the default. The name is
 // always sent to the server as a bound parameter, never inside SQL text.
+//
+// A collection reference that names its own schema
+// ([dal.NewQualifiedRootCollectionRef]) is read from that schema instead.
+//
+// The option affects only the schema reader (ListCollections,
+// DescribeCollection, ListIndexes, ListConstraints, ListReferrers). The DDL this
+// package writes and record operations still follow the connection's
+// search_path.
 func WithSchema(name string) Option {
 	return func(d *Database) { d.schema = name }
 }
@@ -45,7 +69,17 @@ func WithIdentifierMode(mode IdentifierMode) Option {
 	return func(d *Database) { d.identifierMode = mode }
 }
 
-// schemaName returns the PostgreSQL schema the reader inspects.
+// schemaFor returns the schema a collection reference addresses: the schema the
+// reference carries, else the configured one. A reference is never answered
+// from a schema it does not name.
+func (d *Database) schemaFor(ref *dal.CollectionRef) string {
+	if schema := ref.Schema(); schema != "" {
+		return schema
+	}
+	return d.schemaName()
+}
+
+// schemaName returns the PostgreSQL schema the reader inspects by default.
 func (d *Database) schemaName() string {
 	if d.schema == "" {
 		return DefaultSchema
@@ -70,8 +104,26 @@ func newDatabaseFromSQL(sqlDB *sql.DB, dsn string, schema dal.Schema, opts dalgo
 		sqlDB: sqlDB,
 		dsn:   dsn,
 	}
-	for _, option := range options {
-		option(d)
-	}
+	applyOptions(d, options)
 	return d
+}
+
+// applyOptions applies every non-nil option to d.
+func applyOptions(d *Database, options []Option) {
+	for _, option := range options {
+		if option != nil {
+			option(d)
+		}
+	}
+}
+
+// checkOptions rejects an option set that cannot be honoured. It needs no
+// server, so constructors call it before opening a connection.
+func checkOptions(options []Option) error {
+	var probe Database
+	applyOptions(&probe, options)
+	if !probe.identifierMode.valid() {
+		return fmt.Errorf("dalgo2postgres: unknown IdentifierMode %d", int(probe.identifierMode))
+	}
+	return nil
 }

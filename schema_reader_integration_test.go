@@ -243,4 +243,92 @@ func TestSchemaReaderIntegration_SecondSchemaIsKeptApart(t *testing.T) {
 	if def, err := db2.DescribeCollection(ctx, &only); err != nil || len(def.Fields) != 1 {
 		t.Errorf("DescribeCollection through the second schema: %+v, %v", def, err)
 	}
+
+	// A reference that names its schema is read from that schema, whichever
+	// schema the database is configured for.
+	qualifiedOnly := dal.NewQualifiedRootCollectionRef(second, "OnlyInSecond", "")
+	if def, err := db1.DescribeCollection(ctx, &qualifiedOnly); err != nil || def == nil || len(def.Fields) != 1 {
+		t.Errorf("qualified DescribeCollection through the first schema: %+v, %v", def, err)
+	}
+	qualifiedAlbum := dal.NewQualifiedRootCollectionRef(second, "Album", "")
+	if def, err := db1.DescribeCollection(ctx, &qualifiedAlbum); err == nil || def != nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("Album exists only in the first schema, so asking for it in the second must not find it: %+v, %v", def, err)
+	}
+	qualifiedArtist := dal.NewQualifiedRootCollectionRef(second, "Artist", "")
+	viaFirst, err := db1.ListReferrers(ctx, &qualifiedArtist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(viaFirst) != 1 || viaFirst[0].Collection.Name() != "Tour" {
+		t.Errorf("qualified ListReferrers through the first schema = %+v, want Tour from the second schema", viaFirst)
+	}
+	qualifiedTour := dal.NewQualifiedRootCollectionRef(second, "Tour", "")
+	if constraints, err := db1.ListConstraints(ctx, &qualifiedTour); err != nil || len(constraints) != 2 {
+		t.Errorf("qualified ListConstraints through the first schema = %+v, %v; want Tour's primary key and foreign key", constraints, err)
+	}
+	if indexes, err := db1.ListIndexes(ctx, &qualifiedTour); err != nil || len(indexes) != 0 {
+		t.Errorf("qualified ListIndexes through the first schema = %+v, %v; want none (primary key excluded)", indexes, err)
+	}
+}
+
+// A primary key in one schema must not hide a same-named index of a same-named
+// table in another schema.
+func TestSchemaReaderIntegration_PrimaryKeyExclusionStaysInItsSchema(t *testing.T) {
+	first := uniqueTable(t, "pg01pka")
+	second := uniqueTable(t, "pg01pkb")
+	db1 := openSchemaTestDB(t, first, IdentifierExact)
+	db2 := openSchemaTestDB(t, second, IdentifierExact)
+	s1, s2 := exactIdent(first), exactIdent(second)
+	ctx := context.Background()
+
+	// "T_pkey" is the primary key of T in the second schema, and an ordinary
+	// unique index of T in the first.
+	execAll(t, db2, `CREATE TABLE `+s2+`."T" ("Id" integer, CONSTRAINT "T_pkey" PRIMARY KEY ("Id"))`)
+	execAll(t, db1,
+		`CREATE TABLE `+s1+`."T" ("Id" integer, "Code" integer)`,
+		`CREATE UNIQUE INDEX "T_pkey" ON `+s1+`."T" ("Code")`,
+	)
+
+	ref := dal.NewRootCollectionRef("T", "")
+	inFirst, err := db1.ListIndexes(ctx, &ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inFirst) != 1 || inFirst[0].Name != "T_pkey" || !inFirst[0].Unique || !reflect.DeepEqual(inFirst[0].Fields, []dal.FieldName{"Code"}) {
+		t.Errorf("first schema indexes = %+v, want the ordinary unique index T_pkey over Code", inFirst)
+	}
+	inSecond, err := db2.ListIndexes(ctx, &ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inSecond) != 0 {
+		t.Errorf("second schema indexes = %+v, want none (T_pkey backs the primary key)", inSecond)
+	}
+}
+
+// Each foreign key of a table is one Referrer, and a composite key lists its
+// columns in key order, not alphabetically.
+func TestSchemaReaderIntegration_ReferrersPerForeignKeyInKeyOrder(t *testing.T) {
+	schemaName := uniqueTable(t, "pg01ref")
+	db := openSchemaTestDB(t, schemaName, IdentifierExact)
+	s := exactIdent(schemaName)
+	execAll(t, db,
+		`CREATE TABLE `+s+`."Parent" ("B" integer, "A" integer, PRIMARY KEY ("B", "A"))`,
+		`CREATE TABLE `+s+`."Child" (
+			"Id" integer PRIMARY KEY,
+			"Zed" integer, "Alpha" integer, "Solo" integer,
+			CONSTRAINT "fk_pair" FOREIGN KEY ("Zed", "Alpha") REFERENCES `+s+`."Parent" ("B", "A"),
+			CONSTRAINT "fk_solo" FOREIGN KEY ("Solo", "Alpha") REFERENCES `+s+`."Parent" ("B", "A")
+		)`,
+	)
+	parent := dal.NewRootCollectionRef("Parent", "")
+	referrers, err := db.ListReferrers(context.Background(), &parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(referrers) != 2 ||
+		!reflect.DeepEqual(referrers[0].Fields, []dal.FieldName{"Zed", "Alpha"}) ||
+		!reflect.DeepEqual(referrers[1].Fields, []dal.FieldName{"Solo", "Alpha"}) {
+		t.Errorf("referrers = %+v, want fk_pair [Zed Alpha] then fk_solo [Solo Alpha], one Referrer per foreign key", referrers)
+	}
 }

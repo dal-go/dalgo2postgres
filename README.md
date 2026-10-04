@@ -47,14 +47,41 @@ db, err := dalgo2postgres.NewDatabase(dsn,
 ```
 
 - `IdentifierFoldLower` (default) lower-cases a table name before looking it up,
-  matching the lower-cased tables this package's DDL creates.
+  matching the lower-cased tables this package's DDL creates. It is the default
+  so that callers that pass no option and create their tables through this
+  package keep working. A caller that reads a database it did not create with
+  this package must pass `IdentifierExact` explicitly: with the default,
+  `ListCollections` reports `Album` but `DescribeCollection("Album")` looks for
+  `album` and answers not found.
 - `IdentifierExact` looks the table up under exactly the name given, so a table
   created as `"Album"` is found as `Album` and not as `album`.
+- A nil option is ignored; an unknown `IdentifierMode` makes the constructor
+  return an error before it connects.
+
+A collection reference that names its own schema
+(`dal.NewQualifiedRootCollectionRef("sales", "Album", "")`) is read from that
+schema, whatever `WithSchema` says; a reference without a schema is read from
+the configured one. The reader never answers a reference from a schema it does
+not name. `ListReferrers` reports only referrers in the same schema as the
+queried table; a foreign key into another schema shows up in `DescribeCollection`
+as `ReferencedNamespace`, which is empty when the target is in the table's own
+schema.
+
+`WithSchema` and `IdentifierExact` affect **only the schema reader**. The DDL
+this package writes still lower-cases every name (see "Identifier case folding"
+below), and record operations (`Get`, `Insert`, queries) address tables as
+`dalgo2sql` renders them and resolve them through the connection's
+`search_path`.
+
+`ListReferrers` returns one `Referrer` per foreign key, with the referencing
+columns in key order.
 
 A column whose type has no `dbschema.Type` (uuid, json, jsonb, arrays, enums,
 interval, inet, money, ...) is described as a `String` field; it never fails the
-table. Materialized views are not listed (PostgreSQL does not expose them in
-`information_schema`).
+table. Base tables and views are listed; `dbschema` has no collection kind, so a
+view cannot be told apart from a table in the result. Materialized views and
+foreign tables are not listed (PostgreSQL does not expose materialized views in
+`information_schema.tables`, and foreign tables are filtered out).
 
 ## Type mapping
 
