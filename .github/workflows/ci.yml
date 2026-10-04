@@ -121,12 +121,12 @@ jobs:
           DALGO2POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/dalgo_test?sslmode=disable
       - name: Integration coverage floor
         # The floor that matters: this is the only job where the database
-        # tests run. Measured on this branch's head before the review fixes of
-        # round 2 (CI log "Integration coverage: 87.0%"). The floor sits 2 points
-        # under that, to leave room for the remaining pull requests of the wave;
-        # raise it to the measured value, rounded down, once the wave has
-        # landed. Must rise with the PostgreSQL wave; never lower it.
+        # tests run. Measured on this branch's head merged with main, which
+        # holds NonDeterministicTextColumns and its integration test, as CI
+        # runs it (CI log "Integration coverage: 86.7%"). The floor is that
+        # value rounded down. Must rise with the PostgreSQL wave; never lower
+        # it.
         run: |
           total=$(go tool cover -func=profile.cov | awk '$1 == "total:" {print $3}' | sed 's/%//')
           echo "Integration coverage: $total%"
-          awk -v t="$total" -v m="85" 'BEGIN { if (t < m) { print "Integration coverage " t "% is below required " m "%"; exit 1 } }'
+          awk -v t="$total" -v m="86" 'BEGIN { if (t < m) { print "Integration coverage " t "% is below required " m "%"; exit 1 } }'
