@@ -43,11 +43,12 @@ jobs:
       # Backstop floor. This job runs without a database, so the DB-backed
       # tests skip here and only the unit and sqlmock tests count; the real
       # floor is in the integration job below. Measured on this branch's head
-      # (`go test -count=1 -cover ./...`): 66.3%. The floor stays at 62: the
+      # merged with main, which holds NonDeterministicTextColumns, as CI runs
+      # it (`go test -count=1 -cover ./...`): 65.4%. The floor stays at 62: the
       # margin is wide enough for a pull request that adds code only a live
       # server tests. With both version tests skipped
       # (-skip 'TestResolveVersion|TestAdapterReportsVersion') the total is
-      # 64.8%, and with only TestAdapterReportsVersion skipped 66.1%, so this
+      # 63.9%, and with only TestAdapterReportsVersion skipped 65.3%, so this
       # floor does not protect the version tests; raise it to 65 once the
       # wave's remaining pull requests have landed, to make it do so. Must rise
       # with the PostgreSQL wave; never lower it.
@@ -104,9 +105,12 @@ jobs:
           # The schema-reader integration tests skip on their own when the DSN
           # does not reach them, and a skip leaves the job green. Match the
           # prefix, not the names, so a new TestSchemaReaderIntegration_ test
-          # is covered without touching this guard.
-          if grep -qE '^\s*--- SKIP: TestSchemaReaderIntegration_' /tmp/gotest.log; then
-            echo "::error::a TestSchemaReaderIntegration_ test SKIPPED - the DSN did not reach the tests"
+          # is covered without touching this guard. The integration test of
+          # NonDeterministicTextColumns has its own name, so it is listed: it
+          # skips the same way. Only a SKIP is asserted for it, not a PASS, so
+          # this job stays green on a branch that does not hold the helper yet.
+          if grep -qE '^\s*--- SKIP: (TestSchemaReaderIntegration_|TestNonDeterministicTextColumnsIntegration)' /tmp/gotest.log; then
+            echo "::error::a schema-reader integration test SKIPPED - the DSN did not reach the tests"
             exit 1
           fi
           if ! grep -qE '^\s*--- PASS: TestSchemaReaderIntegration_' /tmp/gotest.log; then

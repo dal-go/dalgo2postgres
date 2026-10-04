@@ -52,6 +52,9 @@ type Database struct {
 // dalgo2sql.NewDatabase for the dal.DB surface, and returns a *Database
 // that satisfies dal.DB + dal.ConcurrencyAware.
 //
+// A failure to open or reach the server is a [*ConnectionError]; its text holds
+// nothing from dsn or from the driver's own message.
+//
 // Use [NewDatabaseWithOptions] when you need to supply per-collection
 // primary-key metadata (required for Insert/Get/Delete with map[string]any data).
 // The optional [Option] values choose the schema and table-name matching the
@@ -78,13 +81,22 @@ func NewDatabase(dsn string, options ...Option) (*Database, error) {
 // inspects ([WithSchema]) and whether it matches table names exactly
 // ([WithIdentifierMode]). A nil option is ignored; an unknown IdentifierMode is
 // an error, returned before any connection is attempted.
+//
+// A failure to open or reach the server is a [*ConnectionError], as for
+// [NewDatabase].
 func NewDatabaseWithOptions(dsn string, schema dal.Schema, opts dalgo2sql.DbOptions, options ...Option) (*Database, error) {
+	return newDatabase(dsn, schema, opts, options, sql.Open)
+}
+
+// newDatabase is the body of [NewDatabaseWithOptions], taking the function that
+// opens the *sql.DB so tests can make the driver fail in every way a driver does.
+func newDatabase(dsn string, schema dal.Schema, opts dalgo2sql.DbOptions, options []Option, open sqlOpener) (*Database, error) {
 	if err := checkOptions(options); err != nil {
 		return nil, err
 	}
 	applyPostgresDbOptionDefaults(&opts)
 
-	sqlDB, err := openVerified(dsn, sql.Open)
+	sqlDB, err := openVerified(dsn, open)
 	if err != nil {
 		return nil, err
 	}
@@ -94,29 +106,34 @@ func NewDatabaseWithOptions(dsn string, schema dal.Schema, opts dalgo2sql.DbOpti
 // sqlOpener is [sql.Open]; it is a seam so tests can make the driver fail.
 type sqlOpener func(driverName, dataSourceName string) (*sql.DB, error)
 
-// openVerified opens dsn through open and pings it. No part of the connection
-// string other than the host and the database name reaches an error's text: a
-// DSN that cannot be read with confidence is named not at all, and the driver's
-// own error text, which may echo the string, is redacted (see [connectionError]).
+// openVerified opens dsn through open and pings it. A failure is a
+// [*ConnectionError]: its text is a fixed sentence chosen by the kind of failure
+// (told from the types in the driver's error, never from its text), plus the
+// host, port and database name of the driver's own parsed configuration, each only
+// when it passes a strict check and repeats neither the user name nor the
+// password. No text of dsn and no message of the driver or the server is copied
+// into it, and the driver's error is not reachable from it: both hold the
+// credentials, whatever separator a string uses and however long a name is.
+//
 // A string the driver would misread (a quoted URL, a leading space, another
-// scheme) is refused before the driver is asked, with an error that names
-// nothing: the text the driver takes for a setting name holds the credentials,
-// and a server repeats it.
+// scheme) is refused before the driver is asked, with a [FailureMisread] error:
+// the text the driver takes for a setting name holds the credentials, and the
+// server it reaches would receive it.
 //
 // The driver is asked even when pgx cannot parse dsn: the string may be a name
 // registered with stdlib.RegisterConnConfig, which only the driver knows.
 func openVerified(dsn string, open sqlOpener) (*sql.DB, error) {
-	details := inspectDSN(dsn)
-	if details.refusal != nil {
-		return nil, details.refusal
+	info := inspectDSN(dsn)
+	if info.misread {
+		return nil, &ConnectionError{Kind: FailureMisread}
 	}
 	sqlDB, err := open("pgx", dsn)
 	if err != nil {
-		return nil, details.wrap("sql.Open", err)
+		return nil, info.describe("sql.Open", err)
 	}
 	if pingErr := sqlDB.PingContext(context.Background()); pingErr != nil {
 		_ = sqlDB.Close()
-		return nil, details.wrap("PingContext", pingErr)
+		return nil, info.describe("PingContext", pingErr)
 	}
 	return sqlDB, nil
 }

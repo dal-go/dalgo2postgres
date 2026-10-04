@@ -33,10 +33,10 @@ const (
 	// were created with mixed-case names.
 	//
 	// The mode affects only the schema reader (ListCollections,
-	// DescribeCollection, ListIndexes, ListConstraints, ListReferrers). The DDL
-	// this package writes still lower-cases every name, and record operations
-	// address tables as dalgo2sql renders them, resolved by the connection's
-	// search_path.
+	// DescribeCollection, ListIndexes, ListConstraints, ListReferrers,
+	// NonDeterministicTextColumns). The DDL this package writes still
+	// lower-cases every name, and record operations address tables as dalgo2sql
+	// renders them, resolved by the connection's search_path.
 	IdentifierExact
 )
 
@@ -63,9 +63,9 @@ type Option func(*Database)
 // ([dal.NewQualifiedRootCollectionRef]) is read from that schema instead.
 //
 // The option affects only the schema reader (ListCollections,
-// DescribeCollection, ListIndexes, ListConstraints, ListReferrers). The DDL this
-// package writes and record operations still follow the connection's
-// search_path.
+// DescribeCollection, ListIndexes, ListConstraints, ListReferrers,
+// NonDeterministicTextColumns). The DDL this package writes and record
+// operations still follow the connection's search_path.
 func WithSchema(name string) Option {
 	return func(d *Database) { d.schema = name }
 }
