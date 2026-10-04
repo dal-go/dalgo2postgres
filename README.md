@@ -67,6 +67,15 @@ queried table; a foreign key into another schema shows up in `DescribeCollection
 as `ReferencedNamespace`, which is empty when the target is in the table's own
 schema.
 
+`NonDeterministicTextColumns(ctx, ref)` lists the columns of a table or view whose
+equality is not exact (type `citext`, or a non-deterministic collation such as a
+case-insensitive ICU collation), in column order. It addresses the table exactly
+as the schema reader does (reference schema, else `WithSchema`; name per
+`IdentifierMode`), returns an empty list when every column is exact, and a
+not-found error when the table does not exist, so an empty list always means
+"exists and exact". A domain over `citext` and an array of `citext` are not
+reported.
+
 `WithSchema` and `IdentifierExact` affect **only the schema reader**. The DDL
 this package writes still lower-cases every name (see "Identifier case folding"
 below), and record operations (`Get`, `Insert`, queries) address tables as
