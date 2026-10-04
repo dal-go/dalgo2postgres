@@ -37,7 +37,7 @@ jobs:
       # Backstop floor. This job runs without a database, so the DB-backed
       # tests skip here; the real floor is in the integration job below.
       # Measured on this branch's head (go test ./... -coverprofile, CI log
-      # "Total coverage: 7.4%"), rounded down. Deleting version_test.go drops
+      # "Total coverage: 7.6%"), rounded down. Deleting version_test.go drops
       # the total to 4.5%, below this floor. Must rise with every pull request
       # of the PostgreSQL wave; never lower it.
       min_test_coverage_percent: 7
@@ -92,7 +92,12 @@ jobs:
           fi
         env:
           DALGO2POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/dalgo_test?sslmode=disable
-      - name: Integration coverage
+      - name: Integration coverage floor
+        # The floor that matters: this is the only job where the database
+        # tests run. Measured on this branch's head (CI log "Integration
+        # coverage: 66.6%"), rounded down. Must rise with every pull request
+        # of the PostgreSQL wave; never lower it.
         run: |
           total=$(go tool cover -func=profile.cov | awk '$1 == "total:" {print $3}' | sed 's/%//')
           echo "Integration coverage: $total%"
+          awk -v t="$total" -v m="66" 'BEGIN { if (t < m) { print "Integration coverage " t "% is below required " m "%"; exit 1 } }'
