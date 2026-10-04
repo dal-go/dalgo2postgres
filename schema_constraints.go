@@ -3,14 +3,14 @@ package dalgo2postgres
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/dalgo/dbschema"
 )
 
 // ListConstraints returns a best-effort survey of constraints on the table via
-// information_schema:
+// information_schema, in the schema the reference names, else the configured
+// schema:
 //   - PRIMARY KEY constraint (one row if any PK columns exist)
 //   - UNIQUE constraints
 //   - FOREIGN KEY constraints
@@ -21,11 +21,11 @@ func (d *Database) ListConstraints(ctx context.Context, ref *dal.CollectionRef) 
 	rows, err := d.sqlDB.QueryContext(ctx,
 		`SELECT constraint_name, constraint_type
 		 FROM information_schema.table_constraints
-		 WHERE table_schema = 'public'
-		   AND table_name   = $1
+		 WHERE table_schema = $1
+		   AND table_name   = $2
 		   AND constraint_type IN ('PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY')
 		 ORDER BY constraint_type, constraint_name`,
-		strings.ToLower(ref.Name()),
+		d.schemaFor(ref), d.resolveName(ref.Name()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dalgo2postgres: ListConstraints %q: %w", ref.Name(), err)
@@ -54,51 +54,56 @@ func (d *Database) ListConstraints(ctx context.Context, ref *dal.CollectionRef) 
 	return out, rows.Err()
 }
 
-// ListReferrers returns the collections that reference ref via foreign keys.
-// It queries information_schema.referential_constraints for tables that have
-// a FOREIGN KEY pointing to the named table.
+// ListReferrers returns the foreign keys that reference ref, one Referrer per
+// foreign key, with the referencing columns in key order. Only referrers in the
+// schema of ref (the schema the reference names, else the configured one) are
+// reported, because the reader addresses a single schema. It reads pg_catalog
+// rather than information_schema: constraint names are unique only per table in
+// PostgreSQL, so information_schema joins on the name alone mix up tables that
+// reuse a name.
 func (d *Database) ListReferrers(ctx context.Context, ref *dal.CollectionRef) ([]dbschema.Referrer, error) {
 	rows, err := d.sqlDB.QueryContext(ctx,
-		`SELECT DISTINCT ccu.table_name AS referrer_table, kcu.column_name AS referrer_col
-		 FROM information_schema.referential_constraints rc
-		 JOIN information_schema.key_column_usage kcu
-		   ON kcu.constraint_name = rc.constraint_name
-		  AND kcu.table_schema    = rc.constraint_schema
-		 JOIN information_schema.constraint_column_usage ccu
-		   ON ccu.constraint_name = rc.unique_constraint_name
-		  AND ccu.table_schema    = rc.unique_constraint_schema
-		 WHERE rc.constraint_schema    = 'public'
-		   AND ccu.table_name          = $1
-		 ORDER BY referrer_table, referrer_col`,
-		strings.ToLower(ref.Name()),
+		`SELECT c.oid, source.relname AS referrer_table, source_column.attname AS referrer_col
+		 FROM pg_catalog.pg_constraint AS c
+		 JOIN pg_catalog.pg_class AS source ON source.oid = c.conrelid
+		 JOIN pg_catalog.pg_namespace AS source_ns ON source_ns.oid = source.relnamespace
+		 JOIN pg_catalog.pg_class AS target ON target.oid = c.confrelid
+		 JOIN pg_catalog.pg_namespace AS target_ns ON target_ns.oid = target.relnamespace
+		 JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS source_key(attnum, position) ON true
+		 JOIN pg_catalog.pg_attribute AS source_column
+		   ON source_column.attrelid = source.oid AND source_column.attnum = source_key.attnum
+		 WHERE c.contype = 'f'
+		   AND source_ns.nspname = $1
+		   AND target_ns.nspname = $1
+		   AND target.relname    = $2
+		 ORDER BY source.relname, c.conname, c.oid, source_key.position`,
+		d.schemaFor(ref), d.resolveName(ref.Name()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dalgo2postgres: ListReferrers %q: %w", ref.Name(), err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	byTable := make(map[string][]dal.FieldName)
-	var order []string
+	var out []dbschema.Referrer
+	var lastID int64 = -1
 	for rows.Next() {
+		var id int64
 		var tbl, col string
-		if scanErr := rows.Scan(&tbl, &col); scanErr != nil {
+		if scanErr := rows.Scan(&id, &tbl, &col); scanErr != nil {
 			return nil, fmt.Errorf("dalgo2postgres: ListReferrers scan: %w", scanErr)
 		}
-		if _, ok := byTable[tbl]; !ok {
-			order = append(order, tbl)
+		if id != lastID {
+			out = append(out, dbschema.Referrer{Collection: dal.NewRootCollectionRef(tbl, "")})
+			lastID = id
 		}
-		byTable[tbl] = append(byTable[tbl], dal.FieldName(col))
+		referrer := &out[len(out)-1]
+		referrer.Fields = append(referrer.Fields, dal.FieldName(col))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-
-	out := make([]dbschema.Referrer, 0, len(order))
-	for _, tbl := range order {
-		out = append(out, dbschema.Referrer{
-			Collection: dal.NewRootCollectionRef(tbl, ""),
-			Fields:     byTable[tbl],
-		})
+	if out == nil {
+		out = []dbschema.Referrer{}
 	}
 	return out, nil
 }

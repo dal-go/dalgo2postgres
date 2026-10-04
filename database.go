@@ -43,6 +43,9 @@ type Database struct {
 	dal.DB         // delegate for the dal.DB surface
 	sqlDB  *sql.DB // direct handle for DDL + introspection queries
 	dsn    string  // remembered for diagnostics
+
+	schema         string         // schema the reader inspects; "" means DefaultSchema
+	identifierMode IdentifierMode // how reader table names are matched
 }
 
 // NewDatabase opens a connection to the PostgreSQL server identified by dsn
@@ -53,8 +56,10 @@ type Database struct {
 //
 // Use [NewDatabaseWithOptions] when you need to supply per-collection
 // primary-key metadata (required for Insert/Get/Delete with map[string]any data).
-func NewDatabase(dsn string) (*Database, error) {
-	return NewDatabaseWithOptions(dsn, dal.NewSchema(nil, nil), dalgo2sql.DbOptions{})
+// The optional [Option] values choose the schema and table-name matching the
+// schema reader uses.
+func NewDatabase(dsn string, options ...Option) (*Database, error) {
+	return NewDatabaseWithOptions(dsn, dal.NewSchema(nil, nil), dalgo2sql.DbOptions{}, options...)
 }
 
 // NewDatabaseWithOptions is like [NewDatabase] but accepts a dal.Schema and
@@ -70,7 +75,15 @@ func NewDatabase(dsn string) (*Database, error) {
 //	                []dal.FieldRef{dal.Field("id")}),
 //	        },
 //	    })
-func NewDatabaseWithOptions(dsn string, schema dal.Schema, opts dalgo2sql.DbOptions) (*Database, error) {
+//
+// The optional [Option] values choose the PostgreSQL schema the schema reader
+// inspects ([WithSchema]) and whether it matches table names exactly
+// ([WithIdentifierMode]). A nil option is ignored; an unknown IdentifierMode is
+// an error, returned before any connection is attempted.
+func NewDatabaseWithOptions(dsn string, schema dal.Schema, opts dalgo2sql.DbOptions, options ...Option) (*Database, error) {
+	if err := checkOptions(options); err != nil {
+		return nil, err
+	}
 	applyPostgresDbOptionDefaults(&opts)
 
 	sqlDB, err := sql.Open("pgx", dsn)
@@ -81,12 +94,7 @@ func NewDatabaseWithOptions(dsn string, schema dal.Schema, opts dalgo2sql.DbOpti
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("dalgo2postgres: PingContext(%q): %w", dsn, pingErr)
 	}
-	innerDB := dalgo2sql.NewDatabase(sqlDB, schema, opts)
-	return &Database{
-		DB:    innerDB,
-		sqlDB: sqlDB,
-		dsn:   dsn,
-	}, nil
+	return newDatabaseFromSQL(sqlDB, dsn, schema, opts, options), nil
 }
 
 // Close closes the underlying *sql.DB. After Close the Database value
