@@ -3,7 +3,10 @@ package dalgo2postgres
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/dal-go/dalgo/dal"
 )
 
 // Runs against a real PostgreSQL server and skips unless DALGO2POSTGRES_TEST_DSN
@@ -29,10 +32,15 @@ func TestNonDeterministicTextColumnsIntegration(t *testing.T) {
 			"Age" integer)`,
 		`CREATE TABLE `+s+`."Plain" ("Id" integer PRIMARY KEY, "Label" text)`,
 		`ALTER TABLE `+s+`."Customer" DROP COLUMN "Gone"`,
+		`CREATE INDEX "Customer_Email_idx" ON `+s+`."Customer" ("Email")`,
 	)
 
 	ctx := context.Background()
-	got, err := db.NonDeterministicTextColumns(ctx, "Customer")
+	colsOf := func(d *Database, ref dal.CollectionRef) ([]string, error) {
+		return d.NonDeterministicTextColumns(ctx, &ref)
+	}
+
+	got, err := colsOf(db, dal.NewRootCollectionRef("Customer", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,16 +48,34 @@ func TestNonDeterministicTextColumnsIntegration(t *testing.T) {
 		t.Fatalf("Customer: got %v, want %v", got, want)
 	}
 
-	got, err = db.NonDeterministicTextColumns(ctx, "Plain")
+	got, err = colsOf(db, dal.NewRootCollectionRef("Plain", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("Plain: got %v, want nothing", got)
+	if got == nil || len(got) != 0 {
+		t.Fatalf("Plain: got %#v, want an empty non-nil slice", got)
 	}
 
-	got, err = db.NonDeterministicTextColumns(ctx, "NoSuchTable")
-	if err != nil || len(got) != 0 {
-		t.Fatalf("missing table: got %v, %v; want nothing and no error", got, err)
+	// A missing table, and an index name (not a table or view), are not found:
+	// never an empty list that would read as "equality is exact".
+	for _, name := range []string{"NoSuchTable", "Customer_Email_idx"} {
+		got, err = colsOf(db, dal.NewRootCollectionRef(name, ""))
+		if got != nil || err == nil || !strings.Contains(err.Error(), "not found") {
+			t.Fatalf("%s: got %v, %v; want nil and a not-found error", name, got, err)
+		}
+	}
+
+	// A reference that names its own schema is read from that schema, even on a
+	// Database configured for another one.
+	other := openSchemaTestDB(t, uniqueTable(t, "pg04b"), IdentifierExact)
+	got, err = colsOf(other, dal.NewQualifiedRootCollectionRef(schemaName, "Customer", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"Email", "Name"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("qualified Customer: got %v, want %v", got, want)
+	}
+	if _, err = colsOf(other, dal.NewRootCollectionRef("Customer", "")); err == nil {
+		t.Fatal("unqualified Customer on the other schema: want not found")
 	}
 }
