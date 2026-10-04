@@ -1,0 +1,70 @@
+package dalgo2postgres
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+)
+
+// nonDeterministicTextColumnsSQL lists the live columns of one table or view
+// whose type is citext or whose collation is non-deterministic. The schema and
+// the table name are bound parameters; neither is ever part of this text.
+//
+// A column qualifies when
+//   - its type is citext (the extension may live in any schema, so the type is
+//     matched by name), or
+//   - its collation is non-deterministic (pg_collation.collisdeterministic is
+//     false; the column exists from PostgreSQL 12, the release that added
+//     non-deterministic collations).
+//
+// A column of the database default collation is deterministic, so a plain text
+// table yields nothing. Dropped and system columns are skipped.
+const nonDeterministicTextColumnsSQL = `
+	SELECT a.attname
+	FROM pg_catalog.pg_attribute AS a
+	JOIN pg_catalog.pg_class AS c ON c.oid = a.attrelid
+	JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+	JOIN pg_catalog.pg_type AS t ON t.oid = a.atttypid
+	LEFT JOIN pg_catalog.pg_collation AS co ON co.oid = a.attcollation
+	WHERE n.nspname = $1 AND c.relname = $2
+	  AND a.attnum > 0 AND NOT a.attisdropped
+	  AND (t.typname = 'citext' OR co.collisdeterministic = false)
+	ORDER BY a.attnum`
+
+// NonDeterministicTextColumns returns the columns of the named table (or view)
+// whose equality is not exact: columns of type citext and columns with a
+// non-deterministic collation (for example a case-insensitive ICU collation),
+// in column order. Under such a column "A" = "a" can be true, so a comparison
+// or a group-by on it does not mean what a byte-for-byte match means; callers
+// use this list to know where a pushed-down comparison differs from Go's.
+//
+// The table is looked up in the Database's schema ([DefaultSchema] unless
+// [WithSchema] says otherwise) and its name is matched as the schema reader
+// matches it (see [IdentifierMode]). Both are sent as bound parameters. A table
+// that does not exist, or has no such column, yields an empty non-nil slice.
+func (d *Database) NonDeterministicTextColumns(ctx context.Context, table string) ([]string, error) {
+	return nonDeterministicTextColumns(ctx, d.sqlDB, d.schemaName(), d.resolveName(table))
+}
+
+// nonDeterministicTextColumns is the reader behind
+// [Database.NonDeterministicTextColumns], taking the already resolved schema and
+// table name so tests reach it with a mocked handle.
+func nonDeterministicTextColumns(ctx context.Context, db *sql.DB, schema, table string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, nonDeterministicTextColumnsSQL, schema, table)
+	if err != nil {
+		return nil, fmt.Errorf("dalgo2postgres: non-deterministic text columns of %q: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	columns := []string{}
+	for rows.Next() {
+		var name string
+		if scanErr := rows.Scan(&name); scanErr != nil {
+			return nil, fmt.Errorf("dalgo2postgres: non-deterministic text columns of %q scan: %w", table, scanErr)
+		}
+		columns = append(columns, name)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, fmt.Errorf("dalgo2postgres: non-deterministic text columns of %q rows: %w", table, rowsErr)
+	}
+	return columns, nil
+}
