@@ -10,8 +10,10 @@ const modulePath = "github.com/dal-go/dalgo2postgres"
 // when the package is built from a working tree or exercised by its own tests.
 const develVersion = "devel"
 
-// Version is the dalgo2postgres module version, read from build information.
-// It is the tag CI created for the release the consumer depends on.
+// Version is the module version recorded in the consuming binary's build
+// information (a tag or a pseudo-version), or "devel" when none is recorded,
+// for example in a local-path replace or a working-tree build. Treat it as
+// read-only.
 var Version = resolveVersion(debug.ReadBuildInfo)
 
 // resolveVersion returns the version of this module found in the build

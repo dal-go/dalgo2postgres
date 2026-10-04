@@ -27,6 +27,14 @@ func TestResolveVersion(t *testing.T) {
 			Main: debug.Module{Path: "example.com/app"},
 			Deps: []*debug.Module{{Path: modulePath, Version: "v0.4.0", Replace: &debug.Module{Version: "v0.5.0"}}},
 		}, true), "v0.5.0"},
+		{"dependency devel", reader(&debug.BuildInfo{
+			Main: debug.Module{Path: "example.com/app"},
+			Deps: []*debug.Module{{Path: modulePath, Version: "(devel)"}},
+		}, true), develVersion},
+		{"dependency replaced by local path", reader(&debug.BuildInfo{
+			Main: debug.Module{Path: "example.com/app"},
+			Deps: []*debug.Module{{Path: modulePath, Version: "v0.4.0", Replace: &debug.Module{Path: "../dalgo2postgres"}}},
+		}, true), develVersion},
 		{"dependency absent", reader(&debug.BuildInfo{Main: debug.Module{Path: "example.com/app"}}, true), develVersion},
 	}
 	for _, tt := range tests {
@@ -38,8 +46,11 @@ func TestResolveVersion(t *testing.T) {
 	}
 }
 
-func TestVersionNotEmpty(t *testing.T) {
-	if Version == "" {
-		t.Fatal("Version must never be empty")
+// TestAdapterReportsVersion ties the adapter identity to Version, the only
+// place the variable is used, so hard-coding a string in Adapter() fails here.
+func TestAdapterReportsVersion(t *testing.T) {
+	adapter := (&Database{}).Adapter()
+	if adapter.Name() != "dalgo2postgres" || adapter.Version() != Version || adapter.Version() == "" {
+		t.Fatalf("Adapter() = %s %s, want dalgo2postgres %q", adapter.Name(), adapter.Version(), Version)
 	}
 }
