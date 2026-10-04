@@ -127,7 +127,3 @@ func (d *Database) Adapter() dal.Adapter {
 
 // Schema returns the dal-level Schema (delegated to dalgo2sql).
 func (d *Database) Schema() dal.Schema { return d.DB.Schema() }
-
-// Version is the dalgo2postgres package version. Updated by hand on
-// each release; consumed by Adapter.Version().
-const Version = "0.1.0"
