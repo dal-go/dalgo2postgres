@@ -30,7 +30,8 @@ const (
 	FailureInvalidDSN
 	// FailureMisread: the driver would accept the string but read it as something
 	// else than was meant (a URL in quotes, with a leading space or with another
-	// scheme). It is refused before any connection is attempted.
+	// scheme, or a key=value string whose pairs are not separated by spaces). It is
+	// refused before any connection is attempted.
 	FailureMisread
 	// FailureNetwork: the server could not be reached (name resolution, refused or
 	// reset connection).
@@ -50,7 +51,8 @@ var kindSentences = [...]string{
 	FailureInvalidDSN: "the connection string cannot be parsed, or a file or service it names cannot be read",
 	FailureMisread: "the connection string is not read as intended: " +
 		"a URL must start with exactly postgres:// or postgresql:// (no quotes, no leading space, no other scheme), " +
-		"and a password with a special character must be percent-encoded",
+		"a password with a special character must be percent-encoded, " +
+		"and in a key=value string the pairs are separated by spaces and a value with a space must be in single quotes",
 	FailureNetwork: "the server could not be reached",
 	FailureTLS:     "the TLS handshake with the server failed",
 	FailureTimeout: "the connection timed out or was canceled",
@@ -263,8 +265,14 @@ func isTLS(err error) bool {
 		hostname  x509.HostnameError
 		invalid   x509.CertificateInvalidError
 	)
-	return errors.As(err, &verify) || errors.As(err, &header) || errors.As(err, &authority) ||
-		errors.As(err, &hostname) || errors.As(err, &invalid)
+	if errors.As(err, &verify) || errors.As(err, &header) || errors.As(err, &authority) ||
+		errors.As(err, &hostname) || errors.As(err, &invalid) {
+		return true
+	}
+	// An alert of the server, or one this side sends, comes back from crypto/tls
+	// as a *net.OpError around a type the package does not export.
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && (opErr.Op == "remote error" || opErr.Op == "local error")
 }
 
 func isNetwork(err error) bool {
@@ -296,7 +304,28 @@ func inspectDSN(dsn string) dsnInfo {
 			return dsnInfo{misread: true}
 		}
 	}
+	if !isURL(dsn) && holdsKeywordPair(&cfg.Config) {
+		return dsnInfo{misread: true}
+	}
 	return dsnInfo{cfg: &cfg.Config, misSplit: isMisSplitURL(dsn)}
+}
+
+// holdsKeywordPair reports whether the host, the user or the database of a
+// keyword/value string holds an equals sign: a pair that was not separated from
+// the one before it by white space, so that the driver took it for part of that
+// value. A host list is checked entry by entry. A password or another setting may
+// hold an equals sign as written, and is not looked at.
+func holdsKeywordPair(cfg *pgconn.Config) bool {
+	values := []string{cfg.Host, cfg.User, cfg.Database}
+	for _, fallback := range cfg.Fallbacks {
+		values = append(values, fallback.Host)
+	}
+	for _, value := range values {
+		if strings.Contains(value, "=") {
+			return true
+		}
+	}
+	return false
 }
 
 // isMisSplitURL reports whether a URL connection string is read by net/url in a

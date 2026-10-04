@@ -84,7 +84,20 @@ func TestNonDeterministicTextColumns_MissingTableIsNotFound(t *testing.T) {
 	if err == nil || got != nil {
 		t.Fatalf("got %v, %v; want nil and a not-found error", got, err)
 	}
-	if want := newCollectionNotFoundError("Nope").Error(); err.Error() != want {
+	if want := `dalgo2postgres: collection "Nope" not found`; err.Error() != want {
+		t.Fatalf("error %q, want %q", err, want)
+	}
+}
+
+func TestNonDeterministicTextColumns_MissingQualifiedTableNamesItsSchema(t *testing.T) {
+	d, mock := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
+	mock.ExpectQuery(qInexact).WithArgs("sales", "Nope").
+		WillReturnRows(sqlmock.NewRows([]string{"attname"}))
+	got, err := d.NonDeterministicTextColumns(context.Background(), inexactQualifiedRef("sales", "Nope"))
+	if err == nil || got != nil {
+		t.Fatalf("got %v, %v; want nil and a not-found error", got, err)
+	}
+	if want := `dalgo2postgres: collection "sales"."Nope" not found`; err.Error() != want {
 		t.Fatalf("error %q, want %q", err, want)
 	}
 }

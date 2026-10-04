@@ -53,6 +53,28 @@ func (c dsnCase) secrets() []string {
 	return []string{secretUser, c.password, c.dsn, "billing-sync", "w0rd-Qq9", "w0rd-Zz8", "p%40ss%2Fw0rd-Zz8"}
 }
 
+// pgDriverEnv is every environment variable pgx reads as a connection setting
+// (parseEnvSettings in pgconn/config.go). A test that parses a string, asserts
+// what the driver read from it or runs the real driver must not depend on them:
+// a PGPORT changes the port it expects, a PGSERVICE makes a parsable string
+// unparsable, and a PGHOST can point the real driver at a server.
+var pgDriverEnv = []string{
+	"PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD", "PGPASSFILE", "PGAPPNAME",
+	"PGCONNECT_TIMEOUT", "PGSSLMODE", "PGSSLKEY", "PGSSLCERT", "PGSSLSNI", "PGSSLROOTCERT",
+	"PGSSLPASSWORD", "PGSSLNEGOTIATION", "PGTARGETSESSIONATTRS", "PGSERVICE", "PGSERVICEFILE",
+	"PGTZ", "PGOPTIONS", "PGMINPROTOCOLVERSION", "PGMAXPROTOCOLVERSION", "PGCHANNELBINDING",
+	"PGREQUIREAUTH",
+}
+
+// clearPGEnv empties every variable of [pgDriverEnv] for the test (the driver
+// ignores an empty one), and restores them afterwards.
+func clearPGEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range pgDriverEnv {
+		t.Setenv(name, "")
+	}
+}
+
 func connectionErrorOf(t *testing.T, err error) *ConnectionError {
 	t.Helper()
 	var connErr *ConnectionError
@@ -97,6 +119,7 @@ func echoing(dsn string, more ...string) error {
 }
 
 func TestOpenVerified_OpenErrorNamesHostPortAndDatabaseOnly(t *testing.T) {
+	clearPGEnv(t)
 	for name, tc := range dsnCases() {
 		t.Run(name, func(t *testing.T) {
 			echoed := echoing(tc.dsn, tc.password)
@@ -127,6 +150,7 @@ func TestOpenVerified_OpenErrorNamesHostPortAndDatabaseOnly(t *testing.T) {
 }
 
 func TestOpenVerified_PingErrorNamesHostPortAndDatabaseOnly(t *testing.T) {
+	clearPGEnv(t)
 	for name, tc := range dsnCases() {
 		t.Run(name, func(t *testing.T) {
 			echoed := echoing(tc.dsn, tc.password)
@@ -178,6 +202,7 @@ func TestOpenVerified_Success(t *testing.T) {
 }
 
 func TestOpenVerified_UnparsableDSNNamesNothingFromIt(t *testing.T) {
+	clearPGEnv(t)
 	for name, dsn := range map[string]string{
 		"url bad port":     "postgres://" + secretUser + ":" + secretPassword + "@" + visibleHost + ":notaport/" + visibleDB,
 		"keyword bad port": "host=" + visibleHost + " user=" + secretUser + " password=" + secretPassword + " dbname=" + visibleDB + " port=notaport",
@@ -203,6 +228,7 @@ func TestOpenVerified_UnparsableDSNNamesNothingFromIt(t *testing.T) {
 }
 
 func TestNewDatabase_UnparsableDSNErrorLeaksNothing(t *testing.T) {
+	clearPGEnv(t)
 	// Through the real constructors and the real driver, with no server involved:
 	// parsing fails before any connection is attempted.
 	dsn := "postgres://" + secretUser + ":" + secretPassword + "@" + visibleHost + ":notaport/" + visibleDB
@@ -235,6 +261,7 @@ func misSplitURLs(host string) map[string]string {
 }
 
 func TestOpenVerified_MisSplitURLNamesNothing(t *testing.T) {
+	clearPGEnv(t)
 	for name, dsn := range misSplitURLs("zelda-admin.invalid") {
 		t.Run(name, func(t *testing.T) {
 			if _, err := pgx.ParseConfig(dsn); err != nil {
@@ -252,6 +279,7 @@ func TestOpenVerified_MisSplitURLNamesNothing(t *testing.T) {
 }
 
 func TestNewDatabase_MisSplitURLLeaksNothing(t *testing.T) {
+	clearPGEnv(t)
 	// The real constructor and the real driver, against a closed port on this
 	// machine: nothing listens there, so no server is involved.
 	t.Setenv("PGPORT", "1")
@@ -284,6 +312,7 @@ func misreadStrings() map[string]string {
 }
 
 func TestOpenVerified_MisreadStringIsRefusedBeforeTheDriver(t *testing.T) {
+	clearPGEnv(t)
 	for name, dsn := range misreadStrings() {
 		t.Run(name, func(t *testing.T) {
 			cfg, err := pgx.ParseConfig(dsn)
@@ -315,6 +344,7 @@ func TestOpenVerified_MisreadStringIsRefusedBeforeTheDriver(t *testing.T) {
 }
 
 func TestNewDatabase_MisreadStringLeaksNothing(t *testing.T) {
+	clearPGEnv(t)
 	// The real constructor and the real driver. The string is refused before any
 	// connection is attempted, so no server (and no default local socket) is tried.
 	for name, dsn := range misreadStrings() {
@@ -332,7 +362,90 @@ func TestNewDatabase_MisreadStringLeaksNothing(t *testing.T) {
 	}
 }
 
+// keywordStringsReadWrongly are keyword/value strings whose pairs are not
+// separated by white space. The driver reads the rest of the string as the value
+// of the first pair (or of a later one) and, for a list of hosts, as hosts.
+func keywordStringsReadWrongly() map[string]string {
+	creds := "user=" + secretUser + "%spassword=" + secretPassword
+	join := func(sep string, pairs ...string) string { return strings.Join(pairs, sep) }
+	return map[string]string{
+		"semicolons":                 join(";", "host="+visibleHost, "port=6432", "user="+secretUser, "password="+secretPassword, "dbname="+visibleDB),
+		"semicolons, user first":     join(";", "user="+secretUser, "password="+secretPassword, "host="+visibleHost, "port=6432", "dbname="+visibleDB),
+		"semicolons, database last":  join(";", "host="+visibleHost, "dbname="+visibleDB, "user="+secretUser),
+		"commas":                     join(",", "host="+visibleHost, "user="+secretUser, "password="+secretPassword, "dbname="+visibleDB) + " port=6432",
+		"commas, user first":         join(",", "user="+secretUser, "password="+secretPassword, "host="+visibleHost, "dbname="+visibleDB),
+		"commas, database first":     join(",", "dbname="+visibleDB, "user="+secretUser, "password="+secretPassword),
+		"ampersands":                 join("&", "host="+visibleHost, "port=6432", "user="+secretUser, "password="+secretPassword, "dbname="+visibleDB),
+		"ampersands, database first": join("&", "dbname="+visibleDB, "host="+visibleHost, "user="+secretUser, "password="+secretPassword),
+		"ampersands, user first":     fmt.Sprintf(creds, "&") + "&host=" + visibleHost,
+	}
+}
+
+func TestOpenVerified_KeywordStringWithAPairInAValueIsRefusedBeforeTheDriver(t *testing.T) {
+	clearPGEnv(t)
+	for name, dsn := range keywordStringsReadWrongly() {
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			open := func(string, string) (*sql.DB, error) { calls++; return nil, echoing(dsn) }
+			db, err := openVerified(dsn, open)
+			if db != nil {
+				t.Errorf("db = %v, want nil", db)
+			}
+			if calls != 0 {
+				t.Errorf("the driver was called %d times with a string it reads wrongly", calls)
+			}
+			connErr := assertNoSecrets(t, err, []string{secretUser, secretPassword, visibleHost, visibleDB, dsn, "6432"})
+			if want := (ConnectionError{Kind: FailureMisread}); *connErr != want {
+				t.Errorf("error = %+v, want %+v", *connErr, want)
+			}
+			if want := "dalgo2postgres: " + FailureMisread.sentence(""); err.Error() != want {
+				t.Errorf("text = %q, want the fixed sentence %q", err, want)
+			}
+		})
+	}
+}
+
+func TestNewDatabase_KeywordStringWithAPairInAValueIsRefused(t *testing.T) {
+	clearPGEnv(t)
+	for name, dsn := range keywordStringsReadWrongly() {
+		t.Run(name, func(t *testing.T) {
+			db, err := NewDatabase(dsn)
+			if db != nil {
+				_ = db.Close()
+				t.Fatal("want an error")
+			}
+			connErr := assertNoSecrets(t, err, []string{secretUser, secretPassword, visibleHost, visibleDB, dsn})
+			if connErr.Kind != FailureMisread || strings.Contains(err.Error(), "PingContext") {
+				t.Errorf("the string was not refused before connecting: %v", err)
+			}
+		})
+	}
+}
+
+func TestOpenVerified_KeywordStringsTheDriverReadsAsMeantAreNotRefused(t *testing.T) {
+	clearPGEnv(t)
+	for name, dsn := range map[string]string{
+		"a password with an equals sign":        "host=" + visibleHost + " user=" + secretUser + " password='pa=ss;w0rd,x&y' dbname=" + visibleDB,
+		"a setting value with an equals sign":   "host=" + visibleHost + " application_name='a=b' dbname=" + visibleDB,
+		"several hosts":                         "host=h1.example,h2.example port=5432,5433 dbname=" + visibleDB,
+		"a url with an equals sign in its path": "postgres://" + secretUser + ":" + secretPassword + "@" + visibleHost + "/a=b",
+	} {
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			open := func(string, string) (*sql.DB, error) { calls++; return nil, echoing(dsn) }
+			_, err := openVerified(dsn, open)
+			if calls != 1 {
+				t.Errorf("the driver was called %d times, want 1", calls)
+			}
+			if connErr := connectionErrorOf(t, err); connErr.Kind == FailureMisread {
+				t.Errorf("a string the driver reads as meant was refused: %v", err)
+			}
+		})
+	}
+}
+
 func TestOpenVerified_ParsedStringWithAnUnreadableFileOrServiceSaysSo(t *testing.T) {
+	clearPGEnv(t)
 	// The string is well formed; something it names is missing. The real driver
 	// refuses it when asked, and the text says a file or service may be the cause.
 	base := "host=" + visibleHost + " port=6432 user=" + secretUser + " password=" + secretPassword + " dbname=" + visibleDB
@@ -354,6 +467,7 @@ func TestOpenVerified_ParsedStringWithAnUnreadableFileOrServiceSaysSo(t *testing
 }
 
 func TestNewDatabase_RegisteredConnConfigIsNotRefused(t *testing.T) {
+	clearPGEnv(t)
 	// A programmatic pgx config, registered with the driver, is not a string pgx
 	// can parse. It must reach the driver, which knows it; the host, port and
 	// database come from the driver's own error then.
@@ -381,6 +495,7 @@ func TestNewDatabase_RegisteredConnConfigIsNotRefused(t *testing.T) {
 }
 
 func TestOpenVerified_CredentialsFromTheEnvironmentAreNeverNamed(t *testing.T) {
+	clearPGEnv(t)
 	// The driver takes the user and the password from PGUSER and PGPASSWORD when
 	// the string has none. Neither is in the string, so only what the driver
 	// parsed can tell they must not be named: here the database is the user name.
@@ -396,6 +511,7 @@ func TestOpenVerified_CredentialsFromTheEnvironmentAreNeverNamed(t *testing.T) {
 }
 
 func TestOpenVerified_SeveralEndpointsNameNeitherHostNorPort(t *testing.T) {
+	clearPGEnv(t)
 	// A failure cannot be pinned to one of several servers, and a string that was
 	// read wrongly can fill the list with pieces of itself.
 	dsn := "postgres://" + secretUser + ":" + secretPassword + "@h1.example:1111,h2.example:2222,h3.example:3333/" + visibleDB
@@ -411,6 +527,7 @@ func TestOpenVerified_SeveralEndpointsNameNeitherHostNorPort(t *testing.T) {
 // A name, a host or a database that is not what it was meant to be must not drag
 // the user name or the password along.
 func TestNewDatabase_ReviewRound3Strings(t *testing.T) {
+	clearPGEnv(t)
 	t.Setenv("PGHOST", "127.0.0.1")
 	t.Setenv("PGPORT", "1")
 	secrets := []string{secretUser, secretPassword, visibleDB}
@@ -438,6 +555,7 @@ func TestNewDatabase_ReviewRound3Strings(t *testing.T) {
 }
 
 func TestOpenVerified_ServerTextCutTo63BytesIsNotCopied(t *testing.T) {
+	clearPGEnv(t)
 	// PostgreSQL cuts the user name and the database name of the startup packet
 	// to 63 bytes before it repeats them. A scrubber that knows only whole values
 	// misses the cut form; this package copies no server text at all.
@@ -445,8 +563,8 @@ func TestOpenVerified_ServerTextCutTo63BytesIsNotCopied(t *testing.T) {
 	misSplitDatabase := strings.Repeat("p", 20) + secretPassword + "@" + visibleHost + "/" + visibleDB
 	longUser := strings.Repeat("u", 70) + secretUser
 	for name, tc := range map[string]struct{ dsn, code, served string }{
-		// A semicolon string: the user is the whole tail.
-		"user": {"user=" + tail, "28000", `FATAL: role "` + tail[:63] + `" does not exist`},
+		// A semicolon string whose user is the whole tail is refused before the
+		// driver is asked (TestOpenVerified_KeywordStringWithAPairInAValueIsRefused).
 		// A mis-split URL still reaches the driver: its database is the rest of the password and the real host.
 		"database": {"postgres://127.0.0.1:/" + misSplitDatabase, "3D000", `FATAL: database "` + misSplitDatabase[:63] + `" does not exist`},
 		// A correct string with a user name longer than 63 bytes.
@@ -464,6 +582,7 @@ func TestOpenVerified_ServerTextCutTo63BytesIsNotCopied(t *testing.T) {
 }
 
 func TestNewDatabase_DatabaseEqualToACredentialIsNotNamed(t *testing.T) {
+	clearPGEnv(t)
 	// postgres:postgres@.../postgres: the database repeats the password, and
 	// naming it would show the reader the password and that it equals the database.
 	db, err := NewDatabase("postgres://postgres:postgres@127.0.0.1:1/postgres?sslmode=disable")
@@ -547,10 +666,13 @@ func TestClassify(t *testing.T) {
 		{"dns timeout", &net.DNSError{IsTimeout: true}, FailureTimeout, ""},
 		{"certificate verification", &tls.CertificateVerificationError{Err: echo}, FailureTLS, ""},
 		{"tls over tcp", &net.OpError{Op: "remote error", Err: &tls.CertificateVerificationError{Err: echo}}, FailureTLS, ""},
+		{"tls alert from the server", &net.OpError{Op: "remote error", Err: errors.New("tls: bad certificate")}, FailureTLS, ""},
+		{"tls alert from this side", fmt.Errorf("connect: %w", &net.OpError{Op: "local error", Err: errors.New("tls: unexpected message")}), FailureTLS, ""},
 		{"record header", tls.RecordHeaderError{Msg: echo.Error()}, FailureTLS, ""},
 		{"unknown authority", x509.UnknownAuthorityError{}, FailureTLS, ""},
 		{"hostname mismatch", x509.HostnameError{Certificate: &x509.Certificate{}, Host: secretUser}, FailureTLS, ""},
 		{"invalid certificate", x509.CertificateInvalidError{Cert: &x509.Certificate{}, Reason: x509.Expired}, FailureTLS, ""},
+		{"a dial that failed is not a tls alert", &net.OpError{Op: "dial", Err: errors.New("tls: bad certificate")}, FailureNetwork, ""},
 		{"connection refused", refused, FailureNetwork, ""},
 		{"no such host", noHost, FailureNetwork, ""},
 		{"joined: the server's answer wins over a failed host", errors.Join(noHost, refused, &pgconn.PgError{Code: "28000"}), FailureServer, "28000"},
@@ -597,6 +719,12 @@ func TestSentences(t *testing.T) {
 	}
 	if got, want := FailureNetwork.sentence("28P01"), kindSentences[FailureNetwork]; got != want {
 		t.Errorf("a SQLSTATE changed the sentence of a network failure: %q", got)
+	}
+	// The refusal covers a keyword string too, and says how to write one.
+	for _, want := range []string{"postgres://", "percent-encoded", "key=value", "separated by spaces", "single quotes"} {
+		if got := FailureMisread.sentence(""); !strings.Contains(got, want) {
+			t.Errorf("the sentence of a misread string %q does not mention %q", got, want)
+		}
 	}
 }
 
