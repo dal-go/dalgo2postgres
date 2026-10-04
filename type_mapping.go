@@ -58,7 +58,12 @@ var varcharRe = regexp.MustCompile(`^(?:CHARACTER VARYING|VARCHAR)\s*\(\s*(\d+)\
 // udt_name) to a dbschema.Type.  The mapping handles the most common
 // PostgreSQL built-in types.  It is lossy by design: the round-trip is
 // sufficient for schema inspection and migration, not for exact DDL replay.
-func dbschemaTypeFromPostgres(dataType, udtName string) (dbschema.Type, *dbschema.Precision, *int, bool) {
+//
+// A type without a dbschema counterpart (uuid, json, jsonb, arrays, enums,
+// interval, inet, money, extension types, ...) maps to dbschema.String, the
+// type a client can always read such a value as, so one unusual column never
+// hides a whole table.
+func dbschemaTypeFromPostgres(dataType, udtName string) (dbschema.Type, *dbschema.Precision, *int) {
 	upper := strings.ToUpper(strings.TrimSpace(dataType))
 	udt := strings.ToLower(strings.TrimSpace(udtName))
 
@@ -66,7 +71,7 @@ func dbschemaTypeFromPostgres(dataType, udtName string) (dbschema.Type, *dbschem
 	if m := varcharRe.FindStringSubmatch(upper); m != nil {
 		n, err := strconv.Atoi(m[1])
 		if err == nil {
-			return dbschema.String, nil, &n, true
+			return dbschema.String, nil, &n
 		}
 	}
 
@@ -75,27 +80,27 @@ func dbschemaTypeFromPostgres(dataType, udtName string) (dbschema.Type, *dbschem
 		total, errT := strconv.Atoi(m[1])
 		scale, errS := strconv.Atoi(m[2])
 		if errT == nil && errS == nil {
-			return dbschema.Decimal, &dbschema.Precision{Total: total, Scale: scale}, nil, true
+			return dbschema.Decimal, &dbschema.Precision{Total: total, Scale: scale}, nil
 		}
 	}
 
 	switch upper {
 	case "TEXT", "CHARACTER VARYING", "CHARACTER", "CHAR", "NAME":
-		return dbschema.String, nil, nil, true
+		return dbschema.String, nil, nil
 	case "BIGINT", "INTEGER", "SMALLINT", "INT", "INT2", "INT4", "INT8":
-		return dbschema.Int, nil, nil, true
+		return dbschema.Int, nil, nil
 	case "DOUBLE PRECISION", "REAL", "FLOAT4", "FLOAT8":
-		return dbschema.Float, nil, nil, true
+		return dbschema.Float, nil, nil
 	case "BOOLEAN":
-		return dbschema.Bool, nil, nil, true
+		return dbschema.Bool, nil, nil
 	case "TIMESTAMP WITH TIME ZONE", "TIMESTAMPTZ",
 		"TIMESTAMP WITHOUT TIME ZONE", "TIMESTAMP", "DATE", "TIME WITH TIME ZONE",
 		"TIME WITHOUT TIME ZONE", "TIME":
-		return dbschema.Time, nil, nil, true
+		return dbschema.Time, nil, nil
 	case "NUMERIC", "DECIMAL":
-		return dbschema.Decimal, nil, nil, true
+		return dbschema.Decimal, nil, nil
 	case "BYTEA":
-		return dbschema.Bytes, nil, nil, true
+		return dbschema.Bytes, nil, nil
 	case "USER-DEFINED":
 		// Fall through to udt_name check below.
 	}
@@ -103,10 +108,10 @@ func dbschemaTypeFromPostgres(dataType, udtName string) (dbschema.Type, *dbschem
 	// udt_name fallback for types that appear as USER-DEFINED in data_type.
 	switch udt {
 	case "timestamptz":
-		return dbschema.Time, nil, nil, true
+		return dbschema.Time, nil, nil
 	case "numeric":
-		return dbschema.Decimal, nil, nil, true
+		return dbschema.Decimal, nil, nil
 	}
 
-	return dbschema.Null, nil, nil, false
+	return dbschema.String, nil, nil
 }

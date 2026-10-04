@@ -9,7 +9,7 @@ import (
 	"github.com/dal-go/dalgo/dbschema"
 )
 
-func readForeignKeys(ctx context.Context, db *sql.DB, table string) ([]dbschema.ForeignKeyDef, error) {
+func readForeignKeys(ctx context.Context, db *sql.DB, schema, table string) ([]dbschema.ForeignKeyDef, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT c.oid, c.conname, source_column.attname,
 		       target_ns.nspname, target.relname, target_column.attname,
@@ -29,8 +29,8 @@ func readForeignKeys(ctx context.Context, db *sql.DB, table string) ([]dbschema.
 		  ON source_column.attrelid = source.oid AND source_column.attnum = source_key.attnum
 		JOIN pg_catalog.pg_attribute AS target_column
 		  ON target_column.attrelid = target.oid AND target_column.attnum = target_key.attnum
-		WHERE c.contype = 'f' AND source_ns.nspname = 'public' AND source.relname = $1
-		ORDER BY c.oid, source_key.position`, table)
+		WHERE c.contype = 'f' AND source_ns.nspname = $1 AND source.relname = $2
+		ORDER BY c.oid, source_key.position`, schema, table)
 	if err != nil {
 		return nil, fmt.Errorf("dalgo2postgres: foreign keys for %q: %w", table, err)
 	}
@@ -44,7 +44,7 @@ func readForeignKeys(ctx context.Context, db *sql.DB, table string) ([]dbschema.
 			return nil, fmt.Errorf("dalgo2postgres: foreign key scan: %w", err)
 		}
 		if id != lastID {
-			if targetNamespace == "public" {
+			if targetNamespace == schema {
 				targetNamespace = ""
 			}
 			keys = append(keys, dbschema.ForeignKeyDef{

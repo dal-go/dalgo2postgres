@@ -34,6 +34,28 @@ if err != nil {
 defer db.Close()
 ```
 
+## Schema reader options
+
+The schema reader (`ListCollections`, `DescribeCollection`, `ListIndexes`,
+`ListConstraints`, `ListReferrers`) lists tables and views of one PostgreSQL
+schema. Both constructors take optional settings:
+
+```go
+db, err := dalgo2postgres.NewDatabase(dsn,
+    dalgo2postgres.WithSchema("sales"),                              // default "public"
+    dalgo2postgres.WithIdentifierMode(dalgo2postgres.IdentifierExact)) // default IdentifierFoldLower
+```
+
+- `IdentifierFoldLower` (default) lower-cases a table name before looking it up,
+  matching the lower-cased tables this package's DDL creates.
+- `IdentifierExact` looks the table up under exactly the name given, so a table
+  created as `"Album"` is found as `Album` and not as `album`.
+
+A column whose type has no `dbschema.Type` (uuid, json, jsonb, arrays, enums,
+interval, inet, money, ...) is described as a `String` field; it never fails the
+table. Materialized views are not listed (PostgreSQL does not expose them in
+`information_schema`).
+
 ## Type mapping
 
 | `dbschema.Type` | PostgreSQL column type |
