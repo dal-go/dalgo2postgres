@@ -63,16 +63,18 @@ const nonDeterministicTextColumnsSQL = `
 // domain over citext, or an array of citext, is not reported; treat such
 // columns as inexact yourself.
 func (d *Database) NonDeterministicTextColumns(ctx context.Context, ref *dal.CollectionRef) ([]string, error) {
-	return nonDeterministicTextColumns(ctx, d.sqlDB, d.schemaFor(ref), d.resolveName(ref.Name()))
+	name := d.resolveName(ref.Name())
+	return nonDeterministicTextColumns(ctx, d.sqlDB, d.schemaFor(ref), name, collectionLabel(ref.Schema(), name))
 }
 
 // nonDeterministicTextColumns is the reader behind
 // [Database.NonDeterministicTextColumns], taking the already resolved schema and
-// table name so tests reach it with a mocked handle.
-func nonDeterministicTextColumns(ctx context.Context, db *sql.DB, schema, table string) ([]string, error) {
+// table name so tests reach it with a mocked handle. label names the table in
+// error messages (see [collectionLabel]).
+func nonDeterministicTextColumns(ctx context.Context, db *sql.DB, schema, table string, label quotedCollection) ([]string, error) {
 	rows, err := db.QueryContext(ctx, nonDeterministicTextColumnsSQL, schema, table)
 	if err != nil {
-		return nil, fmt.Errorf("dalgo2postgres: non-deterministic text columns of %q: %w", table, err)
+		return nil, fmt.Errorf("dalgo2postgres: non-deterministic text columns of %s: %w", label, err)
 	}
 	defer func() { _ = rows.Close() }()
 	columns := []string{}
@@ -80,7 +82,7 @@ func nonDeterministicTextColumns(ctx context.Context, db *sql.DB, schema, table 
 	for rows.Next() {
 		var name sql.NullString
 		if scanErr := rows.Scan(&name); scanErr != nil {
-			return nil, fmt.Errorf("dalgo2postgres: non-deterministic text columns of %q scan: %w", table, scanErr)
+			return nil, fmt.Errorf("dalgo2postgres: non-deterministic text columns of %s scan: %w", label, scanErr)
 		}
 		tableExists = true
 		if name.Valid {
@@ -88,10 +90,10 @@ func nonDeterministicTextColumns(ctx context.Context, db *sql.DB, schema, table 
 		}
 	}
 	if rowsErr := rows.Err(); rowsErr != nil {
-		return nil, fmt.Errorf("dalgo2postgres: non-deterministic text columns of %q rows: %w", table, rowsErr)
+		return nil, fmt.Errorf("dalgo2postgres: non-deterministic text columns of %s rows: %w", label, rowsErr)
 	}
 	if !tableExists {
-		return nil, newCollectionNotFoundError(table)
+		return nil, newQualifiedCollectionNotFoundError(label)
 	}
 	return columns, nil
 }

@@ -53,7 +53,8 @@ type Database struct {
 // that satisfies dal.DB + dal.ConcurrencyAware.
 //
 // A failure to open or reach the server is a [*ConnectionError]; its text holds
-// nothing from dsn or from the driver's own message.
+// nothing but the host, port and database name the driver parsed (each only when
+// it passes a strict check), and no other text of dsn or of the driver.
 //
 // Use [NewDatabaseWithOptions] when you need to supply per-collection
 // primary-key metadata (required for Insert/Get/Delete with map[string]any data).
@@ -116,7 +117,7 @@ type sqlOpener func(driverName, dataSourceName string) (*sql.DB, error)
 // credentials, whatever separator a string uses and however long a name is.
 //
 // A string the driver would misread (a quoted URL, a leading space, another
-// scheme) is refused before the driver is asked, with a [FailureMisread] error:
+// scheme, a key=value string whose host, user or database holds an equals sign) is refused before the driver is asked, with a [FailureMisread] error:
 // the text the driver takes for a setting name holds the credentials, and the
 // server it reaches would receive it.
 //

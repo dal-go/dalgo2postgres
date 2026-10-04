@@ -371,7 +371,7 @@ func driverFailures(sp spec) map[string]error {
 	echo := "failed to connect to `user=" + sp.user + " database=" + sp.database + "`: " +
 		sp.dsn + " " + strings.Join(sp.secrets, " | ")
 	wrap := func(err error) error { return &echoError{echo, err} }
-	return map[string]error{
+	failures := map[string]error{
 		"plain":            errors.New(echo),
 		"parse":            wrap(pgconn.NewParseConfigError(sp.dsn, echo, errors.New(echo))),
 		"server password":  wrap(&pgconn.PgError{Severity: "FATAL", Code: "28P01", Message: echo, Detail: echo, Hint: echo, Where: echo, SchemaName: echo, TableName: echo, ColumnName: echo, ConstraintName: echo}),
@@ -389,6 +389,12 @@ func driverFailures(sp spec) map[string]error {
 		"tls authority":    wrap(x509.UnknownAuthorityError{}),
 		"joined":           errors.Join(wrap(&net.DNSError{Err: echo}), wrap(&pgconn.PgError{Code: "28000", Message: echo})),
 	}
+	// One server failure for each sentence the package has for a SQLSTATE code, so
+	// that none of them can copy text unnoticed.
+	for code := range serverSentences {
+		failures["server sentence "+code] = wrap(&pgconn.PgError{Severity: "FATAL", Code: code, Message: echo, Detail: echo, Hint: echo})
+	}
+	return failures
 }
 
 // fakeAddr is a net.Addr whose text is whatever it is given.
@@ -479,6 +485,11 @@ func safeToDial(dsn string) bool {
 		}{f.Host, f.Port})
 	}
 	for _, e := range endpoints {
+		// A directory or an abstract name is a local socket (the default host of
+		// the driver is one), which a server on this machine may answer.
+		if strings.HasPrefix(e.host, "/") || strings.HasPrefix(e.host, "@") {
+			return false
+		}
 		unresolvable := strings.ContainsAny(e.host, ";=,&@ !%'\"#?/$()[]{}<>|~^*+\\\t\n\r\v\f")
 		local := e.host == "127.0.0.1" && e.port == 1
 		if !local && !unresolvable {
@@ -488,7 +499,34 @@ func safeToDial(dsn string) bool {
 	return true
 }
 
+func TestSafeToDial(t *testing.T) {
+	clearPGEnv(t)
+	for _, tc := range []struct {
+		name string
+		dsn  string
+		want bool
+	}{
+		{"the driver cannot parse it", "host=h port=notaport", true},
+		{"the string is refused", `"postgres://u:p@h/d"`, true},
+		{"port 1 of this machine", "host=127.0.0.1 port=1", true},
+		{"a host that cannot be resolved", "host=a;b port=5432", true},
+		{"a name that may resolve", "host=db.example port=5432", false},
+		{"another port of this machine", "host=127.0.0.1 port=5432", false},
+		{"a socket directory", "host=/var/run/postgresql port=1", false},
+		{"an abstract socket", "host=@pg port=1", false},
+		{"a socket directory among the fallbacks", "host=127.0.0.1,/tmp port=1", false},
+		{"no host: the driver's default is a socket directory", "dbname=d", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := safeToDial(tc.dsn); got != tc.want {
+				t.Errorf("safeToDial(%q) = %v, want %v", tc.dsn, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestConnectionErrorLeaksNothing_Property(t *testing.T) {
+	clearPGEnv(t)
 	allowed := allowedText()
 	var stats propertyStats
 	for i := 0; i < propertyIterations; i++ {
@@ -565,6 +603,7 @@ func TestConnectionErrorLeaksNothing_Property(t *testing.T) {
 }
 
 func TestPropertyGenerator_ProducesWhatItClaims(t *testing.T) {
+	clearPGEnv(t)
 	// Spot checks on the generator itself, so that a change to it cannot quietly
 	// empty the property of its meaning.
 	long, quoted, crossed, separators := false, false, map[string]bool{}, map[string]bool{}

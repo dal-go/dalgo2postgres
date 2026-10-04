@@ -69,12 +69,15 @@ schema.
 
 `NonDeterministicTextColumns(ctx, ref)` lists the columns of a table or view whose
 equality is not exact (type `citext`, or a non-deterministic collation such as a
-case-insensitive ICU collation), in column order. It addresses the table exactly
-as the schema reader does (reference schema, else `WithSchema`; name per
-`IdentifierMode`), returns an empty list when every column is exact, and a
-not-found error when the table does not exist, so an empty list always means
-"exists and exact". A domain over `citext` and an array of `citext` are not
-reported.
+case-insensitive ICU collation), in column order. It finds the table the way the
+schema reader does (reference schema, else `WithSchema`; name per
+`IdentifierMode`), except that it also answers for materialized views and foreign
+tables, which `DescribeCollection` reports as not found. It returns a not-found
+error when the table does not exist, and an empty list when the table exists and
+none of its columns is `citext` or has a non-deterministic collation. A domain
+over `citext` and an array of `citext` are not reported (treat such columns as
+inexact yourself), and `char(n)` equality, which ignores trailing spaces, is not
+covered.
 
 `WithSchema` and `IdentifierExact` affect **only the schema reader**. The DDL
 this package writes still lower-cases every name (see "Identifier case folding"
@@ -110,9 +113,9 @@ when they cannot open or reach the server. Its text is built, never filtered:
 - the **host, port and database name** the driver itself parsed, each only when it
   passes a strict check and is not repeated from a secret (below).
 
-Nothing from the connection string, and no message of the driver or the server
-(not a setting name, not a server's "role ... does not exist"), is copied into
-it: those hold the user name and the password. For the same reason the driver's
+Nothing but the host, port and database name the driver parsed, and no message of
+the driver or the server (not a setting name, not a server's "role ... does not
+exist"), is copied into it: those hold the user name and the password. For the same reason the driver's
 error is not reachable: `errors.Unwrap` returns nil. Callers branch on the fields:
 
 ```go
@@ -150,11 +153,11 @@ A part is named only when:
 
 What this means for a string you write:
 
-- Separate `key=value` pairs with **white space**. A semicolon, comma or ampersand
-  (the PHP PDO and Npgsql habit, `host=h;user=u;password=p`) is read by the
-  driver as part of the value before it, so the string connects to the wrong place
-  or not at all; the error names nothing of it (the host and database are left out
-  because they do not pass the check).
+- Separate `key=value` pairs with **white space**, and put a value with a space in
+  single quotes. A keyword string whose host, user or database value holds an
+  equals sign (the sign of a pair that a semicolon, comma or ampersand failed to
+  separate, as in `host=h;user=u;password=p`) is refused before any connection is
+  attempted (`FailureMisread`); the error names nothing of it.
 - Write a URL that **starts exactly** with `postgres://` or `postgresql://` and
   percent-encode a password with a special character (`p%2Fss`, not `p/ss`). A URL
   in literal quotes (as `docker --env-file` keeps them), with a leading space, in

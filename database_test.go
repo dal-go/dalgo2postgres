@@ -93,6 +93,7 @@ func TestNewDatabase_Connects(t *testing.T) {
 }
 
 func TestNewDatabase_RejectsBadDSN(t *testing.T) {
+	clearPGEnv(t)
 	db, err := NewDatabase("postgres://nobody:wrong@127.0.0.1:15432/noexist?sslmode=disable")
 	if err == nil {
 		_ = db.Close()
