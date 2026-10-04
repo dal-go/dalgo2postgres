@@ -2,8 +2,10 @@ package dalgo2postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/dal-go/dalgo/dal"
@@ -98,6 +100,18 @@ func TestNewDatabase_RejectsBadDSN(t *testing.T) {
 	}
 	if db != nil {
 		t.Errorf("expected nil db on error, got %T", db)
+	}
+	// The real driver, nothing listening on the port: its text names the user,
+	// and a server's would add the password's fate. Neither may reach the error;
+	// the host, port and database name, which passed the check, are named.
+	for _, secret := range []string{"nobody", "wrong"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("error text leaks %q: %v", secret, err)
+		}
+	}
+	var connErr *ConnectionError
+	if !errors.As(err, &connErr) || connErr.Kind != FailureNetwork || connErr.Host != "127.0.0.1" || connErr.Port != "15432" || connErr.Database != "noexist" {
+		t.Errorf("error = %#v, want a network failure naming host 127.0.0.1, port 15432 and database noexist", err)
 	}
 }
 

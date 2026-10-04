@@ -28,7 +28,7 @@ func (d *Database) ListConstraints(ctx context.Context, ref *dal.CollectionRef) 
 		d.schemaFor(ref), d.resolveName(ref.Name()),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("dalgo2postgres: ListConstraints %q: %w", ref.Name(), err)
+		return nil, fmt.Errorf("dalgo2postgres: ListConstraints %s: %w", collectionLabel(ref.Schema(), ref.Name()), err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -80,7 +80,7 @@ func (d *Database) ListReferrers(ctx context.Context, ref *dal.CollectionRef) ([
 		d.schemaFor(ref), d.resolveName(ref.Name()),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("dalgo2postgres: ListReferrers %q: %w", ref.Name(), err)
+		return nil, fmt.Errorf("dalgo2postgres: ListReferrers %s: %w", collectionLabel(ref.Schema(), ref.Name()), err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -93,7 +93,7 @@ func (d *Database) ListReferrers(ctx context.Context, ref *dal.CollectionRef) ([
 			return nil, fmt.Errorf("dalgo2postgres: ListReferrers scan: %w", scanErr)
 		}
 		if id != lastID {
-			out = append(out, dbschema.Referrer{Collection: dal.NewRootCollectionRef(tbl, "")})
+			out = append(out, dbschema.Referrer{Collection: referrerRef(ref, tbl)})
 			lastID = id
 		}
 		referrer := &out[len(out)-1]
@@ -106,4 +106,16 @@ func (d *Database) ListReferrers(ctx context.Context, ref *dal.CollectionRef) ([
 		out = []dbschema.Referrer{}
 	}
 	return out, nil
+}
+
+// referrerRef is the collection reference of a referencing table. Referrers
+// are read from the schema of the queried reference, so when that reference
+// named its schema the referrer names it too: passed back to the reader, it
+// addresses the table that was found, not a same-named table in the configured
+// schema.
+func referrerRef(queried *dal.CollectionRef, table string) dal.CollectionRef {
+	if schema := queried.Schema(); schema != "" {
+		return dal.NewQualifiedRootCollectionRef(schema, table, "")
+	}
+	return dal.NewRootCollectionRef(table, "")
 }

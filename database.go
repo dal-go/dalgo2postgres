@@ -17,7 +17,6 @@ package dalgo2postgres
 import (
 	"context"
 	"database/sql"
-	"fmt"
 
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/dalgo2sql"
@@ -42,7 +41,6 @@ type Database struct {
 
 	dal.DB         // delegate for the dal.DB surface
 	sqlDB  *sql.DB // direct handle for DDL + introspection queries
-	dsn    string  // remembered for diagnostics
 
 	schema         string         // schema the reader inspects; "" means DefaultSchema
 	identifierMode IdentifierMode // how reader table names are matched
@@ -53,6 +51,9 @@ type Database struct {
 // surface connectivity errors at construction time, wraps the *sql.DB via
 // dalgo2sql.NewDatabase for the dal.DB surface, and returns a *Database
 // that satisfies dal.DB + dal.ConcurrencyAware.
+//
+// A failure to open or reach the server is a [*ConnectionError]; its text holds
+// nothing from dsn or from the driver's own message.
 //
 // Use [NewDatabaseWithOptions] when you need to supply per-collection
 // primary-key metadata (required for Insert/Get/Delete with map[string]any data).
@@ -80,21 +81,61 @@ func NewDatabase(dsn string, options ...Option) (*Database, error) {
 // inspects ([WithSchema]) and whether it matches table names exactly
 // ([WithIdentifierMode]). A nil option is ignored; an unknown IdentifierMode is
 // an error, returned before any connection is attempted.
+//
+// A failure to open or reach the server is a [*ConnectionError], as for
+// [NewDatabase].
 func NewDatabaseWithOptions(dsn string, schema dal.Schema, opts dalgo2sql.DbOptions, options ...Option) (*Database, error) {
+	return newDatabase(dsn, schema, opts, options, sql.Open)
+}
+
+// newDatabase is the body of [NewDatabaseWithOptions], taking the function that
+// opens the *sql.DB so tests can make the driver fail in every way a driver does.
+func newDatabase(dsn string, schema dal.Schema, opts dalgo2sql.DbOptions, options []Option, open sqlOpener) (*Database, error) {
 	if err := checkOptions(options); err != nil {
 		return nil, err
 	}
 	applyPostgresDbOptionDefaults(&opts)
 
-	sqlDB, err := sql.Open("pgx", dsn)
+	sqlDB, err := openVerified(dsn, open)
 	if err != nil {
-		return nil, fmt.Errorf("dalgo2postgres: sql.Open(%q): %w", dsn, err)
+		return nil, err
+	}
+	return newDatabaseFromSQL(sqlDB, schema, opts, options), nil
+}
+
+// sqlOpener is [sql.Open]; it is a seam so tests can make the driver fail.
+type sqlOpener func(driverName, dataSourceName string) (*sql.DB, error)
+
+// openVerified opens dsn through open and pings it. A failure is a
+// [*ConnectionError]: its text is a fixed sentence chosen by the kind of failure
+// (told from the types in the driver's error, never from its text), plus the
+// host, port and database name of the driver's own parsed configuration, each only
+// when it passes a strict check and repeats neither the user name nor the
+// password. No text of dsn and no message of the driver or the server is copied
+// into it, and the driver's error is not reachable from it: both hold the
+// credentials, whatever separator a string uses and however long a name is.
+//
+// A string the driver would misread (a quoted URL, a leading space, another
+// scheme) is refused before the driver is asked, with a [FailureMisread] error:
+// the text the driver takes for a setting name holds the credentials, and the
+// server it reaches would receive it.
+//
+// The driver is asked even when pgx cannot parse dsn: the string may be a name
+// registered with stdlib.RegisterConnConfig, which only the driver knows.
+func openVerified(dsn string, open sqlOpener) (*sql.DB, error) {
+	info := inspectDSN(dsn)
+	if info.misread {
+		return nil, &ConnectionError{Kind: FailureMisread}
+	}
+	sqlDB, err := open("pgx", dsn)
+	if err != nil {
+		return nil, info.describe("sql.Open", err)
 	}
 	if pingErr := sqlDB.PingContext(context.Background()); pingErr != nil {
 		_ = sqlDB.Close()
-		return nil, fmt.Errorf("dalgo2postgres: PingContext(%q): %w", dsn, pingErr)
+		return nil, info.describe("PingContext", pingErr)
 	}
-	return newDatabaseFromSQL(sqlDB, dsn, schema, opts, options), nil
+	return sqlDB, nil
 }
 
 // Close closes the underlying *sql.DB. After Close the Database value

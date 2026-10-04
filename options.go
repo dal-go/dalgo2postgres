@@ -33,10 +33,10 @@ const (
 	// were created with mixed-case names.
 	//
 	// The mode affects only the schema reader (ListCollections,
-	// DescribeCollection, ListIndexes, ListConstraints, ListReferrers). The DDL
-	// this package writes still lower-cases every name, and record operations
-	// address tables as dalgo2sql renders them, resolved by the connection's
-	// search_path.
+	// DescribeCollection, ListIndexes, ListConstraints, ListReferrers,
+	// NonDeterministicTextColumns). The DDL this package writes still
+	// lower-cases every name, and record operations address tables as dalgo2sql
+	// renders them, resolved by the connection's search_path.
 	IdentifierExact
 )
 
@@ -46,6 +46,13 @@ func (m IdentifierMode) valid() bool {
 }
 
 // Option customises how a [Database] reads its schema.
+//
+// An option must be free of side effects and must only set fields of the
+// Database it is given: the constructors apply every option twice, first to a
+// zero Database (to reject an invalid set before any connection is attempted,
+// when the embedded dal.DB is still nil), then to the real one. An option that
+// touches anything else, or that does something observable when it runs, would
+// run twice and, the first time, against a Database that has no connection.
 type Option func(*Database)
 
 // WithSchema makes the schema reader inspect the named PostgreSQL schema
@@ -56,9 +63,9 @@ type Option func(*Database)
 // ([dal.NewQualifiedRootCollectionRef]) is read from that schema instead.
 //
 // The option affects only the schema reader (ListCollections,
-// DescribeCollection, ListIndexes, ListConstraints, ListReferrers). The DDL this
-// package writes and record operations still follow the connection's
-// search_path.
+// DescribeCollection, ListIndexes, ListConstraints, ListReferrers,
+// NonDeterministicTextColumns). The DDL this package writes and record
+// operations still follow the connection's search_path.
 func WithSchema(name string) Option {
 	return func(d *Database) { d.schema = name }
 }
@@ -98,11 +105,10 @@ func (d *Database) resolveName(name string) string {
 // newDatabaseFromSQL wraps an already open, already verified *sql.DB. It is
 // the part of construction that needs no server, so unit tests reach it with a
 // mocked handle.
-func newDatabaseFromSQL(sqlDB *sql.DB, dsn string, schema dal.Schema, opts dalgo2sql.DbOptions, options []Option) *Database {
+func newDatabaseFromSQL(sqlDB *sql.DB, schema dal.Schema, opts dalgo2sql.DbOptions, options []Option) *Database {
 	d := &Database{
 		DB:    dalgo2sql.NewDatabase(sqlDB, schema, opts),
 		sqlDB: sqlDB,
-		dsn:   dsn,
 	}
 	applyOptions(d, options)
 	return d

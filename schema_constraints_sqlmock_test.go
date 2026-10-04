@@ -89,6 +89,9 @@ func TestListReferrers_OneReferrerPerConstraintInKeyOrder(t *testing.T) {
 	}
 	var gotShapes []shape
 	for _, r := range got {
+		if r.Collection.Schema() != "" {
+			t.Errorf("referrer %s names schema %q, but the queried reference named none", r.Collection.Name(), r.Collection.Schema())
+		}
 		gotShapes = append(gotShapes, shape{r.Collection.Name(), r.Fields})
 	}
 	want := []shape{
@@ -127,7 +130,7 @@ func TestListReferrers_Errors(t *testing.T) {
 	t.Run("scan", func(t *testing.T) {
 		d, mock := newSchemaMockDatabase(t)
 		mock.ExpectQuery(`referrer_table`).
-			WillReturnRows(sqlmock.NewRows([]string{"referrer_table", "referrer_col"}).AddRow(nil, "c"))
+			WillReturnRows(sqlmock.NewRows([]string{"oid", "referrer_table", "referrer_col"}).AddRow(int64(1), nil, "c"))
 		if _, err := d.ListReferrers(context.Background(), &ref); err == nil || !strings.Contains(err.Error(), "scan") {
 			t.Fatalf("err = %v", err)
 		}
@@ -135,7 +138,7 @@ func TestListReferrers_Errors(t *testing.T) {
 	t.Run("rows", func(t *testing.T) {
 		d, mock := newSchemaMockDatabase(t)
 		mock.ExpectQuery(`referrer_table`).
-			WillReturnRows(sqlmock.NewRows([]string{"referrer_table", "referrer_col"}).AddRow("a", "b").RowError(0, errors.New("broke")))
+			WillReturnRows(sqlmock.NewRows([]string{"oid", "referrer_table", "referrer_col"}).AddRow(int64(1), "a", "b").RowError(0, errors.New("broke")))
 		if _, err := d.ListReferrers(context.Background(), &ref); err == nil || !strings.Contains(err.Error(), "broke") {
 			t.Fatalf("err = %v", err)
 		}

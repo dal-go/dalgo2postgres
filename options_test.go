@@ -24,7 +24,7 @@ func newSchemaMockDatabase(t *testing.T, options ...Option) (*Database, sqlmock.
 		}
 		_ = sqlDB.Close()
 	})
-	return newDatabaseFromSQL(sqlDB, "mock", dal.NewSchema(nil, nil), dalgo2sql.DbOptions{}, options), mock
+	return newDatabaseFromSQL(sqlDB, dal.NewSchema(nil, nil), dalgo2sql.DbOptions{}, options), mock
 }
 
 func TestNewDatabaseFromSQL_Defaults(t *testing.T) {
@@ -37,9 +37,6 @@ func TestNewDatabaseFromSQL_Defaults(t *testing.T) {
 	}
 	if d.DB == nil {
 		t.Error("embedded dal.DB must be set")
-	}
-	if d.dsn != "mock" {
-		t.Errorf("dsn = %q, want %q", d.dsn, "mock")
 	}
 }
 
