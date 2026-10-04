@@ -8,6 +8,10 @@ on:
     branches:
       - '**'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   strongo_workflow:
     permissions:
@@ -17,7 +21,12 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     with:
       cgo_enabled: false
-      disable-version-bumping: true
+      # Merges to main are tagged by CI; Version is read from build info.
+      code_coverage: true
+      # Measured on main without a database: 4.5% (go test ./... -coverprofile;
+      # the DB-backed tests skip in this job, the integration job below runs
+      # them). Floor sits just under so measurement noise cannot fail it.
+      min_test_coverage_percent: 4
 
   # Runs the shared dalgotest conformance suite against a real PostgreSQL.
   #
