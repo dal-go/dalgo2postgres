@@ -295,7 +295,7 @@ func standsAlone(value string, before byte, after string) bool {
 	if isWordByte(value[0]) && isWordByte(before) {
 		return false
 	}
-	return !(isWordByte(value[len(value)-1]) && after != "" && isWordByte(after[0]))
+	return !isWordByte(value[len(value)-1]) || after == "" || !isWordByte(after[0])
 }
 
 // settingsOf returns the settings a connection string carries, best effort:
