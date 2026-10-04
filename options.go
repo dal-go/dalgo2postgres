@@ -105,11 +105,10 @@ func (d *Database) resolveName(name string) string {
 // newDatabaseFromSQL wraps an already open, already verified *sql.DB. It is
 // the part of construction that needs no server, so unit tests reach it with a
 // mocked handle.
-func newDatabaseFromSQL(sqlDB *sql.DB, dsn string, schema dal.Schema, opts dalgo2sql.DbOptions, options []Option) *Database {
+func newDatabaseFromSQL(sqlDB *sql.DB, schema dal.Schema, opts dalgo2sql.DbOptions, options []Option) *Database {
 	d := &Database{
 		DB:    dalgo2sql.NewDatabase(sqlDB, schema, opts),
 		sqlDB: sqlDB,
-		dsn:   dsn,
 	}
 	applyOptions(d, options)
 	return d

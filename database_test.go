@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/dal-go/dalgo/dal"
@@ -98,6 +99,13 @@ func TestNewDatabase_RejectsBadDSN(t *testing.T) {
 	}
 	if db != nil {
 		t.Errorf("expected nil db on error, got %T", db)
+	}
+	// The real driver, nothing listening on the port: its text names the user,
+	// and a server's would add the password's fate. Neither may reach the error.
+	for _, secret := range []string{"nobody", "wrong", "15432"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("error text leaks %q: %v", secret, err)
+		}
 	}
 }
 

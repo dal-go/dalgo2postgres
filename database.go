@@ -41,7 +41,6 @@ type Database struct {
 
 	dal.DB         // delegate for the dal.DB surface
 	sqlDB  *sql.DB // direct handle for DDL + introspection queries
-	dsn    string  // remembered for diagnostics
 
 	schema         string         // schema the reader inspects; "" means DefaultSchema
 	identifierMode IdentifierMode // how reader table names are matched
@@ -89,7 +88,7 @@ func NewDatabaseWithOptions(dsn string, schema dal.Schema, opts dalgo2sql.DbOpti
 	if err != nil {
 		return nil, err
 	}
-	return newDatabaseFromSQL(sqlDB, dsn, schema, opts, options), nil
+	return newDatabaseFromSQL(sqlDB, schema, opts, options), nil
 }
 
 // sqlOpener is [sql.Open]; it is a seam so tests can make the driver fail.
@@ -97,13 +96,13 @@ type sqlOpener func(driverName, dataSourceName string) (*sql.DB, error)
 
 // openVerified opens dsn through open and pings it. No part of the connection
 // string other than the host and the database name reaches an error's text: a
-// DSN that cannot be parsed is named not at all, and the driver's own error
-// text, which may echo the string, is redacted (see [connectionError]).
+// DSN that cannot be read with confidence is named not at all, and the driver's
+// own error text, which may echo the string, is redacted (see [connectionError]).
+//
+// The driver is asked even when pgx cannot parse dsn: the string may be a name
+// registered with stdlib.RegisterConnConfig, which only the driver knows.
 func openVerified(dsn string, open sqlOpener) (*sql.DB, error) {
 	details := inspectDSN(dsn)
-	if !details.parsed {
-		return nil, details.unparsable()
-	}
 	sqlDB, err := open("pgx", dsn)
 	if err != nil {
 		return nil, details.wrap("sql.Open", err)
