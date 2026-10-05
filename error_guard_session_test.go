@@ -151,14 +151,14 @@ func TestATransactionLostInTheMiddleIsAConnectionError(t *testing.T) {
 				_, err := tx.ExecuteQueryToRecordsReader(ctx, textQuery())
 				return err
 			})
-			assertAClassifiedConnectionError(t, err)
+			_ = assertAClassifiedConnectionError(t, err)
 		})
 		t.Run(name+" in a read-write transaction", func(t *testing.T) {
 			db := lazyDatabase(t, sessionServer(onStatement))
 			err := db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
 				return tx.Insert(ctx, ordersRecord())
 			})
-			assertAClassifiedConnectionError(t, err)
+			_ = assertAClassifiedConnectionError(t, err)
 		})
 	}
 }

@@ -61,7 +61,7 @@ func TestARollbackThatFailsOnTheConnection(t *testing.T) {
 			t.Run("the statement failed on the connection and the rollback with the driver's connect error", func(t *testing.T) {
 				db := rollbackFailingDatabase(t, connectFailure(t, refuseEveryDial), rollbackConnectFailure(t))
 				err := kind.run(db, readsAStatement)
-				assertAClassifiedConnectionError(t, err)
+				_ = assertAClassifiedConnectionError(t, err)
 			})
 			t.Run("the statement was answered by a shutdown and the rollback says the connection is closed", func(t *testing.T) {
 				db := rollbackFailingDatabase(t, serverError("57P01"), errors.New("conn closed"))
@@ -80,7 +80,7 @@ func TestARollbackThatFailsOnTheConnection(t *testing.T) {
 			t.Run("the worker failed on its own and the rollback on a reset", func(t *testing.T) {
 				db := rollbackFailingDatabase(t, errors.New("unused"), droppedFailures()[0].err())
 				err := kind.run(db, returnsItsOwn(errors.New("the worker's own error")))
-				assertAClassifiedConnectionError(t, err)
+				_ = assertAClassifiedConnectionError(t, err)
 			})
 		})
 	}
@@ -168,11 +168,11 @@ func TestWhatATransactionAddsAroundTheWorkerIsGuarded(t *testing.T) {
 	for _, kind := range transactionKinds() {
 		t.Run(kind.name+" commit", func(t *testing.T) {
 			db := transactionalDatabase(t, connectFailure(t, refuseEveryDial))
-			assertAClassifiedConnectionError(t, kind.run(db, func(context.Context, dal.ReadSession) error { return nil }))
+			_ = assertAClassifiedConnectionError(t, kind.run(db, func(context.Context, dal.ReadSession) error { return nil }))
 		})
 		t.Run(kind.name+" begin", func(t *testing.T) {
 			db := lazyDatabase(t, refuseEveryDial)
-			assertAClassifiedConnectionError(t, kind.run(db, func(context.Context, dal.ReadSession) error { return nil }))
+			_ = assertAClassifiedConnectionError(t, kind.run(db, func(context.Context, dal.ReadSession) error { return nil }))
 		})
 	}
 }
