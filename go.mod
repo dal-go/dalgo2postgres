@@ -21,7 +21,10 @@ require (
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/mschoch/smat v0.2.0 // indirect
+	github.com/stretchr/testify v1.12.1 // indirect
 	github.com/strongo/random v0.0.3 // indirect
+	github.com/strongo/validation v0.0.15 // indirect
+	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.39.0 // indirect
