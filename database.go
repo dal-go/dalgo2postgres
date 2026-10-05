@@ -7,7 +7,10 @@
 //   - structured queries, which dalgo2sql compiles with its typed PostgreSQL
 //     compiler (every value a bound argument, every name quoted) and which run
 //     filtering, ordering, grouping, aggregation and joins on the server; the
-//     constructors force the dialect, so the legacy text emitter is never reached
+//     constructors force the dialect, so the legacy text emitter is never reached,
+//     and [*Database] declares what the dialect runs on the server
+//     ([dal.QueryCapabilitiesProvider], [dal.NativeJoinProvider] and
+//     [dal.JoinFieldsProvider])
 //   - [dbschema.SchemaReader] for schema introspection via information_schema
 //     and pg_indexes
 //   - [ddl.SchemaModifier] for PostgreSQL-flavored CREATE / DROP / ALTER
@@ -93,7 +96,10 @@ func NewDatabase(dsn string, options ...Option) (*Database, error) {
 // Three fields of opts are replaced whatever the caller set: Placeholder (always
 // dollar markers), StructuredQueryDialect (always "postgres", so no structured
 // query reaches dalgo2sql's legacy text emitter) and IdentifierCase (resolved from
-// the mode above). IsAlreadyExists is defaulted only when nil.
+// the mode above). IsAlreadyExists is defaulted only when nil. A caller's own
+// compiler is not accepted beside the dialect: NativeStructuredQueryCompiler,
+// NativeJoinEligibility and NativeJoinHintTranslator are an error too, returned before
+// any connection is attempted.
 //
 // A failure to open or reach the server is a [*ConnectionError], as for
 // [NewDatabase].

@@ -143,6 +143,8 @@ jobs:
             UnknownTableIsNotFoundWithASuggestion \
             ExactModeAndQualifiedSchema \
             ReadsRunOnOneLeasedConnection \
+            RecordsetReader \
+            RecordsCarryTheirKey \
             ContextEndsBetweenAndDuringTheStatements; do
             if ! grep -qE "^\s*--- PASS: TestStructuredQueryIntegration_${name} \(" /tmp/gotest.log; then
               echo "::error::TestStructuredQueryIntegration_${name} did not run to a pass"

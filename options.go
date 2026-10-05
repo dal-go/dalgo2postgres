@@ -133,7 +133,13 @@ type settings struct {
 // it; both set and different is an error; neither is [IdentifierFoldLower]. An
 // IdentifierCase or an IdentifierMode this package does not define is an error: a
 // caller that meant to fold names must not silently get the exact mode.
+//
+// DbOptions.NativeStructuredQueryCompiler, NativeJoinEligibility and
+// NativeJoinHintTranslator are an error too (see refuseNativeHooks).
 func resolveSettings(opts dalgo2sql.DbOptions, options []Option) (settings, error) {
+	if err := refuseNativeHooks(opts); err != nil {
+		return settings{}, err
+	}
 	var probe Database
 	applyOptions(&probe, options)
 	mode, err := probe.chooseIdentifierMode(opts.IdentifierCase)
@@ -146,6 +152,30 @@ func resolveSettings(opts dalgo2sql.DbOptions, options []Option) (settings, erro
 	}
 	applyPostgresDbOptionDefaults(&opts)
 	return settings{db: opts, mode: mode}, nil
+}
+
+// refuseNativeHooks refuses the fields of opts that replace dalgo2sql's own
+// compilation of a structured query. With the dialect forced to "postgres" a caller's
+// compiler would be mixed with the dialect: dalgo2sql would still declare the dialect's
+// capabilities (grouping, aggregates) and accept a join by the typed compiler's catalog
+// check, and then send the whole grouped query or join to a compiler that never promised
+// them, writing the values and names as that compiler chooses, not as bound arguments
+// and quoted names. A database that cannot give what it declares is worse than one that
+// is refused at construction. The fields did not exist in dalgo2sql v0.11.0, which this
+// package required until this change, and no repository of the fleet sets them.
+func refuseNativeHooks(opts dalgo2sql.DbOptions) error {
+	var field string
+	switch {
+	case opts.NativeStructuredQueryCompiler != nil:
+		field = "NativeStructuredQueryCompiler"
+	case opts.NativeJoinEligibility != nil:
+		field = "NativeJoinEligibility"
+	case opts.NativeJoinHintTranslator != nil:
+		field = "NativeJoinHintTranslator"
+	default:
+		return nil
+	}
+	return fmt.Errorf("dalgo2postgres: structured queries are compiled by the PostgreSQL dialect; DbOptions.%s is not supported", field)
 }
 
 // chooseIdentifierMode is the identifier mode the options of d and the caller's

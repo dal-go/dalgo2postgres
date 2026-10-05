@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -123,6 +124,13 @@ type queryFixture struct {
 // whose objects are then addressed unqualified through the search_path.
 func openQueryFixture(t *testing.T, schema string, mode IdentifierMode, ddl []string, extraSchemas ...string) *queryFixture {
 	t.Helper()
+	return openQueryFixtureWithOptions(t, dalgo2sql.DbOptions{}, schema, mode, ddl, extraSchemas...)
+}
+
+// openQueryFixtureWithOptions is openQueryFixture for a Database built with the
+// caller's DbOptions (the primary keys of its recordsets, for one).
+func openQueryFixtureWithOptions(t *testing.T, dbOptions dalgo2sql.DbOptions, schema string, mode IdentifierMode, ddl []string, extraSchemas ...string) *queryFixture {
+	t.Helper()
 	dsn := testDSN(t)
 	cfg, err := pgx.ParseConfig(dsn)
 	if err != nil {
@@ -159,7 +167,7 @@ func openQueryFixture(t *testing.T, schema string, mode IdentifierMode, ddl []st
 	}
 
 	options := []Option{WithSchema(schema), WithIdentifierMode(mode)}
-	resolved, err := resolveSettings(dalgo2sql.DbOptions{}, options)
+	resolved, err := resolveSettings(dbOptions, options)
 	if err != nil {
 		t.Fatalf("resolveSettings: %v", err)
 	}
@@ -489,9 +497,9 @@ func TestStructuredQueryIntegration_CountDistinct(t *testing.T) {
 // an integer): the plan DALgo makes from the database's answer.
 func TestStructuredQueryIntegration_PlansJoinsOnTheServerOrInDALgo(t *testing.T) {
 	f := openQueryFixture(t, "test_sq_plans", IdentifierFoldLower, albumDDL)
-	joiner, ok := dal.As[dal.NativeJoinProvider](f.db.DB)
+	joiner, ok := dal.As[dal.NativeJoinProvider](f.db)
 	if !ok {
-		t.Fatal("the backend declares no native join provider")
+		t.Fatal("the Database declares no native join provider")
 	}
 	joinQuery := func(left, right string) dal.StructuredQuery {
 		on := dal.NewComparison(dal.NewFieldRef("a", left), dal.Equal, dal.NewFieldRef("r", right))
@@ -675,6 +683,11 @@ func TestStructuredQueryIntegration_ReadsRunOnOneLeasedConnection(t *testing.T) 
 	query := func() dal.StructuredQuery { return albumQuery().SelectColumns(titleColumn()) }
 	ctx := context.Background()
 
+	// This subtest shows what the pool reports and which backend runs the statements.
+	// It does not show by itself that a lease is taken: database/sql hands out the
+	// connection it released last, so two statements through the pool in a row run on one
+	// backend too, and one connection is in use while any rows are open. The next subtest
+	// is the one that tells a lease from the pool.
 	t.Run("the two statements run on one backend process, held until Close", func(t *testing.T) {
 		f.trace.reset()
 		reader, err := f.db.ExecuteQueryToRecordsReader(ctx, query())
@@ -696,6 +709,76 @@ func TestStructuredQueryIntegration_ReadsRunOnOneLeasedConnection(t *testing.T) 
 		}
 		if got := f.sqlDB.Stats().InUse; got != 0 {
 			t.Errorf("connections in use after Close = %d, want 0", got)
+		}
+	})
+	t.Run("no other caller can take the connection between the two statements", func(t *testing.T) {
+		// A pool of one connection and a second caller that asks it for a connection while
+		// the catalog lookup is still running, so that it is queued before the lookup's
+		// connection comes free. A read that held no lease would give the connection back
+		// when the lookup's rows close, the pool would hand it straight to the queued
+		// caller, and the statement would wait for a connection that never comes free. With
+		// a lease the statement runs on the lookup's own connection, and the queued caller
+		// is served only when the reader is done.
+		g := openQueryFixture(t, "test_sq_lease_rival", IdentifierFoldLower, albumDDL)
+		g.sqlDB.SetMaxOpenConns(1)
+		type rivalResult struct {
+			conn *sql.Conn
+			err  error
+		}
+		rival := make(chan rivalResult, 1) // buffered: the goroutine never outlives the test blocked
+		rivalCtx, stopRival := context.WithTimeout(ctx, 60*time.Second)
+		defer stopRival()
+		var once sync.Once
+		g.trace.onEnd(func(statement string) {
+			if !isCatalogStatement(statement) {
+				return
+			}
+			once.Do(func() {
+				queued := g.sqlDB.Stats().WaitCount
+				go func() {
+					conn, err := g.sqlDB.Conn(rivalCtx)
+					rival <- rivalResult{conn, err}
+				}()
+				// The rival is queued once the pool counts one more wait; the hook returns
+				// only then, so the lookup's connection comes free after the rival is queued.
+				giveUp := time.Now().Add(20 * time.Second)
+				for g.sqlDB.Stats().WaitCount == queued {
+					if time.Now().After(giveUp) {
+						t.Error("the second caller was never queued for a connection")
+						return
+					}
+					runtime.Gosched()
+				}
+			})
+		})
+		g.trace.reset()
+		bounded, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		reader, err := g.db.ExecuteQueryToRecordsReader(bounded, query())
+		if err != nil {
+			t.Fatalf("the read did not get its statement through while a second caller was queued: %v\nstatements sent: %v", err, g.trace.sent())
+		}
+		sent := g.trace.sent()
+		if len(sent) < 2 || !isCatalogStatement(sent[0].sql) || isCatalogStatement(sent[1].sql) || sent[0].pid == 0 || sent[0].pid != sent[1].pid {
+			t.Errorf("statements = %v, want the catalog lookup and the statement on one backend", sent)
+		}
+		select {
+		case <-rival:
+			t.Error("the second caller was given a connection while the reader held it")
+		default:
+		}
+		if err := reader.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		select {
+		case got := <-rival:
+			if got.err != nil {
+				t.Errorf("the second caller was not given the connection when the reader was closed: %v", got.err)
+			} else {
+				_ = got.conn.Close()
+			}
+		case <-time.After(20 * time.Second):
+			t.Error("the second caller was not given the connection when the reader was closed")
 		}
 	})
 	t.Run("given back at the end of the rows, with no Close", func(t *testing.T) {
@@ -743,18 +826,178 @@ func TestStructuredQueryIntegration_ReadsRunOnOneLeasedConnection(t *testing.T) 
 	})
 }
 
+// The second public read entry point, ExecuteQueryToRecordsetReader, runs a structured
+// query through its own reader: it types its columns from what pgx reports for them
+// (a NUMERIC is a float64, a timestamptz a time.Time, a boolean, a bytea) and has a
+// lease release of its own. Its rows come back as asked, and its connection goes back
+// when the reader is closed and when the rows are read to their end with no Close.
+func TestStructuredQueryIntegration_RecordsetReader(t *testing.T) {
+	f := openQueryFixture(t, "test_sq_recordset", IdentifierFoldLower, albumDDL)
+	ctx := context.Background()
+	columns := []string{"AlbumId", "Title", "Price", "Released", "InStock", "Cover"}
+	query := func() dal.StructuredQuery {
+		selected := make([]dal.Column, len(columns))
+		for i, name := range columns {
+			selected[i] = dal.Column{Expression: field(name)}
+		}
+		return albumQuery().Where(dal.WhereField("AlbumId", dal.LessThen, 3)).SelectColumns(selected...)
+	}
+	// next returns the values of the next row, or nil at the end of the rows.
+	next := func(t *testing.T, reader dal.RecordsetReader) []any {
+		t.Helper()
+		row, rs, err := reader.Next()
+		if errors.Is(err, dal.ErrNoMoreRecords) {
+			return nil
+		}
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		values, err := row.Data(rs)
+		if err != nil {
+			t.Fatalf("row.Data: %v", err)
+		}
+		return values
+	}
+	checkRow := func(t *testing.T, got []any, id int64, title string, price float64, released time.Time, inStock bool, cover []byte) {
+		t.Helper()
+		if len(got) != len(columns) {
+			t.Fatalf("row = %v, want %d values", got, len(columns))
+		}
+		gotReleased, _ := got[3].(time.Time)
+		if got[0] != id || got[1] != title || got[2] != price || !gotReleased.Equal(released) || got[4] != inStock || !reflect.DeepEqual(got[5], cover) {
+			t.Errorf("row = %#v, want %d, %q, %v, %v, %v, %v", got, id, title, price, released, inStock, cover)
+		}
+	}
+	first := func(t *testing.T, got []any) {
+		t.Helper()
+		checkRow(t, got, 1, "First", 10.5, time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC), true, []byte{1})
+	}
+	second := func(t *testing.T, got []any) {
+		t.Helper()
+		checkRow(t, got, 2, "Second", 20, time.Date(2021, 6, 15, 0, 0, 0, 0, time.UTC), false, []byte{2})
+	}
+
+	t.Run("rows as asked, and the connection back on Close", func(t *testing.T) {
+		reader, err := f.db.ExecuteQueryToRecordsetReader(ctx, query())
+		if err != nil {
+			t.Fatalf("ExecuteQueryToRecordsetReader: %v", err)
+		}
+		if got := f.sqlDB.Stats().InUse; got != 1 {
+			t.Errorf("connections in use while the reader is open = %d, want 1", got)
+		}
+		rs := reader.Recordset()
+		for i, name := range columns {
+			if got := rs.GetColumnByIndex(i).Name(); got != name {
+				t.Errorf("column %d is named %q, want %q (as the query asked)", i, got, name)
+			}
+		}
+		first(t, next(t, reader))
+		second(t, next(t, reader)) // the rows are not read to their end: the reader is closed instead
+		if err := reader.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if got := f.sqlDB.Stats().InUse; got != 0 {
+			t.Errorf("connections in use after Close = %d, want 0", got)
+		}
+	})
+	t.Run("the connection back at the end of the rows, with no Close", func(t *testing.T) {
+		reader, err := f.db.ExecuteQueryToRecordsetReader(ctx, query())
+		if err != nil {
+			t.Fatalf("ExecuteQueryToRecordsetReader: %v", err)
+		}
+		first(t, next(t, reader))
+		second(t, next(t, reader))
+		if got := next(t, reader); got != nil {
+			t.Errorf("a third row = %v, want the end of the rows", got)
+		}
+		if got := f.sqlDB.Stats().InUse; got != 0 {
+			t.Errorf("connections in use at the end of the rows = %d, want 0", got)
+		}
+		if err := reader.Close(); err != nil { // and closing afterwards is harmless
+			t.Fatalf("Close after the end: %v", err)
+		}
+		if got := f.sqlDB.Stats().InUse; got != 0 {
+			t.Errorf("connections in use after Close = %d, want 0", got)
+		}
+	})
+	t.Run("a table that is not there gives the connection back and returns no reader", func(t *testing.T) {
+		reader, err := f.db.ExecuteQueryToRecordsetReader(ctx, dal.From(dal.NewRootCollectionRef("Albums", "")).NewQuery().SelectColumns())
+		if !errors.Is(err, dalgo2sql.ErrTableNotFound) || reader != nil {
+			t.Errorf("ExecuteQueryToRecordsetReader = %v, %v; want no reader and a table-not-found error", reader, err)
+		}
+		if got := f.sqlDB.Stats().InUse; got != 0 {
+			t.Errorf("connections in use after the refused read = %d, want 0", got)
+		}
+	})
+}
+
+// A record read by a structured query is keyed by the recordset's primary key (see
+// TestNewDatabase_RecordsCarryTheirKey): the statement the compiler writes for the
+// hidden column is accepted by the server, and its value, an integer here, is the ID.
+func TestStructuredQueryIntegration_RecordsCarryTheirKey(t *testing.T) {
+	recordsets := map[string]*dalgo2sql.Recordset{
+		// The key of the map is the name the query spells for its source.
+		"Album": dalgo2sql.NewRecordset("Album", dalgo2sql.Table, []dal.FieldRef{dal.Field("AlbumId")}),
+	}
+	f := openQueryFixtureWithOptions(t, dalgo2sql.DbOptions{Recordsets: recordsets}, "test_sq_record_key", IdentifierFoldLower, albumDDL)
+	reader, err := f.db.ExecuteQueryToRecordsReader(context.Background(),
+		albumQuery().Where(dal.WhereField("AlbumId", dal.LessThen, 4)).SelectColumns(titleColumn()))
+	if err != nil {
+		t.Fatalf("ExecuteQueryToRecordsReader: %v\nstatements sent: %v", err, f.trace.sent())
+	}
+	defer func() { _ = reader.Close() }()
+	var ids []any
+	var titles []any
+	for {
+		rec, err := reader.Next()
+		if errors.Is(err, dal.ErrNoMoreRecords) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if got := rec.Key().Collection(); got != "Album" {
+			t.Errorf("a record's collection = %q, want Album", got)
+		}
+		if data, ok := rec.Data().(map[string]any); !ok || len(data) != 1 {
+			t.Errorf("a record's data = %v, want only the selected column (the hidden key column is not data)", rec.Data())
+		} else {
+			titles = append(titles, data["Title"])
+		}
+		ids = append(ids, rec.Key().ID)
+	}
+	if want := []any{int64(1), int64(2), int64(3)}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("record IDs = %v, want %v", ids, want)
+	}
+	if want := []any{"First", "Second", "Third"}; !reflect.DeepEqual(titles, want) {
+		t.Errorf("titles = %v, want %v", titles, want)
+	}
+	if got := f.trace.last(t); got != `SELECT "title", "albumid" AS "__dalgo_record_id" FROM "album" WHERE "albumid" < $1::bigint ORDER BY "albumid" ASC` {
+		t.Errorf("statement = %s, want the key as a hidden column after the selected one", got)
+	}
+}
+
 // A context that ends before the catalog lookup, between it and the statement, or
 // while the statement waits on the server returns the connection to the pool.
 //
 // What the caller sees differs. While the statement waits, it is the context's own
-// error (context.DeadlineExceeded here). Before the statement is sent, the lease gives
-// the connection back the moment the context ends, so the read can fail on the closed
-// connection before the driver looks at the context: the caller sees the pool's
-// `sql: connection is already closed` or the driver's `driver: bad connection`, or the
-// context's error when the driver is first. Which of them depends on timing: CI saw
-// `driver: bad connection` at the start of the catalog lookup, and between the two
-// statements `sql: connection is already closed` on one run and `driver: bad connection`
-// on the next. A caller must check its own context (ctx.Err()) rather than rely on
+// error (context.DeadlineExceeded here). Before the statement is sent it is not, and it
+// is one of two errors:
+//
+//   - `driver: bad connection` is pgx's own answer for a statement it did not send
+//     because the context was already done: pgx reports that as safe to retry and its
+//     database/sql driver turns it into driver.ErrBadConn, which database/sql does not
+//     retry on the connection of the read (a dedicated one), so the caller sees it and the
+//     healthy connection is discarded. CI saw it at the start of the catalog lookup on
+//     every run.
+//   - `sql: connection is already closed` is the pool's answer when the lease has given the
+//     connection back (it does so the moment the context ends) before the read used it.
+//     CI saw it between the two statements on one run and `driver: bad connection` on the
+//     next, so which of the two comes depends on timing.
+//
+// The test also accepts the context's own error, which no run has shown. Nothing is sent
+// to the server after the context ends, although the trace records the start of the
+// statement. A caller must check its own context (ctx.Err()) rather than rely on
 // errors.Is(err, ctx.Err()).
 func TestStructuredQueryIntegration_ContextEndsBetweenAndDuringTheStatements(t *testing.T) {
 	testDSN(t) // a skip shows on this test, not only on its subtests
@@ -803,8 +1046,9 @@ func TestStructuredQueryIntegration_ContextEndsBetweenAndDuringTheStatements(t *
 		if !endedReadError(err) {
 			t.Errorf("error = %v, want the context's or the closed connection's", err)
 		}
-		// The driver is still handed the statement (the trace shows it) and fails on the
-		// connection the lease has given back.
+		// The statement is handed to the driver (the trace shows its start) and is not sent:
+		// pgx refuses it because the context is done, or the lease has already given the
+		// connection back.
 		t.Logf("the caller saw: %v", err)
 		assertPoolIsFree(t, f)
 	})

@@ -43,9 +43,16 @@ A structured DALgo query (`dal.From(...).NewQuery()...`) reaches PostgreSQL thro
 dalgo2sql's typed PostgreSQL compiler. `NewDatabase` and `NewDatabaseWithOptions` force
 `dalgo2sql.DbOptions.StructuredQueryDialect` to `"postgres"` whatever the caller passes
 (the empty string, `"sqlite"` and `"mysql"` are replaced), so no structured query can reach
-dalgo2sql's legacy text emitter, which writes values into the statement. A
-`NativeStructuredQueryCompiler` that a caller puts in `DbOptions` is kept: dalgo2sql
-consults it before the dialect, and it then replaces the typed compiler for that database.
+dalgo2sql's legacy text emitter, which writes values into the statement. The three fields
+of `DbOptions` that replace the compiler (`NativeStructuredQueryCompiler`,
+`NativeJoinEligibility` and `NativeJoinHintTranslator`) are refused: a constructor that is
+given one returns an error before it connects, because the database would declare the
+dialect's capabilities and accept joins by its check and then send them to a compiler that
+promised neither.
+
+`*Database` declares what the dialect runs on the server (`dal.QueryCapabilitiesProvider`,
+`dal.NativeJoinProvider` and `dal.JoinFieldsProvider`), so `dal.As[...]` on a `*Database`
+answers as it does on the `dal.DB` under it.
 
 A read takes two statements on one connection: one catalog query that lists the columns of
 every table the query names (type, NOT NULL, collation), then the one `SELECT` compiled from
@@ -137,6 +144,12 @@ connection's `search_path` resolves. `WithSchema` affects only the schema reader
   is sent for it.
 - A read inside a transaction (`RunReadonlyTransaction`) compiles the same way, and its
   catalog query runs on the transaction.
+- A record carries the collection of the query's base source and, when
+  `DbOptions.Recordsets` gives that source a one-field primary key, the key's value as its
+  ID. A query that does not select the key gets it through a hidden column the statement
+  adds, which is not in the record's data. A query that reads into a record of its own
+  (`SelectIntoRecord`) fills that record. With no primary key configured, the ID is the
+  placeholder `__dalgo_record_id`, not an identity of the row.
 
 ### The connection a read holds
 
@@ -150,12 +163,14 @@ waits for a connection and ends with its own context if none is free.
 
 When the context of a read ends while its statement waits on the server, the caller gets the
 context's own error (`context.DeadlineExceeded` or `context.Canceled`). When it ends before
-the statement is sent (before the catalog query, or between the two statements), the lease
-gives the connection back as the context ends, and the read can fail on the closed
-connection first: the error is then the pool's `sql: connection is already closed` or the
-driver's `driver: bad connection`, not the context's. Check the context's own `Err()`
-instead of matching the read's error against it. In every case the connection goes back to
-the pool.
+the statement is sent (before the catalog query, or between the two statements), the caller
+gets `driver: bad connection` (pgx returns it for a statement it did not send because the
+context was already done, and database/sql does not retry on the read's own connection) or
+`sql: connection is already closed` (the lease gave the connection back first), not the
+context's error. Which of the two depends on timing. Check the context's own `Err()` instead
+of matching the read's error against it. Nothing is sent to the server after the context
+ends. In every case the read lets go of its connection, and the pool serves the next caller
+(a connection that failed with `driver: bad connection` is discarded and replaced).
 
 ### Key reads and writes
 

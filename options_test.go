@@ -1,6 +1,9 @@
 package dalgo2postgres
 
 import (
+	"context"
+	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 
@@ -129,6 +132,25 @@ func TestResolveSettings_ForcesTheDialectWhateverTheCallerSets(t *testing.T) {
 	}
 }
 
+// fakeCompiler and fakeHintTranslator stand for a compiler and a hint translator a
+// caller puts in DbOptions; neither is ever called, since the constructors refuse them.
+type fakeCompiler struct{}
+
+func (fakeCompiler) CompileNativeStructuredQuery(dal.StructuredQuery, dalgo2sql.NativeJoinHintFragments) (string, []any, error) {
+	return "", nil, nil
+}
+
+type fakeHintTranslator struct{}
+
+func (fakeHintTranslator) TranslateNativeJoinHints(dal.FromSource) (dalgo2sql.NativeJoinHintFragments, error) {
+	return dalgo2sql.NativeJoinHintFragments{}, nil
+}
+
+// An option set that cannot be honoured is an error naming it. The three native hooks
+// are among them: the statements of a structured query, what the database declares it
+// runs on the server and its join check belong to dalgo2sql's PostgreSQL dialect
+// together, and a caller's own compiler beside them would be sent whole grouped queries
+// and joins the dialect promised and it never did.
 func TestResolveSettings_Refusals(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -143,6 +165,14 @@ func TestResolveSettings_Refusals(t *testing.T) {
 			[]Option{WithIdentifierMode(IdentifierFoldLower)}, []string{"disagree", `"exact"`}},
 		{"the two disagree: fold-lower in DbOptions, exact in the option", dalgo2sql.DbOptions{IdentifierCase: dalgo2sql.IdentifierCaseFoldLower},
 			[]Option{WithIdentifierMode(IdentifierExact)}, []string{"disagree", `"fold-lower"`}},
+		{"a caller's NativeStructuredQueryCompiler", dalgo2sql.DbOptions{NativeStructuredQueryCompiler: fakeCompiler{}}, nil,
+			[]string{"compiled by the PostgreSQL dialect", "DbOptions.NativeStructuredQueryCompiler"}},
+		{"a caller's NativeJoinEligibility", dalgo2sql.DbOptions{NativeJoinEligibility: func(context.Context, dal.StructuredQuery) error { return nil }}, nil,
+			[]string{"compiled by the PostgreSQL dialect", "DbOptions.NativeJoinEligibility"}},
+		{"a caller's NativeJoinHintTranslator", dalgo2sql.DbOptions{NativeJoinHintTranslator: fakeHintTranslator{}}, nil,
+			[]string{"compiled by the PostgreSQL dialect", "DbOptions.NativeJoinHintTranslator"}},
+		{"a native hook beside a valid option set", dalgo2sql.DbOptions{NativeStructuredQueryCompiler: fakeCompiler{}, IdentifierCase: dalgo2sql.IdentifierCaseExact},
+			[]Option{WithSchema("sales"), WithIdentifierMode(IdentifierExact)}, []string{"DbOptions.NativeStructuredQueryCompiler"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := resolveSettings(tc.opts, tc.options)
@@ -187,6 +217,23 @@ func TestNewDatabaseWithOptions_RejectsUnknownIdentifierModeBeforeConnecting(t *
 	}
 	if _, err := NewDatabase("not-a-dsn", WithIdentifierMode(IdentifierMode(99))); err == nil || !strings.Contains(err.Error(), "IdentifierMode") {
 		t.Fatalf("NewDatabase: err = %v, want an IdentifierMode error", err)
+	}
+}
+
+// A refused option set never reaches the driver: the opener is not called.
+func TestNewDatabase_NativeHooksAreRefusedBeforeConnecting(t *testing.T) {
+	opener := func(string, string) (*sql.DB, error) {
+		t.Error("the opener was called for an option set the constructor refuses")
+		return nil, errors.New("unreachable")
+	}
+	db, err := newDatabase("host=h", dal.NewSchema(nil, nil), dalgo2sql.DbOptions{NativeStructuredQueryCompiler: fakeCompiler{}}, nil, opener)
+	if db != nil || err == nil || !strings.Contains(err.Error(), "DbOptions.NativeStructuredQueryCompiler") {
+		t.Fatalf("got %v, %v; want nil and an error naming the field", db, err)
+	}
+	if _, err := NewDatabaseWithOptions("not-a-dsn", dal.NewSchema(nil, nil),
+		dalgo2sql.DbOptions{NativeJoinEligibility: func(context.Context, dal.StructuredQuery) error { return nil }}); err == nil ||
+		!strings.Contains(err.Error(), "DbOptions.NativeJoinEligibility") {
+		t.Fatalf("NewDatabaseWithOptions: err = %v, want one naming the field", err)
 	}
 }
 

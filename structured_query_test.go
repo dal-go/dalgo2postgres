@@ -356,7 +356,9 @@ func keyOptions(tables ...string) dalgo2sql.DbOptions {
 // Behaviour change (dalgo2sql v0.26.0): key reads and writes refuse a collection,
 // field or primary-key name that is not a plain identifier, with an error that
 // matches dalgo2sql.ErrUnsafeName, and send no statement. A PostgreSQL table whose
-// name needs quoting cannot be addressed by key.
+// name needs quoting cannot be addressed by key. The reads (Get, GetMulti, Exists) are
+// checked for a collection and a primary key; a map record's read names no field, so a
+// field name never reaches one.
 func TestNewDatabase_KeyWritesAndReadsRefuseUnsafeNames(t *testing.T) {
 	const evil = `x"; DROP TABLE widgets; --`
 	for _, tc := range []struct {
@@ -398,15 +400,22 @@ func TestNewDatabase_KeyWritesAndReadsRefuseUnsafeNames(t *testing.T) {
 				}
 			}
 			check(t, db.Update(ctx, key, []update.Update{update.ByFieldName(updated, "y")}))
-			err := db.Delete(ctx, key)
-			if tc.position == "field" {
-				// a delete names no field
-				if err == nil || errors.Is(err, dalgo2sql.ErrUnsafeName) {
-					t.Errorf("Delete: error = %v, want the mock's refusal of an unexpected statement", err)
+			// The reads and Delete name no field of a map record: they select every column
+			// and address the row by its primary key. A field name is not what they refuse.
+			_, existsErr := db.Exists(ctx, key)
+			getErr := db.Get(ctx, newRecord())
+			getMultiErr := db.GetMulti(ctx, []dalrecord.Record{newRecord()})
+			for name, err := range map[string]error{"Get": getErr, "GetMulti": getMultiErr, "Exists": existsErr, "Delete": db.Delete(ctx, key)} {
+				if tc.position == "field" {
+					if errors.Is(err, dalgo2sql.ErrUnsafeName) {
+						t.Errorf("%s: error = %v, want no refusal of a field name it never writes", name, err)
+					}
+					continue
 				}
-				return
+				if !errors.Is(err, dalgo2sql.ErrUnsafeName) || !strings.Contains(err.Error(), tc.position) {
+					t.Errorf("%s: error = %v, want one matching ErrUnsafeName that names the %s", name, err, tc.position)
+				}
 			}
-			check(t, err)
 		})
 	}
 }
@@ -557,33 +566,209 @@ func TestNewDatabase_StructuredReadLeasesOneConnection(t *testing.T) {
 	})
 }
 
+// The recordset reader, the second public read entry point, runs a structured query on
+// the same leased connection as the records reader: held while the reader is open, back
+// on Close and at the end of the rows, back when the read fails. (The integration test
+// pins the same with pgx under it, and the types pgx reports for each column.)
+func TestNewDatabase_RecordsetReaderLeasesOneConnection(t *testing.T) {
+	query := func() dal.StructuredQuery {
+		return albumFrom().NewQuery().SelectColumns(dal.Column{Expression: dal.NewFieldRef("", "AlbumId")}, titleColumn())
+	}
+	typedRows := func() *sqlmock.Rows {
+		return sqlmock.NewRowsWithColumnDefinition(
+			sqlmock.NewColumn("albumid").OfType("INT4", int64(0)),
+			sqlmock.NewColumn("title").OfType("TEXT", "")).
+			AddRow(int64(1), "First").AddRow(int64(2), "Second")
+	}
+	expectRead := func(mock sqlmock.Sqlmock) {
+		mock.ExpectQuery(catalogStatement).WithArgs(`"album"`).WillReturnRows(albumCatalog(`"album"`))
+		mock.ExpectQuery(`SELECT "albumid", "title" FROM "album"`).WillReturnRows(typedRows())
+	}
+	open := func(t *testing.T) (*sql.DB, sqlmock.Sqlmock, *Database) {
+		t.Helper()
+		sqlDB, mock := newStructuredMock(t)
+		return sqlDB, mock, openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
+	}
+	nextRow := func(t *testing.T, reader dal.RecordsetReader) []any {
+		t.Helper()
+		row, rs, err := reader.Next()
+		if errors.Is(err, dal.ErrNoMoreRecords) {
+			return nil
+		}
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		values, err := row.Data(rs)
+		if err != nil {
+			t.Fatalf("row.Data: %v", err)
+		}
+		return values
+	}
+
+	t.Run("held while the reader is open, back on Close", func(t *testing.T) {
+		sqlDB, mock, db := open(t)
+		expectRead(mock)
+		reader, err := db.ExecuteQueryToRecordsetReader(context.Background(), query())
+		if err != nil {
+			t.Fatalf("ExecuteQueryToRecordsetReader: %v", err)
+		}
+		if got := sqlDB.Stats().InUse; got != 1 {
+			t.Errorf("connections in use while the reader is open = %d, want 1", got)
+		}
+		if got := nextRow(t, reader); !reflect.DeepEqual(got, []any{int64(1), "First"}) {
+			t.Errorf("first row = %v, want [1 First], named as the query asked", got)
+		}
+		if names := []string{reader.Recordset().GetColumnByIndex(0).Name(), reader.Recordset().GetColumnByIndex(1).Name()}; !reflect.DeepEqual(names, []string{"AlbumId", "Title"}) {
+			t.Errorf("columns = %v, want AlbumId and Title", names)
+		}
+		if err := reader.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if got := sqlDB.Stats().InUse; got != 0 {
+			t.Errorf("connections in use after Close = %d, want 0", got)
+		}
+	})
+	t.Run("back when the rows are read to the end, with no Close", func(t *testing.T) {
+		sqlDB, mock, db := open(t)
+		expectRead(mock)
+		reader, err := db.ExecuteQueryToRecordsetReader(context.Background(), query())
+		if err != nil {
+			t.Fatalf("ExecuteQueryToRecordsetReader: %v", err)
+		}
+		for nextRow(t, reader) != nil {
+		}
+		if got := sqlDB.Stats().InUse; got != 0 {
+			t.Errorf("connections in use at the end of the rows (no Close) = %d, want 0", got)
+		}
+		_ = reader.Close()
+	})
+	t.Run("back when the statement fails, and no reader is returned", func(t *testing.T) {
+		sqlDB, mock, db := open(t)
+		boom := errors.New("boom")
+		mock.ExpectQuery(catalogStatement).WithArgs(`"album"`).WillReturnRows(albumCatalog(`"album"`))
+		mock.ExpectQuery(`SELECT "albumid", "title" FROM "album"`).WillReturnError(boom)
+		reader, err := db.ExecuteQueryToRecordsetReader(context.Background(), query())
+		if !errors.Is(err, boom) || reader != nil {
+			t.Fatalf("ExecuteQueryToRecordsetReader = %v, %v; want no reader and the statement's own error", reader, err)
+		}
+		if got := sqlDB.Stats().InUse; got != 0 {
+			t.Errorf("connections in use after a failed statement = %d, want 0", got)
+		}
+	})
+}
+
 // What the database declares it runs on the server: grouping, HAVING, ORDER BY and the
 // aggregates with their DISTINCT forms, and no more. FIRST, LAST, a group-key order and
 // a stable row order are not promised by PostgreSQL, so they stay false, and DALgo
 // plans a grouped query natively and refuses FIRST and LAST.
+//
+// The answer is asked of the *Database this package hands out, which is what a consumer
+// holds (dal.As on a *Database does not reach the dal.DB it embeds), and of the dal.DB
+// under it, which is where DALgo plans a query; the two must agree.
 func TestNewDatabase_DeclaresWhatItRunsOnTheServer(t *testing.T) {
 	sqlDB, _ := newStructuredMock(t)
 	db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
-	provider, ok := dal.As[dal.QueryCapabilitiesProvider](db.DB)
-	if !ok {
-		t.Fatal("the backend declares no query capabilities")
-	}
 	want := dal.QueryCapabilities{
 		GroupBy: true, Having: true, OrderBy: true,
 		Aggregate: dal.AggregateCapabilities{
 			Count: true, CountDistinct: true, Sum: true, SumDistinct: true, Avg: true, AvgDistinct: true, Min: true, Max: true,
 		},
 	}
-	got := provider.QueryCapabilities()
-	if got != want {
-		t.Errorf("capabilities = %+v, want %+v", got, want)
+	for name, holder := range map[string]dal.DB{"the Database": db, "the dal.DB under it": db.DB} {
+		t.Run(name, func(t *testing.T) {
+			provider, ok := dal.As[dal.QueryCapabilitiesProvider](holder)
+			if !ok {
+				t.Fatal("declares no query capabilities")
+			}
+			got := provider.QueryCapabilities()
+			if got != want {
+				t.Errorf("capabilities = %+v, want %+v", got, want)
+			}
+			grouped := albumFrom().NewQuery().GroupBy(field("Title")).SelectColumns(titleColumn(), dal.SumAs(field("Price"), "total"))
+			if plan, err := dal.PlanAggregation(grouped, got); err != nil || plan.Strategy != dal.AggregationNative {
+				t.Errorf("plan = %+v, err = %v; want a native aggregation", plan, err)
+			}
+			if _, ok := dal.As[dal.NativeJoinProvider](holder); !ok {
+				t.Error("declares no native join provider")
+			}
+			if _, ok := dal.As[dal.JoinFieldsProvider](holder); !ok {
+				t.Error("declares no join fields provider")
+			}
+		})
 	}
-	grouped := albumFrom().NewQuery().GroupBy(field("Title")).SelectColumns(titleColumn(), dal.SumAs(field("Price"), "total"))
-	if plan, err := dal.PlanAggregation(grouped, got); err != nil || plan.Strategy != dal.AggregationNative {
-		t.Errorf("plan = %+v, err = %v; want a native aggregation", plan, err)
+}
+
+// The Database answers the join questions with the database's own answers, not just
+// with a method of the right name: a join of one type category is accepted, one across
+// categories is declined, and a wildcard's columns come back in table order.
+func TestNewDatabase_ForwardsTheJoinAnswers(t *testing.T) {
+	sqlDB, mock := newStructuredMock(t)
+	db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
+	ctx := context.Background()
+	joiner, ok := dal.As[dal.NativeJoinProvider](db)
+	if !ok {
+		t.Fatal("the Database declares no native join provider")
 	}
-	if _, ok := dal.As[dal.NativeJoinProvider](db.DB); !ok {
-		t.Error("the backend declares no native join provider")
+	joinOn := func(left, right string) dal.StructuredQuery {
+		on := dal.NewComparison(dal.NewFieldRef("a", left), dal.Equal, dal.NewFieldRef("r", right))
+		return dal.From(dal.NewRootCollectionRef("Album", "a")).
+			Join(dal.NewJoinedSource(dal.NewRootCollectionRef("Artist", "r"), dal.JoinInner, on)).
+			NewQuery().SelectColumns(dal.Column{Expression: dal.NewFieldRef("r", "Name"), Alias: "artist"})
+	}
+	joinCatalog := func() *sqlmock.Rows {
+		rows := catalogRows(`"album"`, intColumn("albumid", true), textColumn("title"), intColumn("artistid", true))
+		for _, c := range []catalogColumn{intColumn("artistid", true), textColumn("name")} {
+			rows.AddRow(`"artist"`, c.name, c.dataType, c.category, c.oid, int64(0), c.notNull, false)
+		}
+		return rows
+	}
+	mock.ExpectQuery(catalogStatement).WillReturnRows(joinCatalog())
+	if err := joiner.CanExecuteJoin(ctx, joinOn("ArtistId", "ArtistId")); err != nil {
+		t.Errorf("a join of integer to integer: error = %v, want it accepted", err)
+	}
+	mock.ExpectQuery(catalogStatement).WillReturnRows(joinCatalog())
+	if err := joiner.CanExecuteJoin(ctx, joinOn("Title", "ArtistId")); err == nil {
+		t.Error("a join of text to integer was accepted, want it declined")
+	}
+
+	fields, ok := dal.As[dal.JoinFieldsProvider](db)
+	if !ok {
+		t.Fatal("the Database declares no join fields provider")
+	}
+	mock.ExpectQuery(catalogStatement).WithArgs(`"album"`).WillReturnRows(albumCatalog(`"album"`))
+	source := dal.NewRootCollectionRef("Album", "a")
+	got, err := fields.JoinFields(ctx, source)
+	if want := []string{"albumid", "title", "price"}; err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("JoinFields = %v, %v; want %v", got, err, want)
+	}
+}
+
+// A Database that was never opened (the zero value, whose embedded dal.DB is nil)
+// declares nothing and says so without panicking: no capabilities, a join declined with
+// dal.ErrNotSupported, and no fields for a wildcard.
+func TestZeroValueDatabaseDeclaresNothing(t *testing.T) {
+	var db Database
+	capabilities, ok := dal.As[dal.QueryCapabilitiesProvider](&db)
+	if !ok {
+		t.Fatal("a *Database does not implement dal.QueryCapabilitiesProvider")
+	}
+	if got := capabilities.QueryCapabilities(); got != (dal.QueryCapabilities{}) {
+		t.Errorf("capabilities = %+v, want none", got)
+	}
+	joiner, ok := dal.As[dal.NativeJoinProvider](&db)
+	if !ok {
+		t.Fatal("a *Database does not implement dal.NativeJoinProvider")
+	}
+	ctx := context.Background()
+	if err := joiner.CanExecuteJoin(ctx, albumFrom().NewQuery().SelectColumns()); !errors.Is(err, dal.ErrNotSupported) {
+		t.Errorf("CanExecuteJoin = %v, want dal.ErrNotSupported", err)
+	}
+	fields, ok := dal.As[dal.JoinFieldsProvider](&db)
+	if !ok {
+		t.Fatal("a *Database does not implement dal.JoinFieldsProvider")
+	}
+	if got, err := fields.JoinFields(ctx, dal.NewRootCollectionRef("Album", "")); got != nil || err != nil {
+		t.Errorf("JoinFields = %v, %v; want nothing, so that DALgo rejects a wildcard of its own accord", got, err)
 	}
 }
 
@@ -620,6 +805,102 @@ func TestNewDatabase_KeysOnlyQueryIsOrderedByThePrimaryKey(t *testing.T) {
 type widgetRow struct {
 	ID        string
 	FirstName string
+}
+
+// Behaviour change (dalgo2sql v0.26.0): a record read by a structured query carries the
+// collection of the query's base source and, when the recordset has a one-field primary
+// key, that key's value as its ID. When the query selects columns and does not select the
+// key, the statement gets a hidden column for it (written like any column, named
+// __dalgo_record_id), which is not in the record's data. Without a configured key the ID
+// is that column's name, a placeholder. Before, every record had the collection Unknown
+// and an empty ID. A query that reads into a record of its own (SelectIntoRecord) fills
+// that record, which is keyed the same way.
+func TestNewDatabase_RecordsCarryTheirKey(t *testing.T) {
+	widgets := func() dal.IQueryBuilder { return dal.From(dal.NewRootCollectionRef("widgets", "")).NewQuery() }
+	nameColumn := dal.Column{Expression: dal.NewFieldRef("", "Name")}
+	run := func(t *testing.T, opts dalgo2sql.DbOptions, catalog []catalogColumn, statement string, answer *sqlmock.Rows, q dal.StructuredQuery) []dalrecord.Record {
+		t.Helper()
+		sqlDB, mock := newStructuredMock(t)
+		db := openMockedDatabase(t, sqlDB, opts)
+		mock.ExpectQuery(catalogStatement).WithArgs(`"widgets"`).WillReturnRows(catalogRows(`"widgets"`, catalog...))
+		mock.ExpectQuery(statement).WillReturnRows(answer)
+		reader, err := db.ExecuteQueryToRecordsReader(context.Background(), q)
+		if err != nil {
+			t.Fatalf("ExecuteQueryToRecordsReader: %v", err)
+		}
+		defer func() { _ = reader.Close() }()
+		var out []dalrecord.Record
+		for {
+			rec, err := reader.Next()
+			if errors.Is(err, dal.ErrNoMoreRecords) {
+				return out
+			}
+			if err != nil {
+				t.Fatalf("Next: %v", err)
+			}
+			out = append(out, rec)
+		}
+	}
+	idAndName := []catalogColumn{textColumn("id"), textColumn("name")}
+
+	t.Run("a key the query does not select comes through the hidden column", func(t *testing.T) {
+		got := run(t, keyOptions("widgets"), idAndName, `SELECT "name", "id" AS "__dalgo_record_id" FROM "widgets"`,
+			sqlmock.NewRows([]string{"name", "__dalgo_record_id"}).AddRow("One", "w1").AddRow("Two", "w2"),
+			widgets().SelectColumns(nameColumn))
+		if len(got) != 2 {
+			t.Fatalf("records = %d, want 2", len(got))
+		}
+		for i, want := range []struct{ id, name string }{{"w1", "One"}, {"w2", "Two"}} {
+			key := got[i].Key()
+			if key.Collection() != "widgets" || key.ID != want.id {
+				t.Errorf("record %d: key = %v, want widgets/%s", i, key, want.id)
+			}
+			if data := got[i].Data(); !reflect.DeepEqual(data, map[string]any{"Name": want.name}) {
+				t.Errorf("record %d: data = %v, want only Name (the hidden column is not data)", i, data)
+			}
+		}
+	})
+	t.Run("a key the query selects is read from its own column", func(t *testing.T) {
+		got := run(t, keyOptions("widgets"), idAndName, `SELECT "id", "name" FROM "widgets"`,
+			sqlmock.NewRows([]string{"id", "name"}).AddRow("w1", "One"),
+			widgets().SelectColumns(dal.Column{Expression: dal.NewFieldRef("", "ID")}, nameColumn))
+		if len(got) != 1 || got[0].Key().Collection() != "widgets" || got[0].Key().ID != "w1" {
+			t.Fatalf("records = %v, want one keyed widgets/w1", got)
+		}
+		if data := got[0].Data(); !reflect.DeepEqual(data, map[string]any{"ID": "w1", "Name": "One"}) {
+			t.Errorf("data = %v, want both selected columns", data)
+		}
+	})
+	t.Run("no primary key configured: the collection, and a placeholder where the ID would be", func(t *testing.T) {
+		// dalgo2sql v0.26.0 gives such a record the name of its helper column as its ID, not
+		// an identity of the row; this pins it so that a bump that changes it is seen.
+		got := run(t, dalgo2sql.DbOptions{}, idAndName, `SELECT "name" FROM "widgets"`,
+			sqlmock.NewRows([]string{"name"}).AddRow("One"),
+			widgets().SelectColumns(nameColumn))
+		if len(got) != 1 || got[0].Key().Collection() != "widgets" || got[0].Key().ID != "__dalgo_record_id" {
+			t.Fatalf("records = %v, want one keyed widgets/__dalgo_record_id", got)
+		}
+		if data := got[0].Data(); !reflect.DeepEqual(data, map[string]any{"Name": "One"}) {
+			t.Errorf("data = %v, want only Name", data)
+		}
+	})
+	t.Run("a record of the query's own is filled and keyed", func(t *testing.T) {
+		into := func() dalrecord.Record {
+			return dalrecord.NewRecordWithData(dalrecord.NewKeyWithID("widgets", ""), &widgetRow{})
+		}
+		got := run(t, keyOptions("widgets"), []catalogColumn{textColumn("id"), textColumn("first_name")}, `SELECT * FROM "widgets"`,
+			sqlmock.NewRows([]string{"id", "first_name"}).AddRow("w9", "Ann"),
+			widgets().SelectIntoRecord(into))
+		if len(got) != 1 {
+			t.Fatalf("records = %d, want 1", len(got))
+		}
+		if key := got[0].Key(); key.Collection() != "widgets" || key.ID != "w9" {
+			t.Errorf("key = %v, want widgets/w9", key)
+		}
+		if data, ok := got[0].Data().(*widgetRow); !ok || *data != (widgetRow{ID: "w9", FirstName: "Ann"}) {
+			t.Errorf("data = %#v, want the struct the query supplied, filled", got[0].Data())
+		}
+	})
 }
 
 // Behaviour change (dalgo2sql v0.26.0): Get into a struct matches a column to a field

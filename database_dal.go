@@ -42,6 +42,55 @@ func (d *Database) ExecuteQueryToRecordsetReader(ctx context.Context, query dal.
 	return d.DB.ExecuteQueryToRecordsetReader(ctx, query, opts...)
 }
 
+// --- what the database declares it runs on the server ---
+
+// Compile-time assertions: a *Database declares the capabilities its backend does.
+var (
+	_ dal.QueryCapabilitiesProvider = (*Database)(nil)
+	_ dal.NativeJoinProvider        = (*Database)(nil)
+	_ dal.JoinFieldsProvider        = (*Database)(nil)
+)
+
+// The three methods below answer for the *Database itself. dal.As asks a value, then
+// the backend a dal.DB delegates to, but a *Database embeds the dal.DB interface and
+// is not a dal.DB built by dal.NewDB: dal.BackendOf returns the *Database, never the
+// dalgo2sql database under d.DB. Without these methods dal.As[dal.QueryCapabilitiesProvider]
+// is false on a *Database, and a consumer that asks it (to count natively, to plan a
+// join) concludes the database runs nothing on the server. Queries executed through the
+// *Database were never affected: they go through d.DB, which plans from its backend.
+//
+// Each method forwards to what d.DB declares, found with dal.As, and falls back to
+// declaring nothing when it declares nothing (a zero Database, whose d.DB is nil).
+
+// QueryCapabilities reports what dalgo2sql's PostgreSQL dialect runs on the server:
+// GROUP BY, HAVING, ORDER BY and the aggregates, and no more.
+func (d *Database) QueryCapabilities() dal.QueryCapabilities {
+	if provider, ok := dal.As[dal.QueryCapabilitiesProvider](d.DB); ok {
+		return provider.QueryCapabilities()
+	}
+	return dal.QueryCapabilities{}
+}
+
+// CanExecuteJoin reports whether the database runs q's joins on the server; a non-nil
+// error declines it and DALgo runs the join in its own engine. A Database that
+// declares no join support declines with [dal.ErrNotSupported].
+func (d *Database) CanExecuteJoin(ctx context.Context, q dal.StructuredQuery) error {
+	if provider, ok := dal.As[dal.NativeJoinProvider](d.DB); ok {
+		return provider.CanExecuteJoin(ctx, q)
+	}
+	return dal.ErrNotSupported
+}
+
+// JoinFields lists the columns of source in table order, for the wildcard of a join
+// DALgo runs itself. A Database that declares no join support returns none, which
+// DALgo takes for a source that cannot supply its schema.
+func (d *Database) JoinFields(ctx context.Context, source dal.RecordsetSource) ([]string, error) {
+	if provider, ok := dal.As[dal.JoinFieldsProvider](d.DB); ok {
+		return provider.JoinFields(ctx, source)
+	}
+	return nil, nil
+}
+
 // --- extra write methods delegated from dalgo2sql ---
 
 // writeDB is the extended interface exposed by dalgo2sql's concrete backend
