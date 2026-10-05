@@ -271,10 +271,10 @@ What the server answers, as observed:
   `IdentifierFoldLower`; in `IdentifierExact` they are two columns.
 
 Known limits. Each is pinned by a test that prints the statement and the server's answer.
-The ones that follow are **defects or limits of dal-go/dalgo2sql**. None has an issue or a pull
-request yet (each says "not yet filed" until it has, and then names it), and no fix of any of
-them is under way. Each test FAILS when the fix is released and says what to assert instead, so
-the line here is then deleted. They are observations, not rules to rely on.
+The ones that follow are **defects or limits of dal-go/dalgo2sql**. Each names its issue or
+pull request, or says "not yet filed" while it has none. Each test FAILS when the fix is
+released and says what to assert instead, so the line here is then deleted. They are
+observations, not rules to rely on.
 
 - **A column with a `NOT VALID` not-null constraint** (PostgreSQL 18; `ALTER TABLE ... ADD
   CONSTRAINT ... NOT NULL col NOT VALID`) that holds NULL rows is **sorted wrongly**, which is a
@@ -285,6 +285,20 @@ the line here is then deleted. They are observations, not rules to rely on.
   (`TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimit` pins the
   catalog's two facts, the statement and the rows). Do not rely on the order of such a column,
   or of a `LIMIT` or `OFFSET` page over it, until it is fixed, or validate the constraint.
+  Issue or pull request: not yet filed.
+- **A name of 64 to 255 bytes in a key path is cut to 63 bytes by the server**, which is a wrong
+  result and not a refusal. A key path accepts a plain name of up to 255 bytes and writes it
+  unquoted (see "Key reads and writes"); PostgreSQL keeps 63 bytes of an identifier and
+  silently cuts the rest, so a key whose collection is 64 bytes long reads, writes and deletes in
+  the table named by its first 63 bytes, and a field of 64 bytes is the column named by its
+  first 63. With a table and a column of 63 `n` bytes and a recordset declared under a name of 64
+  `n` bytes, `Exists` and `Get` find the row of the table of 63, `Insert` writes into it, `Delete`
+  deletes from it, and an `Insert` whose field is 64 bytes long writes into the column of 63
+  (`TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath` pins each statement and each
+  row, in both identifier modes). The structured path refuses the same name before any
+  statement (the dialect holds a name to 63 bytes). The key paths build every other write
+  from the same names, so `Set` and `Update` are held to read the same way; they are not
+  separately tested. Keep the names of collections and fields in a key path to 63 bytes.
   Issue or pull request: not yet filed.
 - **A derived source** (a query in `FROM` or in a join, DTQL's `from: {query: ...}`) is refused:
   DALgo's engine asks the adapter for the columns of each source, and dalgo2sql answers for a
@@ -381,22 +395,34 @@ skipped, missing or not passing.
   `Invoice` are all denied by the listed `Person`'s list, with the code, the slot, the column and
   no statement. It fails closed and does not leak; it is a limit of dal-go/dalgo (issue: not yet
   filed), pinned by `TestAccessIntegration_HiddenFieldInAJoinOrAScanOrderIsDeniedWithNoStatement`.
-  The shared access controls of dal-go/dalgo run beside them in `TestEndToEnd`.
+  The direction in which a leak would be possible is run, not read: a rule that lists the fields
+  of a joined source is refused whole by dal-go/dalgo before any query ("field rules on a joined
+  source are not supported in this version"), so the hidden field of a joined source is never
+  read through the join, and neither are the fields the list allows
+  (`TestAccessIntegration_AFieldListOnAJoinedSourceIsRefusedWithNoStatement`, no statement of any
+  kind). The shared access controls of dal-go/dalgo run beside them in `TestEndToEnd`.
 - **Probes.** A canary table, and a quote, a double quote, doubled quotes, a semicolon with a
   second statement, comment markers, a NUL byte, a name of 64 bytes and a non-ASCII name written
   where a value (in a filter, an `IN` list and a `HAVING`), a field (in a filter, the select
   list, an aggregate, `ORDER BY` and `GROUP BY`), the qualifier of a field, a collection, the
   schema of a qualified collection, an alias (of a column, of the source and of a joined
-  source) and a join key go, in both identifier modes. Each answer is rows, an empty result or an
-  error built before any statement (a NUL byte in a value is the server's own refusal); outside
-  its quoted identifiers no statement holds a marker, every value is a bound argument, and the
-  canary is unchanged (`TestProbesIntegration_NothingACallerWritesBecomesSQL`). The key paths,
-  which are another emitter of SQL (plain names written unquoted), are probed in the same two
-  modes with the same texts as the collection of a key, as its ID, and as the field names and
-  the values of a write (`Exists`, `Get`, `Insert`, `Delete`): a text that is not a plain
-  identifier is refused with `ErrUnsafeName` and no statement, an ID and a value are arguments
-  read back as written, and nothing is left behind
-  (`TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath`). A join's `ON` condition
+  source) and a join key go, in both identifier modes. A name PostgreSQL can hold (all but the
+  NUL byte and the 64 bytes) is found, quoted, and comes back with rows; a name it cannot hold is
+  an error built by the adapter or DALgo, before any statement, or, in the four slots of a join,
+  by DALgo's engine after it has read the other sources with plain statements; a value is rows or
+  an empty result, and a NUL byte in a value is the server's own refusal (`22021`). The tallies
+  (151 rows, 22 empty results, 20 errors built before any statement, 8 built by the engine, 3
+  refusals of the server, for each mode) are asserted. Outside its quoted identifiers no
+  statement holds a marker, every value is a bound argument, and the canary is unchanged
+  (`TestProbesIntegration_NothingACallerWritesBecomesSQL`). The key paths, which are another
+  emitter of SQL (plain names written unquoted), are probed in the same two modes with the same
+  texts as the collection of a key, as its ID, and as the field names and the values of a write
+  (`Exists`, `Get`, `Insert`, `Delete`): a text that is not a plain identifier is refused with
+  `ErrUnsafeName` and no statement, an ID and a value are arguments read back as written, and
+  nothing is left behind. The one text that is a plain identifier of more than 63 bytes is **not**
+  refused: the server cuts it to 63 bytes and the key path reads, writes and deletes in the table
+  or column of that name, which the fixture holds so that the test shows it (a known limit above;
+  `TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath`). A join's `ON` condition
   takes only an equality of two fields, so a value is no position of it.
 - **PostgreSQL 18.** A column with a `NOT VALID` not-null constraint and NULL rows under
   `ORDER BY` with `LIMIT` (`TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimit`;
@@ -430,7 +456,9 @@ field or primary-key name that is a plain identifier (ASCII letters, digits and 
 not starting with a digit, at most 255 bytes), written as given and unquoted, so PostgreSQL
 folds it to lower case. Any other name is refused with an error that matches
 `dalgo2sql.ErrUnsafeName` before a statement is sent; a table whose name needs quoting cannot
-be addressed by key, whatever the identifier mode. A nested key addresses one table whose
+be addressed by key, whatever the identifier mode. **A name of 64 to 255 bytes is accepted and
+PostgreSQL cuts it to 63**, so it addresses the table or column named by its first 63 bytes (a
+known limit of dal-go/dalgo2sql, see "Known limits"): keep these names to 63 bytes. A nested key addresses one table whose
 name joins the collections of the key and of its parents with an underscore, the key's own
 first (`pets_owners`), and the primary key is looked up in the recordset of that name.
 

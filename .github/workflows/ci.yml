@@ -257,6 +257,8 @@ jobs:
             TestAccessIntegration_HiddenFieldUnderAnAliasAndAnEmptyProjectionAreDenied/fold-lower_mode \
             TestAccessIntegration_HiddenFieldInAJoinOrAScanOrderIsDeniedWithNoStatement/exact_mode \
             TestAccessIntegration_HiddenFieldInAJoinOrAScanOrderIsDeniedWithNoStatement/fold-lower_mode \
+            TestAccessIntegration_AFieldListOnAJoinedSourceIsRefusedWithNoStatement/exact_mode \
+            TestAccessIntegration_AFieldListOnAJoinedSourceIsRefusedWithNoStatement/fold-lower_mode \
             TestAccessIntegration_SessionWithNoPolicyIsDenied/exact_mode \
             TestAccessIntegration_SessionWithNoPolicyIsDenied/fold-lower_mode \
             TestAccessIntegration_UnconditionalAllowBehindAConditionDecidesTheRow/exact_mode \

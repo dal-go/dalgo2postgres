@@ -274,3 +274,28 @@ func TestPlainNamesAndKeyPathProblems(t *testing.T) {
 		t.Errorf("problems = %q, want none: a text of four bytes or fewer is not looked for", problems)
 	}
 }
+
+// A name of 64 to 255 bytes is the one a key path accepts and the server cuts: the table and
+// the column of the key-path fixture are named by what is left of the probe's 64 bytes.
+func TestServerTruncatesTheNamesAKeyPathAccepts(t *testing.T) {
+	for text, want := range map[string]bool{
+		strings.Repeat("n", 63): false, strings.Repeat("n", 64): true, strings.Repeat("n", 255): true,
+		strings.Repeat("n", 256):        false, // refused by the key path itself (too long)
+		"a b" + strings.Repeat("n", 64): false, // not a plain name: refused before any statement
+		"canary":                        false, "": false,
+	} {
+		if got := serverTruncates(text); got != want {
+			t.Errorf("serverTruncates(%d bytes %.8q) = %v, want %v", len(text), text, got, want)
+		}
+	}
+	// Of the probes only the name of 64 bytes is cut, and the first 63 bytes of it are the name of the fixture.
+	var cut []string
+	for _, probe := range probes {
+		if serverTruncates(probe.text) {
+			cut = append(cut, probe.text)
+		}
+	}
+	if len(cut) != 1 || cut[0][:postgresNameBytes] != truncatedName || len(truncatedName) != 63 {
+		t.Errorf("the probes the server cuts = %d bytes %q; truncatedName has %d bytes; want the one name of 64 whose first 63 bytes are the fixture's", len(cut), cut, len(truncatedName))
+	}
+}
