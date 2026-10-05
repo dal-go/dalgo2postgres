@@ -1,4 +1,45 @@
 {
   "schemaVersion": 1,
-  "divergences": []
+  "divergences": [
+    {
+      "suite": "joins",
+      "case": "chinook-wildcard",
+      "differs": [
+        "statements"
+      ],
+      "reason": "The wildcard of the customer source stands between two explicit columns, and the typed compiler of dalgo2sql refuses a wildcard that does not come first in the select list (not supported: wildcard projection must precede explicit columns), so the join is declined to DALgo's engine. The engine reads the three tables with one plain statement each and joins them in memory, within its bounds (10,000 rows), and returns the fixture's rows. Reported for dal-go/dalgo2sql: the compiler could expand the wildcard from the catalog it already holds."
+    },
+    {
+      "suite": "subqueries",
+      "case": "derived-from-and-join",
+      "differs": [
+        "error"
+      ],
+      "reason": "A derived source (a query in FROM) is refused by this adapter: DALgo's engine asks the adapter for the columns of each source (dal.JoinFieldsProvider), which dalgo2sql answers for a table and refuses for a derived source with 'not supported: source dal.QuerySource', where an adapter that declares no column provider is read by row. The fixture's in-memory executor declares none. Reported for dal-go/dalgo2sql: a derived source should be answered as having no known columns, or DALgo should not ask for it."
+    },
+    {
+      "suite": "subqueries",
+      "case": "inner-order-and-limit",
+      "differs": [
+        "error"
+      ],
+      "reason": "A derived source (a query in FROM) is refused by this adapter: DALgo's engine asks the adapter for the columns of each source (dal.JoinFieldsProvider), which dalgo2sql answers for a table and refuses for a derived source with 'not supported: source dal.QuerySource'. The same cause as derived-from-and-join; reported for dal-go/dalgo2sql."
+    },
+    {
+      "suite": "subqueries",
+      "case": "inner-order-offset-and-limit",
+      "differs": [
+        "error"
+      ],
+      "reason": "A derived source (a query in FROM) is refused by this adapter: DALgo's engine asks the adapter for the columns of each source (dal.JoinFieldsProvider), which dalgo2sql answers for a table and refuses for a derived source with 'not supported: source dal.QuerySource'. The same cause as derived-from-and-join; reported for dal-go/dalgo2sql."
+    },
+    {
+      "suite": "subqueries",
+      "case": "customer-invoice-composition",
+      "differs": [
+        "error"
+      ],
+      "reason": "A derived source (a query in a join) is refused by this adapter: DALgo's engine asks the adapter for the columns of each source (dal.JoinFieldsProvider), which dalgo2sql answers for a table and refuses for a derived source with 'not supported: source dal.QuerySource'. The same cause as derived-from-and-join; reported for dal-go/dalgo2sql."
+    }
+  ]
 }

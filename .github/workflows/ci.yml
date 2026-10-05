@@ -229,7 +229,31 @@ jobs:
             TestServerPinsIntegration_TextJoinKeysWithDifferentCollations \
             TestServerPinsIntegration_RuntimeErrorAtRowN \
             TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation \
-            TestServerPinsIntegration_NotNullColumnKeepsItsOrderByWithoutANullsClause; do
+            TestServerPinsIntegration_NotNullColumnKeepsItsOrderByWithoutANullsClause \
+            TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimit \
+            TestVendoredFixturesAreTheDalgoModulesAtTheRequiredVersion \
+            TestFixturesJoinsAreVendoredWithTheirDigests \
+            TestFixturesJoinNegativeCasesAreRefusedWithTheFixturesDiagnostic \
+            TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer \
+            TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer/chinook-nested \
+            TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer/chinook-hinted \
+            TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer/chinook-wildcard \
+            TestFixturesIntegration_SubqueriesRunInDALgoOverLeafReads \
+            TestPushdownIntegration_GroupByOver150000GroupsRunsOnTheServer \
+            TestPushdownIntegration_JoinOver50000RowsRunsOnTheServer \
+            TestPushdownIntegration_WithoutTheNativeRouteTheSameQueriesAreRefused \
+            TestAccessIntegration_RowConditionWithAQuoteReturnsExactlyThePermittedRows/exact_mode \
+            TestAccessIntegration_RowConditionWithAQuoteReturnsExactlyThePermittedRows/fold-lower_mode \
+            TestAccessIntegration_HiddenFieldUnderAnAliasAndAnEmptyProjectionAreDenied/exact_mode \
+            TestAccessIntegration_HiddenFieldUnderAnAliasAndAnEmptyProjectionAreDenied/fold-lower_mode \
+            TestAccessIntegration_HiddenFieldInAJoinOrAScanOrderIsDeniedWithNoStatement/exact_mode \
+            TestAccessIntegration_HiddenFieldInAJoinOrAScanOrderIsDeniedWithNoStatement/fold-lower_mode \
+            TestAccessIntegration_SessionWithNoPolicyIsDenied/exact_mode \
+            TestAccessIntegration_SessionWithNoPolicyIsDenied/fold-lower_mode \
+            TestAccessIntegration_UnconditionalAllowBehindAConditionDecidesTheRow/exact_mode \
+            TestAccessIntegration_UnconditionalAllowBehindAConditionDecidesTheRow/fold-lower_mode \
+            TestProbesIntegration_NothingACallerWritesBecomesSQL/exact_mode \
+            TestProbesIntegration_NothingACallerWritesBecomesSQL/fold-lower_mode; do
             if ! grep -qE "^\s*--- PASS: ${name} \(" /tmp/gotest.log; then
               echo "::error::${name} did not run to a pass"
               exit 1

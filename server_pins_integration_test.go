@@ -522,3 +522,63 @@ func TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation(t *testi
 		}
 	})
 }
+
+// PostgreSQL 18 lets a not-null constraint be added NOT VALID: the constraint is enforced for the
+// rows written from then on and does not vouch for the rows that were there, which may hold
+// NULL. The catalog calls such a column NOT NULL (pg_attribute.attnotnull is true; the
+// constraint's convalidated is false). The compiler writes no NULLS clause for a NOT NULL
+// column, so that an index can serve the order, and relies on the server's default (NULLs last
+// ascending, first descending), which is the opposite of DALgo's rule (NULLs first ascending
+// and last descending). With ORDER BY and LIMIT the NULL rows that DALgo puts first would then be
+// cut off: the first rows are not the ones DALgo returns.
+//
+// On PostgreSQL 17 the syntax does not exist, and the control asserts that it is refused (a
+// syntax error), so the test runs and passes on both legs of the job and says which it is.
+func TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimit(t *testing.T) {
+	f := openQueryFixture(t, "test_pin_not_valid", IdentifierFoldLower, []string{
+		`CREATE TABLE nv (id integer PRIMARY KEY, v integer)`,
+		`INSERT INTO nv VALUES (1, 3), (2, NULL), (3, 1), (4, NULL), (5, 2)`,
+	})
+	ctx := context.Background()
+	var major int
+	if err := f.admin.QueryRowContext(ctx, `SELECT current_setting('server_version_num')::int / 10000`).Scan(&major); err != nil {
+		t.Fatalf("server_version_num: %v", err)
+	}
+	const addConstraint = `ALTER TABLE nv ADD CONSTRAINT nv_v_not_null NOT NULL v NOT VALID`
+	if major < 18 {
+		_, err := f.admin.ExecContext(ctx, addConstraint)
+		var pgErr *pgconn.PgError
+		t.Logf("PostgreSQL %d: %s -> %v", major, addConstraint, err)
+		if !errors.As(err, &pgErr) || pgErr.Code != "42601" {
+			t.Errorf("error = %v, want the server's syntax error 42601: PostgreSQL %d has no NOT VALID not-null constraint", err, major)
+		}
+		return
+	}
+	if _, err := f.admin.ExecContext(ctx, addConstraint); err != nil {
+		t.Fatalf("%s: %v", addConstraint, err)
+	}
+	var notNull, validated bool
+	if err := f.admin.QueryRowContext(ctx, `SELECT a.attnotnull, c.convalidated FROM pg_attribute a
+		JOIN pg_constraint c ON c.conrelid = a.attrelid AND c.contype = 'n' AND a.attnum = ANY (c.conkey)
+		WHERE a.attrelid = 'nv'::regclass AND a.attname = 'v'`).Scan(&notNull, &validated); err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	t.Logf("PostgreSQL %d, column v: attnotnull = %v, constraint validated = %v; rows 2 and 4 hold NULL", major, notNull, validated)
+
+	ordered := func(by dal.OrderExpression) dal.StructuredQuery {
+		return dal.From(dal.NewRootCollectionRef("nv", "")).NewQuery().
+			OrderBy(by, dal.AscendingField("id")).Limit(3).
+			SelectColumns(dal.Column{Expression: field("id")})
+	}
+	for _, tc := range []struct {
+		label string
+		by    dal.OrderExpression
+		want  []int
+	}{
+		{"ascending: the NULL rows first", dal.AscendingField("v"), []int{2, 4, 3}},
+		{"descending: the NULL rows last", dal.DescendingField("v"), []int{1, 5, 3}},
+	} {
+		o := observe(t, f, ordered(tc.by))
+		check(t, "ORDER BY v "+tc.label+", LIMIT 3", o, rowsOf(tc.want...))
+	}
+}
