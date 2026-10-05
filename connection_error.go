@@ -82,8 +82,11 @@ func (k FailureKind) sentence(sqlState string) string {
 	return kindSentences[k]
 }
 
-// ConnectionError is the error [NewDatabase] and [NewDatabaseWithOptions] return
-// when the connection to PostgreSQL cannot be opened or verified.
+// ConnectionError is the error a connection that fails is reported as: by
+// [NewDatabase] and [NewDatabaseWithOptions] when the connection to PostgreSQL
+// cannot be opened or verified, and by every other call of this package (a read, a
+// write, a transaction, the schema reader, a reader a query returned) when its
+// connection fails later, for example when the pool must make a connection again.
 //
 // Its text is built only from a fixed sentence chosen by Kind and from the parts
 // below that passed a strict check. Nothing of the connection string but those
@@ -91,9 +94,13 @@ func (k FailureKind) sentence(sqlState string) string {
 // copied into it: those hold the user name, the password and other settings, and
 // callers print errors. For the same reason the driver's error is not reachable
 // through [errors.Unwrap], [errors.Is] or [errors.As]; branch on Kind and
-// SQLState instead.
+// SQLState instead. The one thing kept of it is whether the attempt ended because
+// its context was canceled or its deadline passed: [errors.Is] finds
+// [context.Canceled] and [context.DeadlineExceeded] in the error of such an
+// attempt.
 //
-// A part that is empty was not known, or could not be named safely.
+// A part that is empty was not known, or could not be named safely. An error of
+// a call after the connection was opened names no part at all.
 type ConnectionError struct {
 	// Kind is what failed.
 	Kind FailureKind
@@ -108,7 +115,14 @@ type ConnectionError struct {
 	// Database is the database name, named only when it passes the check.
 	Database string
 
-	op string // the step that failed: sql.Open or PingContext; empty for a refusal
+	op       string // the step that failed: sql.Open or PingContext; empty for a refusal and for a call after the open
+	canceled bool   // the attempt ended because its context was canceled
+	timedOut bool   // the attempt ended because its context's deadline passed
+}
+
+// Is reports the two context errors of the attempt that failed, and nothing else.
+func (e *ConnectionError) Is(target error) bool {
+	return (e.canceled && target == context.Canceled) || (e.timedOut && target == context.DeadlineExceeded) //nolint:errorlint // the sentinels themselves
 }
 
 // Error returns the text, built from the fixed sentence, the SQLSTATE code and
@@ -373,16 +387,30 @@ func isURL(dsn string) bool {
 	return strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://")
 }
 
-// describe builds the error for a failure of op. The kind is decided from the
-// types in cause's chain, and cause itself goes no further: the result holds
-// nothing of it. The host, port and database are those of the driver's own
-// configuration, the one it parsed from the string or, for a configuration
-// registered with stdlib.RegisterConnConfig, the one in its connect error, and
-// only when they may be named (see [nameParts]).
-func (in dsnInfo) describe(op string, cause error) *ConnectionError {
+// newConnectionError builds the error for a failure from the types in cause's chain:
+// its kind, and its SQLSTATE code when the server answered one. The cause itself goes no
+// further: the result holds nothing of it but whether its context was canceled or its
+// deadline passed. It is the one place a *ConnectionError is made from a cause, for the
+// open and for every later call.
+func newConnectionError(op string, cause error) *ConnectionError {
 	kind, sqlState := classify(cause)
-	e := &ConnectionError{Kind: kind, SQLState: sqlState, op: op}
-	if kind == FailureInvalidDSN || in.misSplit {
+	return &ConnectionError{
+		Kind:     kind,
+		SQLState: sqlState,
+		op:       op,
+		canceled: errors.Is(cause, context.Canceled),
+		timedOut: errors.Is(cause, context.DeadlineExceeded),
+	}
+}
+
+// describe builds the error for a failure of op. The kind is decided from the types in
+// cause's chain, and cause itself goes no further: the result holds nothing of it. The
+// host, port and database are those of the driver's own configuration, the one it parsed
+// from the string or, for a configuration registered with stdlib.RegisterConnConfig, the
+// one in its connect error, and only when they may be named (see [nameParts]).
+func (in dsnInfo) describe(op string, cause error) *ConnectionError {
+	e := newConnectionError(op, cause)
+	if e.Kind == FailureInvalidDSN || in.misSplit {
 		return e // nothing to name: the string was not read, or not read with confidence
 	}
 	cfg := in.cfg

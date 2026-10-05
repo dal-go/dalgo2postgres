@@ -18,6 +18,11 @@ import (
 // CHECK constraints are NOT enumerated here; read them from DescribeCollection
 // if needed.
 func (d *Database) ListConstraints(ctx context.Context, ref *dal.CollectionRef) ([]dbschema.ConstraintDef, error) {
+	return guarded(d.listConstraints(ctx, ref))
+}
+
+// listConstraints is the reader behind [Database.ListConstraints].
+func (d *Database) listConstraints(ctx context.Context, ref *dal.CollectionRef) ([]dbschema.ConstraintDef, error) {
 	rows, err := d.sqlDB.QueryContext(ctx,
 		`SELECT constraint_name, constraint_type
 		 FROM information_schema.table_constraints
@@ -62,6 +67,11 @@ func (d *Database) ListConstraints(ctx context.Context, ref *dal.CollectionRef) 
 // PostgreSQL, so information_schema joins on the name alone mix up tables that
 // reuse a name.
 func (d *Database) ListReferrers(ctx context.Context, ref *dal.CollectionRef) ([]dbschema.Referrer, error) {
+	return guarded(d.listReferrers(ctx, ref))
+}
+
+// listReferrers is the reader behind [Database.ListReferrers].
+func (d *Database) listReferrers(ctx context.Context, ref *dal.CollectionRef) ([]dbschema.Referrer, error) {
 	rows, err := d.sqlDB.QueryContext(ctx,
 		`SELECT c.oid, source.relname AS referrer_table, source_column.attname AS referrer_col
 		 FROM pg_catalog.pg_constraint AS c

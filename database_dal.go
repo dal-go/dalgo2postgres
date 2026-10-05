@@ -13,33 +13,45 @@ import (
 var _ dal.DB = (*Database)(nil)
 
 // --- dal.DB delegation ---
+//
+// Every error of these methods passes leaveAdapter (see error_guard.go), and so does every error
+// of a value they hand out: the transaction a worker is given and the readers a query returns.
+// Use these methods, not the embedded DB field, which is the unguarded delegate.
 
+// RunReadonlyTransaction runs f in a read transaction. The transaction f is given is the
+// adapter's: its methods answer as the methods of the Database do.
 func (d *Database) RunReadonlyTransaction(ctx context.Context, f dal.ROTxWorker, opts ...dal.TransactionOption) error {
-	return d.DB.RunReadonlyTransaction(ctx, f, opts...)
+	return leaveAdapter(d.DB.RunReadonlyTransaction(ctx, func(ctx context.Context, tx dal.ReadTransaction) error {
+		return f(ctx, newGuardedReadTransaction(tx))
+	}, opts...))
 }
 
+// RunReadwriteTransaction runs f in a read-write transaction. The transaction f is given is the
+// adapter's: its methods answer as the methods of the Database do.
 func (d *Database) RunReadwriteTransaction(ctx context.Context, f dal.RWTxWorker, opts ...dal.TransactionOption) error {
-	return d.DB.RunReadwriteTransaction(ctx, f, opts...)
+	return leaveAdapter(d.DB.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+		return f(ctx, newGuardedReadwriteTransaction(tx))
+	}, opts...))
 }
 
 func (d *Database) Get(ctx context.Context, record dalrecord.Record) error {
-	return d.DB.Get(ctx, record)
+	return guardedReads{d.DB}.Get(ctx, record)
 }
 
 func (d *Database) GetMulti(ctx context.Context, records []dalrecord.Record) error {
-	return d.DB.GetMulti(ctx, records)
+	return guardedReads{d.DB}.GetMulti(ctx, records)
 }
 
 func (d *Database) Exists(ctx context.Context, key *dalrecord.Key) (bool, error) {
-	return d.DB.Exists(ctx, key)
+	return guardedReads{d.DB}.Exists(ctx, key)
 }
 
 func (d *Database) ExecuteQueryToRecordsReader(ctx context.Context, query dal.Query) (dal.RecordsReader, error) {
-	return d.DB.ExecuteQueryToRecordsReader(ctx, query)
+	return guardedReads{d.DB}.ExecuteQueryToRecordsReader(ctx, query)
 }
 
 func (d *Database) ExecuteQueryToRecordsetReader(ctx context.Context, query dal.Query, opts ...recordset.Option) (dal.RecordsetReader, error) {
-	return d.DB.ExecuteQueryToRecordsetReader(ctx, query, opts...)
+	return guardedReads{d.DB}.ExecuteQueryToRecordsetReader(ctx, query, opts...)
 }
 
 // --- what the database declares it runs on the server ---
@@ -76,7 +88,7 @@ func (d *Database) QueryCapabilities() dal.QueryCapabilities {
 // declares no join support declines with [dal.ErrNotSupported].
 func (d *Database) CanExecuteJoin(ctx context.Context, q dal.StructuredQuery) error {
 	if provider, ok := dal.As[dal.NativeJoinProvider](d.DB); ok {
-		return provider.CanExecuteJoin(ctx, q)
+		return leaveAdapter(provider.CanExecuteJoin(ctx, q))
 	}
 	return dal.ErrNotSupported
 }
@@ -86,7 +98,7 @@ func (d *Database) CanExecuteJoin(ctx context.Context, q dal.StructuredQuery) er
 // DALgo takes for a source that cannot supply its schema.
 func (d *Database) JoinFields(ctx context.Context, source dal.RecordsetSource) ([]string, error) {
 	if provider, ok := dal.As[dal.JoinFieldsProvider](d.DB); ok {
-		return provider.JoinFields(ctx, source)
+		return guarded(provider.JoinFields(ctx, source))
 	}
 	return nil, nil
 }
@@ -135,7 +147,7 @@ func (d *Database) Set(ctx context.Context, record dalrecord.Record) error {
 	if !ok {
 		return dal.ErrNotImplementedYet
 	}
-	return w.Set(ctx, record)
+	return leaveCall(w.Set(ctx, record), record)
 }
 
 func (d *Database) SetMulti(ctx context.Context, records []dalrecord.Record) error {
@@ -143,7 +155,7 @@ func (d *Database) SetMulti(ctx context.Context, records []dalrecord.Record) err
 	if !ok {
 		return dal.ErrNotImplementedYet
 	}
-	return w.SetMulti(ctx, records)
+	return leaveCall(w.SetMulti(ctx, records), records...)
 }
 
 func (d *Database) Insert(ctx context.Context, record dalrecord.Record, opts ...dal.InsertOption) error {
@@ -151,7 +163,7 @@ func (d *Database) Insert(ctx context.Context, record dalrecord.Record, opts ...
 	if !ok {
 		return dal.ErrNotImplementedYet
 	}
-	return w.Insert(ctx, record, opts...)
+	return leaveCall(w.Insert(ctx, record, opts...), record)
 }
 
 func (d *Database) Upsert(ctx context.Context, record dalrecord.Record) error {
@@ -159,7 +171,7 @@ func (d *Database) Upsert(ctx context.Context, record dalrecord.Record) error {
 	if !ok {
 		return dal.ErrNotImplementedYet
 	}
-	return w.Upsert(ctx, record)
+	return leaveCall(w.Upsert(ctx, record), record)
 }
 
 func (d *Database) Delete(ctx context.Context, key *dalrecord.Key) error {
@@ -167,7 +179,7 @@ func (d *Database) Delete(ctx context.Context, key *dalrecord.Key) error {
 	if !ok {
 		return dal.ErrNotImplementedYet
 	}
-	return w.Delete(ctx, key)
+	return leaveAdapter(w.Delete(ctx, key))
 }
 
 func (d *Database) DeleteMulti(ctx context.Context, keys []*dalrecord.Key) error {
@@ -175,7 +187,7 @@ func (d *Database) DeleteMulti(ctx context.Context, keys []*dalrecord.Key) error
 	if !ok {
 		return dal.ErrNotImplementedYet
 	}
-	return w.DeleteMulti(ctx, keys)
+	return leaveAdapter(w.DeleteMulti(ctx, keys))
 }
 
 func (d *Database) Update(ctx context.Context, key *dalrecord.Key, updates []update.Update, preconditions ...dal.Precondition) error {
@@ -183,7 +195,7 @@ func (d *Database) Update(ctx context.Context, key *dalrecord.Key, updates []upd
 	if !ok {
 		return dal.ErrNotImplementedYet
 	}
-	return w.Update(ctx, key, updates, preconditions...)
+	return leaveAdapter(w.Update(ctx, key, updates, preconditions...))
 }
 
 func (d *Database) UpdateMulti(ctx context.Context, keys []*dalrecord.Key, updates []update.Update, preconditions ...dal.Precondition) error {
@@ -191,7 +203,7 @@ func (d *Database) UpdateMulti(ctx context.Context, keys []*dalrecord.Key, updat
 	if !ok {
 		return dal.ErrNotImplementedYet
 	}
-	return w.UpdateMulti(ctx, keys, updates, preconditions...)
+	return leaveAdapter(w.UpdateMulti(ctx, keys, updates, preconditions...))
 }
 
 // UpdateRecord is not supported at the database level by dalgo2sql; use

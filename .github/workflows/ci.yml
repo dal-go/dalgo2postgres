@@ -239,6 +239,23 @@ jobs:
               exit 1
             fi
           done
+          # The server's answers to a connection that opens lazily (a wrong password, a
+          # database that is not there, a role that may not log in), each met at the first
+          # call of a handle, and a statement error that reaches the caller unchanged. They
+          # skip on their own when the DSN does not reach them, which the allow-list above
+          # already refuses; a PASS line is required for each by name, so a test that is
+          # renamed, deleted or never reached fails the job. Add a new test of the family
+          # to this list.
+          for name in \
+            WrongPasswordAtTheFirstCall \
+            MissingDatabaseAtTheFirstCall \
+            RoleThatMayNotLogInAtTheFirstCall \
+            StatementErrorsKeepTheServersMessageAndDetail; do
+            if ! grep -qE "^\s*--- PASS: TestConnectionFailureIntegration_${name} \(" /tmp/gotest.log; then
+              echo "::error::TestConnectionFailureIntegration_${name} did not run to a pass"
+              exit 1
+            fi
+          done
           # The version test compares nothing when DALGO2POSTGRES_EXPECT_SERVER_MAJOR does
           # not reach it, so the line it prints is required here with the major version
           # this leg names: the leg met the server it says it did.

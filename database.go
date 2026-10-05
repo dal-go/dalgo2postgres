@@ -46,7 +46,7 @@ import (
 type Database struct {
 	dal.ConcurrencyAvailable // SupportsConcurrentConnections() = true
 
-	dal.DB         // delegate for the dal.DB surface
+	dal.DB         // delegate for the dal.DB surface; its errors are not guarded: call the methods of the Database
 	sqlDB  *sql.DB // direct handle for DDL + introspection queries
 
 	schema            string         // schema the reader inspects; "" means DefaultSchema
@@ -62,7 +62,9 @@ type Database struct {
 //
 // A failure to open or reach the server is a [*ConnectionError]; its text holds
 // nothing but the host, port and database name the driver parsed (each only when
-// it passes a strict check), and no other text of dsn or of the driver.
+// it passes a strict check), and no other text of dsn or of the driver. A
+// connection that fails at a later call is a [*ConnectionError] too, naming no part
+// of the configuration.
 //
 // Use [NewDatabaseWithOptions] when you need to supply per-collection
 // primary-key metadata (required for Insert/Get/Delete with map[string]any data).
@@ -164,7 +166,7 @@ func (d *Database) Close() error {
 	if d.sqlDB == nil {
 		return nil
 	}
-	return d.sqlDB.Close()
+	return leaveAdapter(d.sqlDB.Close())
 }
 
 // SupportsConcurrentConnections reports PostgreSQL's own concurrency

@@ -435,6 +435,8 @@ defaults to `nextval(...)` (`serial`) is a plain default to the catalog and is n
 
 ## Connection errors
 
+An error from the adapter never holds the connection's configuration. A connection that fails, at open or at any later call, is a classified error with a fixed sentence: every error of a `*Database`, of the transaction a worker is given and of the readers a query returns passes one function, and a failure of the connection (the driver's connect or configuration error anywhere in the chain, or a server answer of a connection class: SQLSTATE classes 08 and 28, `3D000`, `53300`, `57P01` to `57P03`) comes out as a `*ConnectionError` whose `Kind` says what failed, whose text is the fixed sentence of that kind (and the SQLSTATE of a server answer, never its message, which names a role or a database), and which names no part of the configuration at all after the open; nothing of the driver's error is in its chain, and `errors.Is` still finds `context.Canceled` and `context.DeadlineExceeded` in it. A statement error (a constraint, a type, a syntax class) is the server's own `*pgconn.PgError`, unchanged: it carries the server's message and, for many classes, a detail, which can quote the values and the names of the table, column and constraint concerned, so a consumer that prints one prints that text. Call the methods of the `Database`: its embedded `DB` field is the delegate of the `dal.DB` surface and answers with the errors of the layer under it.
+
 `NewDatabase` and `NewDatabaseWithOptions` return a `*dalgo2postgres.ConnectionError`
 when they cannot open or reach the server. Its text is built, never filtered:
 
@@ -505,10 +507,7 @@ What this means for a string you write:
 
 Limits: an option value the driver does not keep (`sslpassword`, a path) cannot be
 compared with the host and the database, so one that equals them would show the
-host or database, which is only what it is. And this covers construction only: a
-later failure to connect (the pool opening a new connection, a dropped
-connection) comes from the driver without this treatment and may name the
-database user, never the password.
+host or database, which is only what it is.
 
 ## Type mapping
 
@@ -554,7 +553,8 @@ DALGO2POSTGRES_TEST_DSN='postgres://ovdb:ovdb@127.0.0.1:15432/ovdb?sslmode=disab
 
 `TestEndToEnd` then reports those two as skips that name the reason; the Conformance job
 fails on any other skip, and on a test of the families `TestEndToEnd`, `TestTypeMatrixIntegration_`,
-`TestServerPinsIntegration_` and `TestStructuredQueryIntegration_` that does not run to a pass.
+`TestServerPinsIntegration_`, `TestStructuredQueryIntegration_` and `TestConnectionFailureIntegration_` that
+does not run to a pass.
 
 ## PostgreSQL driver: `github.com/jackc/pgx/v5/stdlib` (pure Go, `CGO_ENABLED=0`)
 

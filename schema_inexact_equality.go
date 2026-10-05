@@ -64,7 +64,7 @@ const nonDeterministicTextColumnsSQL = `
 // columns as inexact yourself.
 func (d *Database) NonDeterministicTextColumns(ctx context.Context, ref *dal.CollectionRef) ([]string, error) {
 	name := d.resolveName(ref.Name())
-	return nonDeterministicTextColumns(ctx, d.sqlDB, d.schemaFor(ref), name, collectionLabel(ref.Schema(), name))
+	return guarded(nonDeterministicTextColumns(ctx, d.sqlDB, d.schemaFor(ref), name, collectionLabel(ref.Schema(), name)))
 }
 
 // nonDeterministicTextColumns is the reader behind
