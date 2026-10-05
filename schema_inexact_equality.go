@@ -63,8 +63,11 @@ const nonDeterministicTextColumnsSQL = `
 // domain over citext, or an array of citext, is not reported; treat such
 // columns as inexact yourself.
 func (d *Database) NonDeterministicTextColumns(ctx context.Context, ref *dal.CollectionRef) ([]string, error) {
-	name := d.resolveName(ref.Name())
-	return guarded(nonDeterministicTextColumns(ctx, d.sqlDB, d.schemaFor(ref), name, collectionLabel(ref.Schema(), name)))
+	schema, name, err := d.lookupNames(ref)
+	if err != nil {
+		return nil, err
+	}
+	return guarded(nonDeterministicTextColumns(ctx, d.sqlDB, schema, name, collectionLabel(ref.Schema(), name)))
 }
 
 // nonDeterministicTextColumns is the reader behind

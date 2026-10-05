@@ -571,10 +571,10 @@ func TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimi
 		t.Fatalf("catalog: %v", err)
 	}
 	t.Logf("PostgreSQL %d, column v: attnotnull = %v, constraint validated = %v; rows 2 and 4 hold NULL", major, notNull, validated)
-	// The cause the pin below describes: the catalog calls the column NOT NULL while its
+	// The cause the test below is about: the catalog calls the column NOT NULL while its
 	// constraint has not been validated against the rows that were there.
 	if !notNull || validated {
-		t.Fatalf("attnotnull = %v and the constraint's convalidated = %v, want true and false: the column is NOT NULL to the catalog and its constraint vouches for no row, which is the case this pin is about", notNull, validated)
+		t.Fatalf("attnotnull = %v and the constraint's convalidated = %v, want true and false: the column is NOT NULL to the catalog and its constraint vouches for no row, which is the case this test is about", notNull, validated)
 	}
 
 	ordered := func(by dal.OrderExpression) dal.StructuredQuery {
@@ -582,8 +582,8 @@ func TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimi
 			OrderBy(by, dal.AscendingField("id")).Limit(3).
 			SelectColumns(dal.Column{Expression: field("id")})
 	}
-	// The control: the same order with the NULLS clause written is DALgo's, so the clause the
-	// compiler leaves out is what the answer below lacks.
+	// The control: the same order with the NULLS clause written by hand is DALgo's; the
+	// compiler's statement below must return the same rows.
 	for _, tc := range []struct {
 		order string
 		want  []int

@@ -524,8 +524,8 @@ type keyPathOp struct {
 	run  func(ctx context.Context, f *queryFixture, key *dalrecord.Key) error
 }
 
-// The four key paths the probes run with a collection. Exists is read as refused unless it
-// answers a clean no: an answer of true is an error of the step, as is any other.
+// The four key paths the probes run with a collection. Exists returns its error; an answer of
+// true is made an error of the step, so that it is never read as a refusal.
 var (
 	existsKeyPath = keyPathOp{"Exists", func(ctx context.Context, f *queryFixture, key *dalrecord.Key) error {
 		exists, err := f.db.Exists(ctx, key)

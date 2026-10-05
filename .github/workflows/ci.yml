@@ -43,15 +43,13 @@ jobs:
       # Backstop floor. This job runs without a database, so the DB-backed
       # tests skip here and only the unit and sqlmock tests count; the real
       # floor is in the integration job below. Measured as CI runs it
-      # (`go test -count=1 -cover ./...`): 71.9% on the head of pull request
-      # 13 and on this branch's head. The floor is 71, that value rounded down,
-      # which leaves less than a point in which coverage can fall unnoticed
-      # while a pull request still has room to add code only a live server
-      # tests. With both version tests skipped
-      # (-skip 'TestResolveVersion|TestAdapterReportsVersion') the total is
-      # 70.4%, so this floor also protects the version tests, as the floor of 62
-      # did not. Must rise with the PostgreSQL wave; never lower it.
-      min_test_coverage_percent: 71
+      # (`go test -count=1 -cover ./...`): 86.7% on main at the merge of pull
+      # request 16 and 87.3% on the head of pull request 18. The floor is 86,
+      # one point below the second value, which leaves about a point in which
+      # coverage can fall unnoticed while a pull request still has room to add
+      # code only a live server tests. Must rise with the PostgreSQL wave; never
+      # lower it.
+      min_test_coverage_percent: 86
 
   # Runs the shared dalgotest conformance suite against a real PostgreSQL.
   #
@@ -274,7 +272,8 @@ jobs:
             TestSchemaReaderIntegration_ListsEverySchemaButTheSystemOnes \
             TestSchemaReaderIntegration_ListsViewsAndMaterializedViewsApartFromTables \
             TestSchemaReaderIntegration_DescribesEveryListedCollectionOfEverySchema \
-            TestSchemaReaderIntegration_ReadsDefaultsIdentityAndGeneratedColumns; do
+            TestSchemaReaderIntegration_ReadsDefaultsIdentityAndGeneratedColumns \
+            TestSchemaReaderIntegration_NameOf64BytesAgainstAnObjectOf63; do
             if ! grep -qE "^\s*--- PASS: ${name} \(" /tmp/gotest.log; then
               echo "::error::${name} did not run to a pass"
               exit 1
@@ -311,9 +310,10 @@ jobs:
       - name: Integration coverage floor
         # The floor that matters: this is the only job where the database
         # tests run. Measured as CI runs it (CI log "Integration coverage"):
-        # 90.0% on the head of pull request 13. The floor is 89, that value
-        # rounded down. Must rise with the PostgreSQL wave; never lower it.
+        # 94.1% on main at the merge of pull request 16 and 94.3% on the
+        # head of pull request 18. The floor is 93, one point below the second
+        # value, rounded down. Must rise with the PostgreSQL wave; never lower it.
         run: |
           total=$(go tool cover -func=profile.cov | awk '$1 == "total:" {print $3}' | sed 's/%//')
           echo "Integration coverage: $total%"
-          awk -v t="$total" -v m="89" 'BEGIN { if (t < m) { print "Integration coverage " t "% is below required " m "%"; exit 1 } }'
+          awk -v t="$total" -v m="93" 'BEGIN { if (t < m) { print "Integration coverage " t "% is below required " m "%"; exit 1 } }'

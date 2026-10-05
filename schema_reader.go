@@ -38,15 +38,21 @@ func (d *Database) ListCollections(ctx context.Context, parent *dalrecord.Key) (
 // jsonb, arrays, enums, interval, inet, money, ...) is reported as a String
 // field rather than failing the whole table.
 func (d *Database) DescribeCollection(ctx context.Context, ref *dal.CollectionRef) (*dbschema.CollectionDef, error) {
-	name := d.resolveName(ref.Name())
-	return guarded(describeCollectionImpl(ctx, d.sqlDB, d.schemaFor(ref), name, collectionLabel(ref.Schema(), name)))
+	schema, name, err := d.lookupNames(ref)
+	if err != nil {
+		return nil, err
+	}
+	return guarded(describeCollectionImpl(ctx, d.sqlDB, schema, name, collectionLabel(ref.Schema(), name)))
 }
 
 // ListIndexes returns the non-primary-key indexes on the named table via
 // pg_indexes, from the schema the reference names, else the configured schema.
 func (d *Database) ListIndexes(ctx context.Context, ref *dal.CollectionRef) ([]dbschema.IndexDef, error) {
-	name := d.resolveName(ref.Name())
-	return guarded(listIndexesImpl(ctx, d.sqlDB, d.schemaFor(ref), name, collectionLabel(ref.Schema(), name)))
+	schema, name, err := d.lookupNames(ref)
+	if err != nil {
+		return nil, err
+	}
+	return guarded(listIndexesImpl(ctx, d.sqlDB, schema, name, collectionLabel(ref.Schema(), name)))
 }
 
 // ---- DescribeCollection impl ----

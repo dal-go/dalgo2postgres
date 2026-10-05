@@ -380,6 +380,9 @@ func TestNewDatabase_KeyWritesAndReadsRefuseUnsafeNames(t *testing.T) {
 		{"a field with an injection", "widgets", "ID", map[string]any{evil: "x"}, "field"},
 		{"a primary key with a space", "widgets", "the id", map[string]any{"Name": "x"}, "primary key"},
 		{"a non-ASCII field", "widgets", "ID", map[string]any{"Naïve": "x"}, "field"},
+		{"a collection of 64 bytes", strings.Repeat("n", 64), "ID", map[string]any{"Name": "x"}, "collection"},
+		{"a field of 64 bytes", "widgets", "ID", map[string]any{strings.Repeat("n", 64): "x"}, "field"},
+		{"a primary key of 64 bytes", "widgets", strings.Repeat("n", 64), map[string]any{"Name": "x"}, "primary key"},
 	} {
 		recordsets := map[string]*dalgo2sql.Recordset{
 			tc.collection: dalgo2sql.NewRecordset(tc.collection, dalgo2sql.Table, []dal.FieldRef{dal.Field(tc.pk)}),
