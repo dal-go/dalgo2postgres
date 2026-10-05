@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -78,6 +79,12 @@ func TestServerPinsIntegration_ColumnNamedLikeItsAliasIsTheColumn(t *testing.T) 
 	})
 }
 
+// The statements of the next two tests, and of the LEFT JOIN case further down, end with
+// "id" AS "__dalgo_record_id": with dalgo2sql v0.26.3 the compiler adds the catalog's
+// one-column primary key to the select list, under a hidden name, when the select list does
+// not name it, so that each record is keyed by it (README, "How records are keyed"). The
+// fixtures keep their primary keys and the expected statements say so.
+//
 // A qualified name x.f is a column of x when x has one, and the function f applied to the
 // row of x when it has not (x.to_jsonb is to_jsonb(x)). The server prefers the column: a
 // table with columns named like functions returns them as columns. A name that is no
@@ -96,7 +103,7 @@ func TestServerPinsIntegration_QualifiedColumnWinsOverAFunctionOfTheRow(t *testi
 		)
 		o := observe(t, f, q)
 		t.Logf("statement: %s\n    result: %v", o.statement, o.rows)
-		if want := `SELECT "f"."to_json" AS "a", "f"."row_to_json" AS "b", "f"."count" AS "c" FROM "t_fn" AS "f"`; o.statement != want {
+		if want := `SELECT "f"."to_json" AS "a", "f"."row_to_json" AS "b", "f"."count" AS "c", "id" AS "__dalgo_record_id" FROM "t_fn" AS "f"`; o.statement != want {
 			t.Errorf("statement = %s, want %s", o.statement, want)
 		}
 		if want := []map[string]any{{"a": "tj", "b": "rtj", "c": int64(7)}}; o.err != nil || !reflect.DeepEqual(o.rows, want) {
@@ -158,7 +165,7 @@ func TestServerPinsIntegration_AliasesThatFoldTogetherAreRefusedBeforeTheServer(
 		f := openQueryFixture(t, "test_pin_fold_exact", IdentifierExact, ddl)
 		o := observe(t, f, query())
 		t.Logf("statement: %s\n    result: %v", o.statement, o.rows)
-		if want := `SELECT "a" AS "Total", "b" AS "TOTAL" FROM "t_fold"`; o.statement != want {
+		if want := `SELECT "a" AS "Total", "b" AS "TOTAL", "id" AS "__dalgo_record_id" FROM "t_fold"`; o.statement != want {
 			t.Errorf("statement = %s, want %s", o.statement, want)
 		}
 		if want := []map[string]any{{"Total": "x", "TOTAL": "y"}}; o.err != nil || !reflect.DeepEqual(o.rows, want) {
@@ -218,9 +225,12 @@ func TestServerPinsIntegration_SelectAllOverAJoinListsTheBasesColumnsFirst(t *te
 // text), and planned onto the server. The server cannot compare them: it cannot decide
 // which collation the comparison uses and refuses the statement with 42P22. A pair in
 // which only one column has a collation of its own is compared in that one, and answers.
-// The refusal is an honest one and is a finding for dalgo2sql, whose catalog facts carry
-// the collation of a column (NonDeterministicCollation says only whether it is
-// deterministic) and could decline such a join to DALgo's own engine.
+//
+// KNOWN DEFECT of dal-go/dalgo2sql, not a rule (task SQL-W4, item 4, which declines such a
+// join to DALgo's own engine; no release has it yet). The refusal is an honest one, but
+// the join is planned on the server and then fails, where DALgo's engine would answer.
+// The first case below FAILS when that is fixed, and says what to assert instead: a plan
+// that is not native, and rows [1] for the same query.
 func TestServerPinsIntegration_TextJoinKeysWithDifferentCollations(t *testing.T) {
 	f := openQueryFixture(t, "test_pin_collation", IdentifierFoldLower, []string{
 		`CREATE TABLE c_c (id integer PRIMARY KEY, k text COLLATE "C")`,
@@ -241,24 +251,34 @@ func TestServerPinsIntegration_TextJoinKeysWithDifferentCollations(t *testing.T)
 			NewQuery().
 			SelectColumns(dal.Column{Expression: dal.NewFieldRef("l", "id"), Alias: "id"})
 	}
-	for _, tc := range []struct {
-		label       string
-		left, right string
-		want        cellOutcome
-	}{
-		{`collation "C" against "POSIX": the server cannot choose one`, "c_c", "c_p", refused("42P22")},
-		{`collation "C" against the default: the column with a collation of its own decides`, "c_c", "c_d", rowsOf(1)},
-	} {
-		t.Run(tc.label, func(t *testing.T) {
-			q := join(tc.left, tc.right)
-			plan, err := dal.PlanJoin(context.Background(), q, joiner)
-			t.Logf("plan: %+v, %v", plan, err)
-			if err != nil || plan.Strategy != dal.JoinNative {
-				t.Errorf("plan = %+v, err = %v; want the join planned on the server (the compiler accepts the pair by category)", plan, err)
-			}
-			check(t, tc.label, observe(t, f, q), tc.want)
-		})
-	}
+	t.Run(`KNOWN DEFECT: collation "C" against "POSIX": planned on the server, which cannot choose one`, func(t *testing.T) {
+		q := join("c_c", "c_p")
+		plan, err := dal.PlanJoin(context.Background(), q, joiner)
+		t.Logf("plan: %+v, %v", plan, err)
+		t.Logf("KNOWN DEFECT of dal-go/dalgo2sql (task SQL-W4, item 4; not a rule): the compiler plans on the server a join of two text columns with different collations, and the server refuses it with 42P22")
+		o := observe(t, f, q)
+		t.Logf("statement: %s\n    arguments: %s\n    result:    %s", o.statement, argsText(o.args), o.result())
+		const fixed = "dalgo2sql now declines such a join to DALgo's engine (SQL-W4 item 4 is fixed): assert here a plan whose strategy is not dal.JoinNative and rows [1] for the same query, and delete this pin and the README's known limit"
+		if err == nil && plan.Strategy != dal.JoinNative {
+			t.Errorf("plan = %+v: %s", plan, fixed)
+		} else if err != nil || plan.Strategy != dal.JoinNative {
+			t.Errorf("plan = %+v, err = %v; want the join planned on the server (the compiler accepts the pair by category)", plan, err)
+		}
+		if o.code == "" {
+			t.Errorf("result = %s: %s", o.result(), fixed)
+		} else if o.code != "42P22" {
+			t.Errorf("result = %s, want the server's refusal 42P22 (indeterminate collation)", o.result())
+		}
+	})
+	t.Run(`collation "C" against the default: the column with a collation of its own decides`, func(t *testing.T) {
+		q := join("c_c", "c_d")
+		plan, err := dal.PlanJoin(context.Background(), q, joiner)
+		t.Logf("plan: %+v, %v", plan, err)
+		if err != nil || plan.Strategy != dal.JoinNative {
+			t.Errorf("plan = %+v, err = %v; want the join planned on the server", plan, err)
+		}
+		check(t, "collation C against the default", observe(t, f, q), rowsOf(1))
+	})
 }
 
 // A run-time error in the middle of the rows (a text that is no number, under the cast
@@ -421,8 +441,72 @@ func TestServerPinsIntegration_NotNullColumnKeepsItsOrderByWithoutANullsClause(t
 		// Rows 2 and 3 have no partner, so their bonus is NULL and they come first; then
 		// row 4 (bonus 5) and row 1 (bonus 10).
 		check(t, "LEFT JOIN ORDER BY b.bonus, nn.id", o, rowsOf(2, 3, 4, 1))
-		if want := `SELECT "nn"."id" AS "id" FROM "nn" LEFT JOIN "nn_b" AS "b" ON ("nn"."id" = "b"."nnid") ORDER BY "b"."bonus" ASC NULLS FIRST, "nn"."id" ASC`; o.statement != want {
+		if want := `SELECT "nn"."id" AS "id", "nn"."id" AS "__dalgo_record_id" FROM "nn" LEFT JOIN "nn_b" AS "b" ON ("nn"."id" = "b"."nnid") ORDER BY "b"."bonus" ASC NULLS FIRST, "nn"."id" ASC`; o.statement != want {
 			t.Errorf("statement = %s, want %s", o.statement, want)
+		}
+	})
+}
+
+// A keys-only read of a table is sent with an ORDER BY on the primary key, and the server
+// orders text by the column's collation, which for a table that declares none is the
+// database's: in CI en_US.utf8, which puts "São Paulo" before "Shanghai" and "Sindh", where
+// Go's sort.Strings, byte by byte, puts it last. The shared suite of dal-go/dalgo asserts
+// the keys-only read of its cities in Go's order (TestEndToEnd/query/SELECT_ID_FROM_Cities),
+// so with the key column in the database's collation that sub-test fails on this server;
+// the fixture of TestEndToEnd gives the key COLLATE "C" and it passes.
+//
+// This is a DIVERGENCE from the shared suite's keys-only contract, not a rule and not a
+// defect of this package, reported for dal-go/dalgo (does the contract say the order is
+// Go's?) and dal-go/dalgo2sql (which writes the ORDER BY on the key): a real table does not
+// declare COLLATE "C". The test pins what the server does with the statement shown, prints
+// the database's collation, and runs the same rows under COLLATE "C" as the control that
+// equals sort.Strings. If the database's collation orders like C the pin shows nothing, and
+// the test fails and says so rather than skipping.
+func TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation(t *testing.T) {
+	rows := `('Shanghai_Shanghai'), ('Sindh_Karachi'), ('São Paulo_São Paulo')`
+	f := openQueryFixture(t, "test_pin_keys_collation", IdentifierFoldLower, []string{
+		`CREATE TABLE kc_default (id text PRIMARY KEY)`,
+		`INSERT INTO kc_default VALUES ` + rows,
+		`CREATE TABLE kc_c (id text COLLATE "C" PRIMARY KEY)`,
+		`INSERT INTO kc_c VALUES ` + rows,
+	})
+	var collate, provider string
+	if err := f.admin.QueryRowContext(context.Background(),
+		`SELECT datcollate, datlocprovider::text FROM pg_database WHERE datname = current_database()`).Scan(&collate, &provider); err != nil {
+		t.Fatalf("pg_database: %v", err)
+	}
+	t.Logf("the database's collation: datcollate = %s, datlocprovider = %s", collate, provider)
+
+	keys := func(t *testing.T, table string) (statement string, ids []string) {
+		t.Helper()
+		statement, got := keysOf(t, f, dal.From(dal.NewRootCollectionRef(table, "")).NewQuery().SelectKeysOnly(reflect.String))
+		for _, row := range got {
+			id, _ := row.id.(string)
+			ids = append(ids, id)
+		}
+		t.Logf("statement: %s\n    keys, in the order the server returned them: %v", statement, ids)
+		if !strings.HasSuffix(statement, `ORDER BY "id" ASC`) {
+			t.Errorf("statement = %s, want one ending ORDER BY \"id\" ASC", statement)
+		}
+		return statement, ids
+	}
+	goOrder := []string{"Shanghai_Shanghai", "Sindh_Karachi", "São Paulo_São Paulo"}
+	if !sort.StringsAreSorted(goOrder) {
+		t.Fatalf("the fixture is not in Go's order: %v", goOrder)
+	}
+	t.Run("in the database's collation the server's order is not Go's", func(t *testing.T) {
+		_, ids := keys(t, "kc_default")
+		if reflect.DeepEqual(ids, goOrder) {
+			t.Fatalf("keys = %v: the database's collation (%s) orders like C, so this pin shows nothing; run the job on a database whose collation is not C or POSIX", ids, collate)
+		}
+		if want := []string{"São Paulo_São Paulo", "Shanghai_Shanghai", "Sindh_Karachi"}; !reflect.DeepEqual(ids, want) {
+			t.Errorf("keys = %v, want the linguistic order of %s: %v. This differs from sort.Strings, which the shared suite's keys-only contract asserts: a divergence reported for dal-go/dalgo and dal-go/dalgo2sql", ids, collate, want)
+		}
+	})
+	t.Run(`control: the same keys under COLLATE "C" are in Go's order`, func(t *testing.T) {
+		_, ids := keys(t, "kc_c")
+		if !reflect.DeepEqual(ids, goOrder) {
+			t.Errorf("keys = %v, want Go's order %v", ids, goOrder)
 		}
 	})
 }

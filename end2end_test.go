@@ -12,6 +12,7 @@ import (
 	"github.com/dal-go/dalgo/end2end/models"
 	"github.com/dal-go/dalgo2sql"
 	dalrecord "github.com/dal-go/record"
+	"github.com/dal-go/record/update"
 )
 
 // end2endDDL creates the tables the shared suite of dal-go/dalgo (the end2end
@@ -26,6 +27,11 @@ import (
 // database's collation (en_US.utf8 in CI), which puts "São Paulo" before "Shanghai".
 // So the column says COLLATE "C", which is the rule for any table whose order a caller
 // compares with Go's: ORDER BY and MIN / MAX follow the column's collation, not DALgo's.
+// The fixture avoids the divergence; it does not hide it:
+// TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation pins the server's
+// order for a key in the database's collation, with the COLLATE "C" control, and the
+// divergence from the suite's keys-only contract is reported for dal-go/dalgo and
+// dal-go/dalgo2sql.
 var end2endDDL = []string{
 	`CREATE TABLE dalgoe2e_e2etest1 (id varchar(10) PRIMARY KEY, stringprop text, integerprop integer)`,
 	`CREATE TABLE dalgoe2e_e2etest2 (id varchar(10) PRIMARY KEY, stringprop text, integerprop integer)`,
@@ -48,18 +54,21 @@ var end2endDDL = []string{
 // mode that folds names, with the reason. The workflow excludes exactly these from the
 // go test command (-skip) and lists exactly these as the skips it allows: TestEndToEnd
 // reports each one as a skip that names its reason, so the exclusion shows in the output
-// and a rename or a removal in the suite is noticed. The reason is a fact this package
-// asserts, TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames.
-var notRunInFoldLowerMode = []struct{ name, reason string }{
-	{"point_reads_follow_the_condition", "Exists on a row the policy allows is denied"},
-	{"writes_follow_the_condition", "Update of a row the policy allows is denied"},
+// and a rename or a removal in the suite is noticed. The reason of each is a fact this
+// package asserts, in the test that is named with it.
+var notRunInFoldLowerMode = []struct{ name, reason, pinnedBy string }{
+	{"point_reads_follow_the_condition", "Exists on a row the policy allows is denied",
+		"TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames"},
+	{"writes_follow_the_condition", "Update of a row the policy allows is denied",
+		"TestEndToEndIntegration_UpdateUnderRowConditionsFailsClosedOnStoredNames"},
 }
 
 // TestEndToEnd runs the shared suite of dal-go/dalgo, end2end.TestDalgoDB, against
 // PostgreSQL in the mode that folds names (IdentifierFoldLower), with its query half
 // on: the key reads and writes, the structured queries over the cities fixture (keys
 // only, ordering, filters, projection, GROUP BY with HAVING, on both read paths), the
-// access conditions and the field lists of the access layer.
+// access conditions, the field lists and the sources of the access layer
+// (query/access_sources).
 //
 // Two sub-tests of query/access_conditions do not run in this mode (see
 // notRunInFoldLowerMode): the Conformance job excludes them by name, and this test
@@ -80,7 +89,7 @@ func TestEndToEnd(t *testing.T) {
 				t.Skipf("query/access_conditions/%s cannot run in fold-lower mode: %s, because a key read returns the "+
 					"names as the table stores them (lower case) and the suite's policy spells them Country and "+
 					"IsCapital; the access layer compares names exactly and denies. "+
-					"TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames pins that", notRun.name, notRun.reason)
+					"%s pins that", notRun.name, notRun.reason, notRun.pinnedBy)
 			})
 		}
 	})
@@ -144,6 +153,71 @@ func TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames(t *testing.T) 
 	t.Run("the condition spelled as stored is satisfied", func(t *testing.T) {
 		if got, err := exists(t, "country"); err != nil || !got {
 			t.Errorf("Exists = %v, %v; want true", got, err)
+		}
+	})
+}
+
+// A write is held to the same rule. The access layer reads the row's pre-image through the
+// session, which is a key read, and evaluates the condition on it, so an Update through a
+// policy that spells the field as the suite does (Country) is denied for a row the policy
+// allows, and the row is left as it was; the same policy spelled as stored admits it.
+// This is the reason the sub-test writes_follow_the_condition cannot run here (the Exists
+// case above is the one of point_reads_follow_the_condition).
+//
+// The denial is a failure to close only because the conditional rule is the only allow for
+// the row. A conditional rule whose condition does not hold falls through to an
+// unconditional allow when the policy has one, so a policy that narrows with a condition
+// and then allows without one is decided by the wider rule: the README says so, and
+// PG-03b (access checks) owns that case.
+func TestEndToEndIntegration_UpdateUnderRowConditionsFailsClosedOnStoredNames(t *testing.T) {
+	testDSN(t)
+	recordsets := map[string]*dalgo2sql.Recordset{
+		models.CitiesCollection: dalgo2sql.NewRecordset(models.CitiesCollection, dalgo2sql.Table, []dal.FieldRef{dal.Field("ID")}),
+	}
+	f := openQueryFixtureWithOptions(t, dalgo2sql.DbOptions{Recordsets: recordsets}, "test_e2e_update", IdentifierFoldLower, end2endDDL)
+	ctx := context.Background()
+	if _, err := f.admin.ExecContext(ctx, `INSERT INTO dalgotest_cities VALUES
+		('Tokyo_Tokyo', 'Tokyo', 'Tokyo', 'JP', 37400068, 2187, true, true, '1457-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("INSERT: %v", err)
+	}
+	key := dalrecord.NewKeyWithID(models.CitiesCollection, "Tokyo_Tokyo")
+	hasAirport := func(t *testing.T) bool {
+		t.Helper()
+		var got bool
+		if err := f.admin.QueryRowContext(ctx, `SELECT hasairport FROM dalgotest_cities WHERE id = 'Tokyo_Tokyo'`).Scan(&got); err != nil {
+			t.Fatalf("SELECT: %v", err)
+		}
+		return got
+	}
+	// edit updates hasairport of the row through a policy whose only allow is conditional
+	// on the field given.
+	edit := func(field string) error {
+		condition := dal.WhereField(field, dal.Equal, dal.NewParam("country"))
+		secured := access.MustSecureDB(f.db, access.WithDatabasePolicies(access.MustPolicy("cities-edit-own-country",
+			access.Scope(models.CitiesCollection, access.AnyID, access.Allow(access.Update, "edit-own-country").Where(condition)))))
+		return secured.RunReadwriteTransaction(access.WithVariables(ctx, map[string]any{"country": "JP"}),
+			func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+				return tx.Update(ctx, key, []update.Update{update.ByFieldName("hasairport", false)})
+			})
+	}
+	t.Run("an Update under a condition that spells the field as the suite does is denied and writes nothing", func(t *testing.T) {
+		err := edit("Country")
+		t.Logf("Update under a condition on Country: %v; hasairport is now %v", err, hasAirport(t))
+		if !errors.Is(err, access.ErrAccessDenied) {
+			t.Errorf("Update = %v, want a denial: the condition on Country is not satisfied by the stored country", err)
+		}
+		if !hasAirport(t) {
+			t.Error("hasairport was written although the Update was denied")
+		}
+	})
+	t.Run("the condition spelled as stored admits the Update", func(t *testing.T) {
+		err := edit("country")
+		t.Logf("Update under a condition on country: %v; hasairport is now %v", err, hasAirport(t))
+		if err != nil {
+			t.Errorf("Update = %v, want it admitted", err)
+		}
+		if hasAirport(t) {
+			t.Error("hasairport is still true, want the Update written")
 		}
 	})
 }

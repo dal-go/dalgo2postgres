@@ -106,8 +106,9 @@ jobs:
           # returns the names as the table stores them (lower case) and the suite's
           # access policy spells them Country and IsCapital, which the access layer
           # compares exactly, so it denies a row the policy allows. The reason is
-          # asserted by TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames,
-          # and TestEndToEnd reports each of them as a skip that names it (the
+          # asserted by TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames
+          # (Exists) and TestEndToEndIntegration_UpdateUnderRowConditionsFailsClosedOnStoredNames
+          # (Update), and TestEndToEnd reports each of them as a skip that names it (the
           # allow-list of skips below). Keep the two lists the same.
           not_run='^TestEndToEnd$/^query$/^access_conditions$/^(point_reads_follow_the_condition|writes_follow_the_condition)$'
           go test -race -v -skip "$not_run" -coverprofile=profile.cov ./... 2>&1 | tee /tmp/gotest.log
@@ -171,11 +172,18 @@ jobs:
           done
           # The shared end2end suite, the type matrix and the server pins. No skip is
           # allowed in this job but the ones listed here, which are the sub-tests of
-          # the shared suite that cannot run in fold-lower mode (see not_run above):
-          # a skip that is not in the list fails the job, and a listed one that did
-          # not run fails it too, so a rename in the suite is noticed. A PASS line is
-          # then required for each test by name, so a test that is renamed, deleted or
-          # never reached fails the job. Add a new test of these families to the list.
+          # the shared suite that cannot run in fold-lower mode (see not_run above).
+          # Two checks follow: a skip that is not in the list fails the job (so a skip
+          # from any other cause does), and a listed skip that did not appear fails it
+          # too. The second check sees only that this repository's TestEndToEnd ran,
+          # because it writes the two skips itself, from its own list; it cannot see
+          # the shared suite. A rename in the shared suite is noticed for another
+          # reason: the old name in the -skip pattern then matches nothing and the
+          # renamed sub-test runs, and fails in fold-lower mode. A removal is not
+          # noticed.
+          # Last, a PASS line is required for each test by name, so a test that is
+          # renamed, deleted or never reached fails the job. Add a new test of these
+          # families to the list.
           allowed_skips=(
             TestEndToEnd/not_run_in_fold_lower_mode/point_reads_follow_the_condition
             TestEndToEnd/not_run_in_fold_lower_mode/writes_follow_the_condition
@@ -201,7 +209,9 @@ jobs:
             TestEndToEnd/query \
             TestEndToEnd/query/access_conditions \
             TestEndToEnd/query/access_field_lists \
+            TestEndToEnd/query/access_sources \
             TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames \
+            TestEndToEndIntegration_UpdateUnderRowConditionsFailsClosedOnStoredNames \
             TestServerVersionIntegration_IsTheOneTheJobNames \
             TestTypeMatrixIntegration_FilterByColumnTypeAndConstantType \
             TestTypeMatrixIntegration_ProjectionAndOrderBy \
@@ -209,6 +219,7 @@ jobs:
             TestTypeMatrixIntegration_ValuesAtTheEdges \
             TestTypeMatrixIntegration_ArithmeticOnDoublePrecision \
             TestTypeMatrixIntegration_NumericWithAFractionIntoAnIntegerField \
+            TestTypeMatrixIntegration_ByteStringAgainstBytea \
             TestTypeMatrixIntegration_TimestampWithoutZoneFollowsTheSessionTimeZone \
             TestServerPinsIntegration_ColumnNamedLikeItsAliasIsTheColumn \
             TestServerPinsIntegration_QualifiedColumnWinsOverAFunctionOfTheRow \
@@ -216,12 +227,20 @@ jobs:
             TestServerPinsIntegration_SelectAllOverAJoinListsTheBasesColumnsFirst \
             TestServerPinsIntegration_TextJoinKeysWithDifferentCollations \
             TestServerPinsIntegration_RuntimeErrorAtRowN \
+            TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation \
             TestServerPinsIntegration_NotNullColumnKeepsItsOrderByWithoutANullsClause; do
             if ! grep -qE "^\s*--- PASS: ${name} \(" /tmp/gotest.log; then
               echo "::error::${name} did not run to a pass"
               exit 1
             fi
           done
+          # The version test compares nothing when DALGO2POSTGRES_EXPECT_SERVER_MAJOR does
+          # not reach it, so the line it prints is required here with the major version
+          # this leg names: the leg met the server it says it did.
+          if ! grep -qF "server_version_num major ${{ matrix.postgres }})" /tmp/gotest.log; then
+            echo "::error::the server of this leg is not PostgreSQL ${{ matrix.postgres }}: no \"server_version_num major ${{ matrix.postgres }})\" line"
+            exit 1
+          fi
         env:
           DALGO2POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/dalgo_test?sslmode=disable
           DALGO2POSTGRES_EXPECT_SERVER_MAJOR: ${{ matrix.postgres }}

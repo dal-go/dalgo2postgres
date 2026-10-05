@@ -86,7 +86,7 @@ and every name is double-quoted. An injection string is compared as text.
 ### What falls back to DALgo's engine
 
 DALgo's own engine is bounded, in memory: it stops at 10,000 rows of a join and 100,000
-groups of an aggregation (dalgo v0.89.4), and past them returns an error, not a partial
+groups of an aggregation (dalgo v0.89.6), and past them returns an error, not a partial
 result.
 
 - **A query with a subquery** (`EXISTS`, a scalar subquery, a derived source): DALgo reads
@@ -144,20 +144,33 @@ connection's `search_path` resolves. `WithSchema` affects only the schema reader
   is sent for it.
 - A read inside a transaction (`RunReadonlyTransaction`) compiles the same way, and its
   catalog query runs on the transaction.
-- A record carries the collection of the query's base source and, when
-  `DbOptions.Recordsets` gives that source a one-field primary key, the key's value as its
-  ID. A query that does not select the key gets it through a hidden column the statement
-  adds, which is not in the record's data. A query that reads into a record of its own
-  (`SelectIntoRecord`) fills that record. With no primary key configured, the ID is the
-  placeholder `__dalgo_record_id`, not an identity of the row.
-- A recordset is found by the source name **as the query spells it**, also in
-  `IdentifierFoldLower`, which folds the name only in the statement. A recordset registered as
-  `album` is not found for a query that spells `Album`: the statement reads the right table,
-  yet every record's ID is the placeholder `__dalgo_record_id`, with no error. Register the
-  recordset under the spelling your queries use.
+- A **run-time error in the middle of the rows** (a text that is no number, under the cast of
+  arithmetic, at row 4 of 5) reaches the caller as the server's error from both readers, after
+  the three rows before it: row by row, through the read-all helpers, and out of a read
+  transaction (`TestServerPinsIntegration_RuntimeErrorAtRowN`). With dalgo2sql v0.26.0 the
+  recordset reader ended the rows quietly instead; since v0.26.1 it does not.
+- **How records are keyed.** A record carries the collection of the query's base source,
+  spelled as the query spells it, and an ID taken from the first of these that applies:
+  the one-field primary key of the recordset declared for the source
+  (`DbOptions.Recordsets`); else `DbOptions.PrimaryKey`, when it is one field; else the primary
+  key the catalog reports for the source, when it is exactly one column (a key with an
+  `INCLUDE` list counts: only its key column is the key); else the ordinal of the row in
+  the result (`"0"`, `"1"`, ...), which is no identity of the row. The ordinal is what a
+  table with no primary key, a composite key, a view, a materialized view and a grouped
+  query get. A query that does not select the key gets it through a hidden column the
+  statement adds (`"id" AS "__dalgo_record_id"`), which is not in the record's data;
+  `__dalgo_record_id` is only the name of that column, never an ID. A query that reads into a
+  record of its own (`SelectIntoRecord`) fills that record.
+  `TestStructuredQueryIntegration_RecordKeysFromTheCatalog` runs every case on the server.
+- **How a recordset is found.** The recordset is looked up under the source name as the query
+  spells it and, in `IdentifierFoldLower`, under that name in lower case, so a recordset
+  registered as `album` is found for `album`, `Album` and `ALBUM` (the record's collection is
+  the spelling the query used). A recordset registered under a name with capitals is found
+  only by a query that spells it exactly so: see the known limits, and register recordsets
+  under lower case names in `IdentifierFoldLower`.
 - The rows of a grouped query (one with `GroupBy` or an aggregate) are keyed by their
-  ordinal in the result (`"0"`, `"1"`, ...), whether a primary key is configured or not: a
-  group is not a row of the table, so no key is read and no hidden column is added.
+  ordinal in the result, whether a primary key is configured or not: a group is not a row of
+  the table, so no key is read and no hidden column is added.
 
 ### Constants and column types
 
@@ -165,8 +178,8 @@ A constant is typed by its Go type, never by its value, and the server compares 
 column. `TestTypeMatrixIntegration_FilterByColumnTypeAndConstantType` runs every Go type
 against a column of each of `smallint`, `integer`, `bigint`, `numeric`, `real`,
 `double precision`, `boolean`, `date`, `timestamp`, `timestamptz`, `uuid`, `jsonb` and `text`
-on PostgreSQL 17, and prints the statement, the argument and the answer of each pair
-(`go test -v`).
+on PostgreSQL 17 and 18 (the Conformance job runs both, and nothing differs), and prints the
+statement, the argument and the answer of each pair (`go test -v`).
 
 | Go type of the constant | The statement writes | The driver is handed |
 |---|---|---|
@@ -200,24 +213,20 @@ What the server answers, as observed:
   holds about 15 digits.
 - **`'Infinity'::numeric`** (PostgreSQL 14 and later) is matched by `math.Inf(1)`, `-Infinity`
   by `math.Inf(-1)` and `NaN` by `math.NaN()`, and read back as those `float64` values.
-- **A float constant against a `real` column** is compared as `double precision`, as psql
-  does with a numeric literal: a `real` that holds `0.1` is `0.10000000149011612` when
-  widened, so `float32(0.1)` and `0.1` find nothing, while the string `"0.1"` (read by the
-  server as a `real`) and the `float64` the reader returned for the row do. Against `double
-  precision` both find it. Filter a `real` column by a string, or by a range.
 - **Arithmetic is on `double precision`**: `i4 * 2` on 2147483647 is `4294967294` (a
   `float64`), where the server alone would refuse it with `22003`; a bigint beyond 2^53 loses
   its last digits, and `/` is not an integer division.
 - **A `NUMERIC` with a fraction cannot be read into an integer field**: the read fails with
-  `column "num": value 1.5 is not an int64`; a whole `NUMERIC` can.
+  `column "num": the value is not an int64: it has a fractional part`; a whole `NUMERIC`
+  can.
 - **ORDER BY** follows the column's collation, not Go's string order: with the database's
-  `en_US.utf8`, `São Paulo` sorts before `Shanghai`. A table whose order a caller compares
-  with Go's declares its text `COLLATE "C"`. NULLs sort first ascending and last descending;
+  `en_US.utf8`, `São Paulo` sorts before `Shanghai`. This holds for the `ORDER BY` a keys-only
+  read adds on the primary key too (see the known limits). A table whose order a caller
+  compares with Go's declares its text `COLLATE "C"`. NULLs sort first ascending and last descending;
   a `NOT NULL` column has no `NULLS` clause, except on the nullable side of a `LEFT JOIN`.
-- **Joins**: a join of two text columns whose collations differ, neither the database's
-  default (`"C"` against `"POSIX"`), is accepted by the compiler (both are text) and planned
-  onto the server, which refuses it with `42P22` (could not determine which collation to
-  use). A text column with a collation of its own against one with the default joins.
+- **Joins**: a text column with a collation of its own against one with the database's
+  default joins, in the collation of the first. (Two columns with different collations of
+  their own do not: see the known limits.)
 - **A select-all over a join** is one `SELECT *`, and the server lists the base source's
   columns first, then each joined source's, in `FROM` order.
 - **A column named like its source's alias** (`SELECT "x" FROM "t" AS "x"`) is the column; a
@@ -227,22 +236,55 @@ What the server answers, as observed:
 - **Two aliases that fold to one name** (`Total` and `TOTAL`) are refused before the server in
   `IdentifierFoldLower`; in `IdentifierExact` they are two columns.
 
-Known limits, each pinned by a test and reported to dalgo and dalgo2sql:
+Known limits. Each is pinned by a test that prints the statement and the server's answer.
+The first four are **defects or limits of dal-go/dalgo2sql** (the owner of the fix is named);
+their tests FAIL when the fix is released and say what to assert instead, so the line here is
+then deleted. They are observations, not rules to rely on.
 
-- The **recordset reader** (`ExecuteQueryToRecordsetReader`, the path DataTug reads) holds no
-  NULL: a typed column returns the zero value of its type (`0`, `false`, `""`, the zero
-  time) for a NULL, so a caller cannot tell the two apart. The records reader returns `nil`.
-- The recordset reader **swallows a run-time error in the middle of the rows**: a cast that
-  fails at row 4 of 5 ends the read after row 3 with `dal.ErrNoMoreRecords`, and
-  `dal.ExecuteQueryAndReadAllToRecordset` returns three rows and no error (inside a read
-  transaction the caller sees only `commit unexpectedly resulted in rollback`). The records
-  reader returns the server's error. Do not read a query that can fail at run time through the
-  recordset reader until dalgo2sql returns `rows.Err()` there.
+- **The recordset reader returns the zero value for a NULL** (a defect, being fixed in
+  dal-go/dalgo2sql, task SQL-W4 item 1). `ExecuteQueryToRecordsetReader`, the path DataTug
+  reads, holds no NULL: a typed column returns the zero value of its type (`0`, `false`, `""`,
+  the zero time) for a NULL, so a caller cannot tell the two apart. The records reader returns
+  `nil` for the same cell, and a test asserts that beside the pin.
+- **Two text join keys with different collations of their own** (`"C"` against `"POSIX"`;
+  a defect, task SQL-W4 item 4, which will decline such a join to DALgo's engine). The compiler
+  accepts the pair (both are text) and plans the join on the server, which refuses it with
+  `42P22` (could not determine which collation to use). A pair in which only one column has a
+  collation of its own is fine.
+- **A float constant against a `real` column** (a defect, task SQL-W4 item 5, which will
+  compare in the column's type). The constant is bound as `numeric` and the server compares as
+  `double precision`: a `real` that holds `0.1` is `0.10000000149011612` when widened, so
+  `float32(0.1)` and `0.1` find nothing, while the string `"0.1"` (read by the server as a
+  `real`) and the `float64` the reader returned for the row do. Against `double precision` both
+  find it. Until the fix, filter a `real` column by a string, or by a range.
+- **A recordset registered under a name with capitals** (`Ck_Mixed`) is found only by a query
+  that spells the source exactly so; dalgo2sql folds the name the query spells, never the
+  registered names. For `ck_mixed` or `CK_MIXED` the recordset is ignored with no error and the
+  records are keyed by the catalog's key instead of the declared one. In
+  `IdentifierFoldLower` register recordsets under lower case names. Reported for
+  dal-go/dalgo2sql.
+
+Limits of this combination that are not defects of one library:
+
+- **A keys-only read follows the database's collation.** It is sent as a read of the table
+  with `ORDER BY` on the primary key, and for a text key the server orders by the key's
+  collation: with `en_US.utf8`, `São Paulo_São Paulo` comes before `Shanghai_Shanghai`, where
+  `sort.Strings` puts it last. The shared suite of dal-go/dalgo asserts the keys-only read of
+  its cities in Go's order, so it fails here for a key in the database's collation; its fixture
+  here declares `COLLATE "C"` (the control, which equals Go's order) and the divergence is
+  pinned by `TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation`. Reported
+  for dal-go/dalgo (is the order part of the contract?) and dal-go/dalgo2sql.
 - In `IdentifierFoldLower`, a **row-level access condition** that spells a field in another
   case than the table stores it (`Country` for `country`) is not satisfied on `Exists` or
   `Update`, which read the row into a map keyed by the stored names: the access layer compares
-  names exactly and the stored names are lower case, so it denies a row the policy allows. It
-  fails closed. Spell the names as stored.
+  names exactly and the stored names are lower case, so it denies a row the policy allows.
+  `TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames` (Exists) and
+  `TestEndToEndIntegration_UpdateUnderRowConditionsFailsClosedOnStoredNames` (Update) pin it.
+  It fails closed **when the conditional rule is the only allow for the row**. A conditional
+  rule whose condition does not hold falls through to an unconditional allow when the policy has
+  one, so a policy that narrows with a condition and then allows without one is decided by the
+  wider rule. Spell the names as stored, and give a row condition no wider allow behind it;
+  the fall-through case belongs to the access checks (PG-03b).
 
 ### The connection a read holds
 

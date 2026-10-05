@@ -240,6 +240,25 @@ var matrixKinds = [kindCount]struct {
 	kindNilCompared:  {"nil with >", dal.GreaterThen, ">", "$1", "<nil>"},
 }
 
+// knownFloatMarker says where the dialect's way of binding a float constant is asserted for
+// a real column, which dal-go/dalgo2sql is changing (task SQL-W4, item 5: the comparison
+// is then made in the column's type, and the marker the statement writes changes with it).
+// A failing statement of such a cell says so.
+const knownFloatMarker = "the marker of a float constant against the f4 (real) column in matrixKinds and in TestTypeMatrixIntegration_EveryIntegerAndFloatType"
+
+// floatAgainstReal is the hint a statement that is not the one expected gets when the cell
+// is a float constant against the real column: the defect of SQL-W4 item 5 may be fixed.
+func floatAgainstReal(column string, constant any) string {
+	if column != "f4" {
+		return ""
+	}
+	switch constant.(type) {
+	case float32, float64:
+		return "; if dalgo2sql now compares a float constant with a real column in the column's type (task SQL-W4, item 5, a known defect pinned in ValuesAtTheEdges), update " + knownFloatMarker
+	}
+	return ""
+}
+
 // matrixColumn is one column of tm, the constants that stand for its second row in the
 // Go types the matrix tries, and what the server answers to each.
 type matrixColumn struct {
@@ -283,6 +302,42 @@ func (c matrixColumn) constant(kind int) any {
 		return []byte{2}
 	}
 	return nil
+}
+
+// argument is the value the driver is handed for the constant of the given kind, where the
+// kind binds one: the decimal text of a number that is not a signed integer (a float of
+// either size as its own shortest decimal, a whole number held by a float64 as "2"), the
+// string, the bool, the time, the bytes as they are, and for nil with > the nil itself.
+func (c matrixColumn) argument(kind int) any {
+	switch kind {
+	case kindInt:
+		return int64(2)
+	case kindUint, kindWholeFloat64:
+		return "2"
+	case kindFloat32, kindFloat64:
+		return "1.5"
+	case kindString:
+		return c.str
+	case kindBadString:
+		return c.badStr
+	case kindBool:
+		return true
+	case kindTime:
+		return c.when
+	case kindBytes:
+		return []byte{2}
+	}
+	return nil
+}
+
+// sameArgument says whether the argument the driver was handed is the value expected; an
+// instant is the same instant in any zone.
+func sameArgument(got, want any) bool {
+	if wantTime, ok := want.(time.Time); ok {
+		gotTime, ok := got.(time.Time)
+		return ok && gotTime.Equal(wantTime)
+	}
+	return reflect.DeepEqual(got, want)
 }
 
 var (
@@ -400,13 +455,15 @@ func TestTypeMatrixIntegration_FilterByColumnTypeAndConstantType(t *testing.T) {
 					where = fmt.Sprintf(`"%s" %s`, col.name, rule.sql)
 				}
 				if want := fmt.Sprintf(`SELECT "id" FROM "tm" WHERE %s ORDER BY "id" ASC`, where); o.statement != want {
-					t.Errorf("%s: statement = %s, want %s", label, o.statement, want)
+					t.Errorf("%s: statement = %s, want %s%s", label, o.statement, want, floatAgainstReal(col.name, col.constant(kind)))
 				}
 				switch {
 				case rule.argType == "" && len(o.args) != 0:
 					t.Errorf("%s: arguments = %s, want none", label, argsText(o.args))
 				case rule.argType != "" && (len(o.args) != 1 || fmt.Sprintf("%T", o.args[0]) != rule.argType):
 					t.Errorf("%s: arguments = %s, want one of type %s", label, argsText(o.args), rule.argType)
+				case rule.argType != "" && !sameArgument(o.args[0], col.argument(kind)):
+					t.Errorf("%s: arguments = %s, want the value %s", label, argsText(o.args), valuesText([]any{col.argument(kind)}))
 				}
 				switch {
 				case o.code != "":
@@ -475,10 +532,43 @@ func TestTypeMatrixIntegration_EveryIntegerAndFloatType(t *testing.T) {
 		o := observe(t, f, filterQuery("tm", tc.column, dal.Equal, tc.constant))
 		check(t, label, o, rowsOf(2))
 		if want := fmt.Sprintf(`SELECT "id" FROM "tm" WHERE "%s" = %s ORDER BY "id" ASC`, tc.column, tc.marker); o.statement != want {
-			t.Errorf("%s: statement = %s, want %s", label, o.statement, want)
+			t.Errorf("%s: statement = %s, want %s%s", label, o.statement, want, floatAgainstReal(tc.column, tc.constant))
 		}
-		if len(o.args) != 1 || fmt.Sprintf("%T", o.args[0]) != tc.argType {
-			t.Errorf("%s: arguments = %s, want one of type %s", label, argsText(o.args), tc.argType)
+		// The value: a signed integer is handed over as an int64 holding 2, anything else as
+		// the text "2".
+		var wantArg any = "2"
+		if tc.argType == "int64" {
+			wantArg = int64(2)
+		}
+		if len(o.args) != 1 || fmt.Sprintf("%T", o.args[0]) != tc.argType || !sameArgument(o.args[0], wantArg) {
+			t.Errorf("%s: arguments = %s, want one of type %s holding %v", label, argsText(o.args), tc.argType, wantArg)
+		}
+	}
+}
+
+// A []byte constant is refused by every column of the matrix, because none is a bytea, and
+// is bound as bytea; against a bytea column it is the positive control of that rule: the
+// bytes are handed over as they are and the row that holds them is found.
+func TestTypeMatrixIntegration_ByteStringAgainstBytea(t *testing.T) {
+	f := openTypeFixture(t, "test_tm_bytes", "UTC",
+		`CREATE TABLE tm_bytes (id integer PRIMARY KEY, bin bytea)`,
+		`INSERT INTO tm_bytes VALUES (1, '\x01'), (2, '\x02')`,
+		`INSERT INTO tm_bytes (id) VALUES (3)`)
+	for _, tc := range []struct {
+		label    string
+		constant []byte
+		want     cellOutcome
+	}{
+		{"bin bytea = []byte{2}", []byte{2}, rowsOf(2)},
+		{"bin bytea = []byte{9}, a miss and not an error", []byte{9}, rowsOf()},
+	} {
+		o := observe(t, f, filterQuery("tm_bytes", "bin", dal.Equal, tc.constant))
+		check(t, tc.label, o, tc.want)
+		if want := `SELECT "id" FROM "tm_bytes" WHERE "bin" = $1::bytea ORDER BY "id" ASC`; o.statement != want {
+			t.Errorf("%s: statement = %s, want %s", tc.label, o.statement, want)
+		}
+		if len(o.args) != 1 || !sameArgument(o.args[0], tc.constant) {
+			t.Errorf("%s: arguments = %s, want the bytes %v as a []uint8", tc.label, argsText(o.args), tc.constant)
 		}
 	}
 }
@@ -729,22 +819,41 @@ func TestTypeMatrixIntegration_ValuesAtTheEdges(t *testing.T) {
 		// 0.1 equals it: the filter is a miss on a row that holds the value written. The
 		// string "0.1", which the server reads as a real, matches; so does the float64 the
 		// reader returned for the row, because it is the widened real exactly.
+		//
+		// The two misses are a KNOWN DEFECT of dal-go/dalgo2sql, not a rule (task SQL-W4,
+		// item 5: compare a float constant with a real column in the column's type; no
+		// release has it yet). Each FAILS when that is fixed and says what to assert
+		// instead: rows [1], and the marker the dialect then writes (see knownFloatMarker,
+		// which the f4 cells of the matrix and of EveryIntegerAndFloatType cite).
 		const widened = float64(float32(0.1))
 		for _, tc := range []struct {
 			label    string
 			column   string
 			constant any
 			want     cellOutcome
+			defect   bool // the answer is wrong, and the row is found once the defect is fixed
 		}{
-			{"f4 real float32 1.5, exact in binary", "f4", float32(1.5), rowsOf(2)},
-			{"f4 real float32 0.1", "f4", float32(0.1), rowsOf()},
-			{"f4 real float64 0.1", "f4", 0.1, rowsOf()},
-			{"f4 real string 0.1", "f4", "0.1", rowsOf(1)},
-			{"f4 real float64 as the reader returns it", "f4", widened, rowsOf(1)},
-			{"f8 double precision float32 0.1", "f8", float32(0.1), rowsOf(1)},
-			{"f8 double precision float64 0.1", "f8", 0.1, rowsOf(1)},
+			{"f4 real float32 1.5, exact in binary", "f4", float32(1.5), rowsOf(2), false},
+			{"f4 real float32 0.1", "f4", float32(0.1), rowsOf(), true},
+			{"f4 real float64 0.1", "f4", 0.1, rowsOf(), true},
+			{"f4 real string 0.1", "f4", "0.1", rowsOf(1), false},
+			{"f4 real float64 as the reader returns it", "f4", widened, rowsOf(1), false},
+			{"f8 double precision float32 0.1", "f8", float32(0.1), rowsOf(1), false},
+			{"f8 double precision float64 0.1", "f8", 0.1, rowsOf(1), false},
 		} {
-			check(t, tc.label, filter(tc.column, dal.Equal, tc.constant), tc.want)
+			o := filter(tc.column, dal.Equal, tc.constant)
+			if !tc.defect {
+				check(t, tc.label, o, tc.want)
+				continue
+			}
+			t.Logf("KNOWN DEFECT of dal-go/dalgo2sql (task SQL-W4, item 5; not a rule): %s", tc.label)
+			t.Logf("%s (a miss: the row holds 0.1)\n    statement: %s\n    arguments: %s\n    result:    %s", tc.label, o.statement, argsText(o.args), o.result())
+			if !tc.want.matches(o) && !rowsOf(1).matches(o) {
+				t.Errorf("%s: got %s, want %s (the known defect)", tc.label, o.result(), tc.want)
+			}
+			if rowsOf(1).matches(o) {
+				t.Errorf("%s: the row is now found, so dalgo2sql compares a float constant with a real column in the column's type (SQL-W4 item 5 is fixed): assert rows [1] here, with the statement %s, update %s in the matrix and delete this pin and the README's known limit", tc.label, o.statement, knownFloatMarker)
+			}
 		}
 		o := observe(t, f, dal.From(dal.NewRootCollectionRef("tm_edge", "")).NewQuery().Where(dal.WhereField("id", dal.Equal, 1)).
 			SelectColumns(dal.Column{Expression: field("f4")}, dal.Column{Expression: field("f8")}))
@@ -806,7 +915,9 @@ func TestTypeMatrixIntegration_ArithmeticOnDoublePrecision(t *testing.T) {
 }
 
 // A NUMERIC with a fraction cannot be read into an integer field: the read is an error
-// that names the value, not a truncated number. A whole NUMERIC can.
+// that names the column and says the value has a fractional part, not a truncated number.
+// A whole NUMERIC can. (With dalgo2sql v0.26.0 the error also named the
+// value; since v0.26.3 it does not.)
 func TestTypeMatrixIntegration_NumericWithAFractionIntoAnIntegerField(t *testing.T) {
 	f := openTypeFixture(t, "test_tm_numeric_int", "UTC", edgeDDL...)
 	type numRow struct {
@@ -837,8 +948,8 @@ func TestTypeMatrixIntegration_NumericWithAFractionIntoAnIntegerField(t *testing
 	}
 	got, err := read(1)
 	t.Logf("numeric 1.5 into an int64 field: %+v, %v", got, err)
-	if err == nil || errors.Is(err, dal.ErrNoMoreRecords) || !strings.Contains(err.Error(), `column "num": value 1.5 is not an int64`) {
-		t.Errorf("numeric 1.5 into an int64 field = %+v, %v; want an error that names the column and the value", got, err)
+	if err == nil || errors.Is(err, dal.ErrNoMoreRecords) || !strings.Contains(err.Error(), `column "num": the value is not an int64: it has a fractional part`) {
+		t.Errorf("numeric 1.5 into an int64 field = %+v, %v; want an error that names the column and says the value has a fractional part", got, err)
 	}
 	got, err = read(2)
 	t.Logf("numeric 2 into an int64 field: %+v, %v", got, err)

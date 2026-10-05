@@ -127,10 +127,14 @@ func TestStructuredQueryIntegration_RecordKeysFromTheCatalog(t *testing.T) {
 		`CREATE MATERIALIZED VIEW ck_matview AS SELECT id, payload FROM ck_single`,
 		`CREATE TABLE ck_decl (id integer PRIMARY KEY, code text, payload text)`,
 		`INSERT INTO ck_decl VALUES (1, 'k-a', 'a'), (2, 'k-b', 'b'), (3, 'k-c', 'c')`,
+		`CREATE TABLE ck_mixed (id integer PRIMARY KEY, code text, payload text)`,
+		`INSERT INTO ck_mixed VALUES (1, 'm-a', 'a'), (2, 'm-b', 'b'), (3, 'm-c', 'c')`,
 	}
 	options := dalgo2sql.DbOptions{Recordsets: map[string]*dalgo2sql.Recordset{
 		// Registered under a lower case name, as the fold-lower mount stores it.
 		"ck_decl": dalgo2sql.NewRecordset("ck_decl", dalgo2sql.Table, []dal.FieldRef{dal.Field("code")}),
+		// Registered under a name with capitals: the other direction of the lookup.
+		"Ck_Mixed": dalgo2sql.NewRecordset("Ck_Mixed", dalgo2sql.Table, []dal.FieldRef{dal.Field("code")}),
 	}}
 	f := openQueryFixtureWithOptions(t, options, "test_record_keys", IdentifierFoldLower, ddl)
 
@@ -270,6 +274,40 @@ func TestStructuredQueryIntegration_RecordKeysFromTheCatalog(t *testing.T) {
 			}
 			assertKeys(t, got, spelling, "k-a", "k-b", "k-c")
 			assertPrimaryKey(t, "id") // the catalog says id; the recordset's code is the key
+		})
+	}
+	// The other direction: a recordset registered under a name with capitals (Ck_Mixed) is
+	// found by the query that spells it exactly so, and NOT by one that spells it in lower
+	// case or in upper case: dalgo2sql looks the name up as spelled and then folded to
+	// lower case, and never folds the registered names. The recordset is then ignored,
+	// without an error, and the records are keyed by the catalog's id and not by the code
+	// the recordset declares.
+	//
+	// KNOWN LIMIT of dal-go/dalgo2sql (reported for it; not a rule): the two cases that
+	// are not found FAIL when dalgo2sql folds the registered names too, and say what to
+	// assert instead. Until then a caller in fold-lower mode registers its recordsets under
+	// lower case names (README, "How records are keyed").
+	t.Run("a recordset registered as Ck_Mixed is found when the query spells the source Ck_Mixed", func(t *testing.T) {
+		statement, got := keysOf(t, f, ordered("Ck_Mixed").SelectColumns(payload))
+		t.Logf("statement: %s", statement)
+		if want := `SELECT "payload", "code" AS "__dalgo_record_id" FROM "ck_mixed" ORDER BY "payload" ASC NULLS FIRST`; statement != want {
+			t.Errorf("statement = %s, want %s", statement, want)
+		}
+		assertKeys(t, got, "Ck_Mixed", "m-a", "m-b", "m-c")
+	})
+	for _, spelling := range []string{"ck_mixed", "CK_MIXED"} {
+		t.Run("KNOWN LIMIT: a recordset registered as Ck_Mixed is not found when the query spells the source "+spelling, func(t *testing.T) {
+			statement, got := keysOf(t, f, ordered(spelling).SelectColumns(payload))
+			t.Logf("statement: %s", statement)
+			t.Logf("KNOWN LIMIT of dal-go/dalgo2sql (not a rule): the registered name is not folded, so the recordset is ignored without an error and the records are keyed by the catalog's id, not by the declared code")
+			const fixed = "dalgo2sql now finds the recordset registered under a name with capitals: assert the declared key (statement with \"code\" AS \"__dalgo_record_id\", IDs m-a, m-b, m-c), and delete this pin and the README's known limit"
+			if strings.Contains(statement, `"code"`) {
+				t.Errorf("statement = %s: %s", statement, fixed)
+			}
+			if want := `SELECT "payload", "id" AS "__dalgo_record_id" FROM "ck_mixed" ORDER BY "payload" ASC NULLS FIRST`; statement != want {
+				t.Errorf("statement = %s, want %s", statement, want)
+			}
+			assertKeys(t, got, spelling, int64(1), int64(2), int64(3))
 		})
 	}
 }
