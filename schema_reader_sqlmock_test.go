@@ -16,35 +16,42 @@ import (
 
 // The stage queries of one DescribeCollection call, in the order they run.
 const (
-	qProbe   = `information_schema\.tables`
+	qProbe   = `SELECT c\.relkind::text`
 	qPK      = `tc\.constraint_type = 'PRIMARY KEY'`
 	qColumns = `information_schema\.columns`
 	qIndexes = `pg_indexes`
 	qFKs     = `c\.contype = 'f'`
 )
 
-var columnHeader = []string{"column_name", "data_type", "udt_name", "character_maximum_length", "numeric_precision", "numeric_scale", "is_nullable"}
+var columnHeader = []string{"column_name", "data_type", "udt_name", "character_maximum_length", "numeric_precision", "numeric_scale", "is_nullable",
+	"column_default", "is_identity", "is_generated", "generation_expression"}
 
 func nilInt() driver.Value { return nil }
 
 // albumColumns is a table with the types a real catalog contains and the old reader refused.
 func albumColumns() *sqlmock.Rows {
 	return sqlmock.NewRows(columnHeader).
-		AddRow("AlbumId", "integer", "int4", nilInt(), int64(32), int64(0), "NO").
-		AddRow("Title", "character varying", "varchar", int64(160), nilInt(), nilInt(), "NO").
-		AddRow("Rating", "numeric", "numeric", nilInt(), int64(10), int64(2), "YES").
-		AddRow("ExternalId", "uuid", "uuid", nilInt(), nilInt(), nilInt(), "YES").
-		AddRow("Meta", "jsonb", "jsonb", nilInt(), nilInt(), nilInt(), "YES").
-		AddRow("Tags", "ARRAY", "_text", nilInt(), nilInt(), nilInt(), "YES").
-		AddRow("Mood", "USER-DEFINED", "mood", nilInt(), nilInt(), nilInt(), "YES").
-		AddRow("Length", "interval", "interval", nilInt(), nilInt(), nilInt(), "YES").
-		AddRow("Addr", "inet", "inet", nilInt(), nilInt(), nilInt(), "YES").
-		AddRow("Price", "money", "money", nilInt(), nilInt(), nilInt(), "YES")
+		AddRow("AlbumId", "integer", "int4", nilInt(), int64(32), int64(0), "NO", nil, "NO", "NEVER", nil).
+		AddRow("Title", "character varying", "varchar", int64(160), nilInt(), nilInt(), "NO", nil, "NO", "NEVER", nil).
+		AddRow("Rating", "numeric", "numeric", nilInt(), int64(10), int64(2), "YES", nil, "NO", "NEVER", nil).
+		AddRow("ExternalId", "uuid", "uuid", nilInt(), nilInt(), nilInt(), "YES", nil, "NO", "NEVER", nil).
+		AddRow("Meta", "jsonb", "jsonb", nilInt(), nilInt(), nilInt(), "YES", nil, "NO", "NEVER", nil).
+		AddRow("Tags", "ARRAY", "_text", nilInt(), nilInt(), nilInt(), "YES", nil, "NO", "NEVER", nil).
+		AddRow("Mood", "USER-DEFINED", "mood", nilInt(), nilInt(), nilInt(), "YES", nil, "NO", "NEVER", nil).
+		AddRow("Length", "interval", "interval", nilInt(), nilInt(), nilInt(), "YES", nil, "NO", "NEVER", nil).
+		AddRow("Addr", "inet", "inet", nilInt(), nilInt(), nilInt(), "YES", nil, "NO", "NEVER", nil).
+		AddRow("Price", "money", "money", nilInt(), nilInt(), nilInt(), "YES", nil, "NO", "NEVER", nil)
 }
 
+// listRelationsQuery matches the statement that lists the collections of one schema.
+const listRelationsQuery = `c\.relkind IN \('v', 'm'\) AS is_view`
+
+func relationRows() *sqlmock.Rows { return sqlmock.NewRows([]string{"relname", "is_view"}) }
+
+// expectProbeFound answers the probe with a plain table (relkind r).
 func expectProbeFound(mock sqlmock.Sqlmock, schema, name string) {
 	mock.ExpectQuery(qProbe).WithArgs(schema, name).
-		WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow(name))
+		WillReturnRows(sqlmock.NewRows([]string{"relkind"}).AddRow("r"))
 }
 
 func expectPK(mock sqlmock.Sqlmock, schema, name string, cols ...string) {
@@ -57,8 +64,8 @@ func expectPK(mock sqlmock.Sqlmock, schema, name string, cols ...string) {
 
 func TestListCollections_QueriesTablesAndViewsInSchema(t *testing.T) {
 	d, mock := newSchemaMockDatabase(t, WithSchema("sales"), WithIdentifierMode(IdentifierExact))
-	mock.ExpectQuery(`table_type IN \('BASE TABLE', 'VIEW'\)`).WithArgs("sales").
-		WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow("Album").AddRow("album_view"))
+	mock.ExpectQuery(listRelationsQuery).WithArgs("sales").
+		WillReturnRows(relationRows().AddRow("Album", false).AddRow("album_view", true))
 
 	got, err := d.ListCollections(context.Background(), nil)
 	if err != nil {
@@ -75,8 +82,7 @@ func TestListCollections_QueriesTablesAndViewsInSchema(t *testing.T) {
 
 func TestListCollections_DefaultsToPublic(t *testing.T) {
 	d, mock := newSchemaMockDatabase(t)
-	mock.ExpectQuery(`information_schema\.tables`).WithArgs("public").
-		WillReturnRows(sqlmock.NewRows([]string{"table_name"}))
+	mock.ExpectQuery(listRelationsQuery).WithArgs("public").WillReturnRows(relationRows())
 	got, err := d.ListCollections(context.Background(), nil)
 	if err != nil || len(got) != 0 {
 		t.Fatalf("got %v, %v; want empty and nil", got, err)
@@ -86,23 +92,23 @@ func TestListCollections_DefaultsToPublic(t *testing.T) {
 func TestListCollections_Errors(t *testing.T) {
 	t.Run("query", func(t *testing.T) {
 		d, mock := newSchemaMockDatabase(t)
-		mock.ExpectQuery(`information_schema\.tables`).WillReturnError(errors.New("boom"))
+		mock.ExpectQuery(listRelationsQuery).WillReturnError(errors.New("boom"))
 		if _, err := d.ListCollections(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "boom") {
 			t.Fatalf("err = %v, want wrapped boom", err)
 		}
 	})
 	t.Run("scan", func(t *testing.T) {
 		d, mock := newSchemaMockDatabase(t)
-		mock.ExpectQuery(`information_schema\.tables`).
-			WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow(nil))
+		mock.ExpectQuery(listRelationsQuery).
+			WillReturnRows(relationRows().AddRow(nil, false))
 		if _, err := d.ListCollections(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "scan") {
 			t.Fatalf("err = %v, want scan error", err)
 		}
 	})
 	t.Run("rows", func(t *testing.T) {
 		d, mock := newSchemaMockDatabase(t)
-		mock.ExpectQuery(`information_schema\.tables`).
-			WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow("a").RowError(0, errors.New("row broke")))
+		mock.ExpectQuery(listRelationsQuery).
+			WillReturnRows(relationRows().AddRow("a", false).RowError(0, errors.New("row broke")))
 		if _, err := d.ListCollections(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "row broke") {
 			t.Fatalf("err = %v, want row error", err)
 		}
@@ -222,8 +228,8 @@ func TestDescribeCollection_ViewHasNoKey(t *testing.T) {
 	expectProbeFound(mock, "public", "v")
 	expectPK(mock, "public", "v")
 	mock.ExpectQuery(qColumns).WillReturnRows(sqlmock.NewRows(columnHeader).
-		AddRow("n", "bigint", "int8", nilInt(), nilInt(), nilInt(), "YES").
-		AddRow("code", "VARCHAR(40)", "varchar", nilInt(), nilInt(), nilInt(), "YES"))
+		AddRow("n", "bigint", "int8", nilInt(), nilInt(), nilInt(), "YES", nil, "NO", "NEVER", nil).
+		AddRow("code", "VARCHAR(40)", "varchar", nilInt(), nilInt(), nilInt(), "YES", nil, "NO", "NEVER", nil))
 	mock.ExpectQuery(qIndexes).WillReturnRows(sqlmock.NewRows([]string{"indexname", "indexdef"}))
 	mock.ExpectQuery(qFKs).WillReturnRows(sqlmock.NewRows([]string{"a", "b", "c", "d", "e", "f", "g", "h"}))
 
@@ -257,7 +263,7 @@ func TestDescribeCollection_MockedMissingTable(t *testing.T) {
 
 func TestDescribeCollection_FailureAtEveryStage(t *testing.T) {
 	boom := errors.New("boom")
-	badColumn := sqlmock.NewRows(columnHeader).AddRow(nil, "text", "text", nilInt(), nilInt(), nilInt(), "NO")
+	badColumn := sqlmock.NewRows(columnHeader).AddRow(nil, "text", "text", nilInt(), nilInt(), nilInt(), "NO", nil, "NO", "NEVER", nil)
 	type stage struct {
 		name    string
 		arrange func(mock sqlmock.Sqlmock)
@@ -291,7 +297,7 @@ func TestDescribeCollection_FailureAtEveryStage(t *testing.T) {
 			expectProbeFound(m, "public", "t")
 			expectPK(m, "public", "t", "id")
 			m.ExpectQuery(qColumns).WillReturnRows(sqlmock.NewRows(columnHeader).
-				AddRow("id", "text", "text", nilInt(), nilInt(), nilInt(), "NO").RowError(0, boom))
+				AddRow("id", "text", "text", nilInt(), nilInt(), nilInt(), "NO", nil, "NO", "NEVER", nil).RowError(0, boom))
 		}, "rows"},
 		{"indexes", func(m sqlmock.Sqlmock) {
 			expectProbeFound(m, "public", "t")

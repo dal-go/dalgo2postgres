@@ -5,7 +5,7 @@ PostgreSQL-specific DALgo driver. Wraps `github.com/dal-go/dalgo2sql` to provide
 - structured queries — compiled by dalgo2sql's typed PostgreSQL compiler with every value
   bound and every name quoted, with filtering, ordering, grouping, aggregation and joins run
   on the server (see "Structured queries")
-- `dbschema.SchemaReader` — schema introspection via `information_schema` and `pg_indexes`
+- `dbschema.SchemaReader` — schema introspection via `information_schema`, `pg_catalog` and `pg_indexes`: every non-system schema, views told from tables, column defaults
 - `ddl.Applier` — PostgreSQL-flavored `CREATE TABLE` / `CREATE INDEX` / `DROP TABLE` / `ALTER TABLE`
 - `dal.ConcurrencyAware` — advertises `SupportsConcurrentConnections() = true`
   (PostgreSQL supports concurrent connections from multiple goroutines and processes,
@@ -321,8 +321,9 @@ first (`pets_owners`), and the primary key is looked up in the recordset of that
 ## Schema reader options
 
 The schema reader (`ListCollections`, `DescribeCollection`, `ListIndexes`,
-`ListConstraints`, `ListReferrers`) lists tables and views of one PostgreSQL
-schema. Both constructors take optional settings:
+`ListConstraints`, `ListReferrers`) reads one PostgreSQL schema, the configured one;
+see "What the schema reader lists and describes" below for the others. Both
+constructors take optional settings:
 
 ```go
 db, err := dalgo2postgres.NewDatabase(dsn,
@@ -357,8 +358,7 @@ schema.
 equality is not exact (type `citext`, or a non-deterministic collation such as a
 case-insensitive ICU collation), in column order. It finds the table the way the
 schema reader does (reference schema, else `WithSchema`; name per
-`IdentifierMode`), except that it also answers for materialized views and foreign
-tables, which `DescribeCollection` reports as not found. It returns a not-found
+`IdentifierMode`). It returns a not-found
 error when the table does not exist, and an empty list when the table exists and
 none of its columns is `citext` or has a non-deterministic collation. A domain
 over `citext` and an array of `citext` are not reported (treat such columns as
@@ -385,10 +385,53 @@ its schema).
 
 A column whose type has no `dbschema.Type` (uuid, json, jsonb, arrays, enums,
 interval, inet, money, ...) is described as a `String` field; it never fails the
-table. Base tables and views are listed; `dbschema` has no collection kind, so a
-view cannot be told apart from a table in the result. Materialized views and
-foreign tables are not listed (PostgreSQL does not expose materialized views in
-`information_schema.tables`, and foreign tables are filtered out).
+table.
+
+### What the schema reader lists and describes
+
+**Schemas.** `ListSchemas(ctx)` returns the schemas a role can use (it has `USAGE` on
+them), in name order, without the system schemas (`pg_catalog`, `information_schema`,
+`pg_toast`, `pg_temp_N`, `pg_toast_temp_N`). A schema with no tables is listed.
+`dbschema` has no optional interface for listing schemas, so `ListSchemas`,
+`ListSchemaCollections` and `ListSchemaViews` belong to this adapter alone.
+
+**Collections.** `ListCollections(ctx, nil)` is unchanged in shape: the configured
+schema, in name order, each reference naming no schema. `ListSchemaCollections(ctx, schema)`
+lists any schema (an empty one means the configured one), each reference naming its
+schema, so handing it to `DescribeCollection` or `ListIndexes` reads that schema.
+A schema that does not exist lists nothing. Listed: tables, partitioned tables, views,
+materialized views and foreign tables, to the roles that own them or hold a privilege
+on them or on a column (the test `information_schema.tables` applies). A partition is
+listed, as `information_schema.tables` lists it, as a table of its own. Sequences,
+indexes and composite types are not collections.
+
+**Views.** `ListViews(ctx)` (the optional interface of the DataTug schema provider) and
+`ListSchemaViews(ctx, schema)` list the views and the materialized views, by the same
+references `ListCollections` and `ListSchemaCollections` give. A foreign table, a
+partitioned table and a partition are tables.
+
+**Defaults.** `DescribeCollection` sets `FieldDef.Default` to a `dbschema.DefaultLiteral`
+whose `Value` is the *text* of the expression as PostgreSQL prints it, a string:
+`'new'::text`, `now()`, `1`, `nextval('sales.hits_seq'::regclass)`. `dbschema.DefaultExpr`
+is sealed and has no case for an expression, so a literal of the text is the form it
+allows; read `Value` as SQL, never as the value of the default. A generated column's
+`Default` is the text `GENERATED ALWAYS AS (<expression>)`, which no plain default begins
+with. An identity column has `AutoIncrement` set and no `Default`. A column that only
+defaults to `nextval(...)` (`serial`) is a plain default to the catalog and is not marked
+`AutoIncrement`.
+
+**What it still does not do.**
+- It does not list the collections of every schema in one call: `ListCollections` reads
+  the configured schema, and a caller that wants all of them asks `ListSchemas` and then
+  `ListSchemaCollections` for each.
+- `ListConstraints`, `ListReferrers` and the foreign-key namespace keep their rule: one
+  schema, the one the reference names, else the configured one.
+- A materialized view is read from `pg_attribute`, because `information_schema` omits it;
+  a column of a domain type in one reads as a `String`, as an enum does, and has no
+  default, identity or generation (it cannot have any). Whether a generated column is
+  stored or virtual (PostgreSQL 18) is not reported.
+- `ListCollections` lists a foreign table and a materialized view now; before, it listed
+  neither.
 
 ## Connection errors
 
