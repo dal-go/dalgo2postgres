@@ -229,14 +229,14 @@ func (b guardedBackend) SupportsConcurrentConnections() bool {
 // is the caller's own and is returned as it is; what the transaction adds around it passes the guard
 // (see [leaveTransaction]).
 func (b guardedBackend) RunReadonlyTransaction(ctx context.Context, f dal.ROTxWorker, opts ...dal.TransactionOption) error {
-	return leaveTransaction(b.inner.RunReadonlyTransaction(ctx, func(ctx context.Context, tx dal.ReadTransaction) error {
+	return leaveTransaction(ctx, b.inner.RunReadonlyTransaction(ctx, func(ctx context.Context, tx dal.ReadTransaction) error {
 		return markOwn(f(ctx, newGuardedReadTransaction(tx)))
 	}, opts...))
 }
 
 // RunReadwriteTransaction is RunReadonlyTransaction for a read-write transaction.
 func (b guardedBackend) RunReadwriteTransaction(ctx context.Context, f dal.RWTxWorker, opts ...dal.TransactionOption) error {
-	return leaveTransaction(b.inner.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+	return leaveTransaction(ctx, b.inner.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
 		return markOwn(f(ctx, newGuardedReadwriteTransaction(tx)))
 	}, opts...))
 }

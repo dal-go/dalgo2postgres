@@ -1,7 +1,9 @@
 package dalgo2postgres
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -544,5 +546,72 @@ func TestGuardedCallsThatNeverReachAConnectionKeepTheirErrors(t *testing.T) {
 		if !errors.Is(err, dal.ErrNotImplementedYet) {
 			t.Errorf("%s on a Database with no backend = %v, want dal.ErrNotImplementedYet", name, err)
 		}
+	}
+}
+
+// cutShortValue is a column value whose own decoder reads four bytes of the column with
+// encoding/binary, as a type that scans a binary value does.
+type cutShortValue struct{ n uint32 }
+
+func (v *cutShortValue) Scan(src any) error {
+	return binary.Read(bytes.NewReader(src.([]byte)), binary.BigEndian, &v.n)
+}
+
+// The end of a stream is read as a failure of the connection wherever it is in the chain: the
+// guard reads the type of an error and cannot tell whose stream ended. A value that is cut short for
+// its own decoder (a column of two bytes that a type reads four bytes of) is read as one too, and is a
+// connection error of the kind FailureOther, which names neither the column nor the decoder. The
+// direction is the safe one: more is classified, and nothing of the error is shown.
+func TestLeaveAdapter_ADecodersEndOfStreamIsReadAsALostConnection(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer func() { _ = sqlDB.Close() }()
+	mock.ExpectQuery("SELECT").WillReturnRows(sqlmock.NewRows([]string{"payload"}).AddRow([]byte{1, 2}))
+	rows, err := sqlDB.Query("SELECT payload")
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		t.Fatalf("Next: %v", rows.Err())
+	}
+	scanErr := rows.Scan(&cutShortValue{})
+	if !errors.Is(scanErr, io.ErrUnexpectedEOF) {
+		t.Fatalf("the scan error is %q, want one that holds io.ErrUnexpectedEOF", scanErr)
+	}
+	failure, ok := leaveAdapter(scanErr).(*ConnectionError)
+	if !ok {
+		t.Fatalf("leaveAdapter(%q) is not a *ConnectionError", scanErr)
+	}
+	if failure.Kind != FailureOther || failure.Error() != "dalgo2postgres: the connection failed" {
+		t.Errorf("got kind %d and text %q, want FailureOther and the fixed sentence", failure.Kind, failure)
+	}
+}
+
+// A statement can get a code of a connection class as its own answer: 08P01 for a message that is
+// malformed, 3D000 for a function that is given the name of a database that is not there. It is
+// classified as the same code is at a connection, with its code and without the server's message,
+// and the sentence of 3D000 says that the server refused the connection: the code is what to branch
+// on, as the README says.
+func TestAStatementsOwnAnswerOfAConnectionClassIsClassified(t *testing.T) {
+	for code, sentence := range map[string]string{
+		"08P01": "dalgo2postgres: the server rejected the connection (SQLSTATE 08P01)",
+		"3D000": "dalgo2postgres: the server refused the connection: the database does not exist (SQLSTATE 3D000)",
+	} {
+		t.Run(code, func(t *testing.T) {
+			db, mock := mockedDatabase(t)
+			mock.ExpectQuery("").WillReturnError(serverError(code))
+			_, err := db.Exists(context.Background(), dalrecord.NewKeyWithID("orders", "1"))
+			failure, ok := err.(*ConnectionError)
+			if !ok {
+				t.Fatalf("err is %T %q, want a *ConnectionError", err, err)
+			}
+			if failure.Kind != FailureServer || failure.SQLState != code || failure.Error() != sentence {
+				t.Errorf("got kind %d, SQLSTATE %q and text %q; want FailureServer, %q and %q", failure.Kind, failure.SQLState, failure, code, sentence)
+			}
+			assertHoldsNoConfiguration(t, code, err)
+		})
 	}
 }

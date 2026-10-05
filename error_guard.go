@@ -1,6 +1,7 @@
 package dalgo2postgres
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -14,9 +15,12 @@ import (
 // Every error of the adapter that leaves this package passes [leaveAdapter]. A connection that
 // fails, at any call, is reported as a [*ConnectionError]: a fixed sentence chosen by the kind
 // of failure, the SQLSTATE of a server answer, and nothing of the cause. The rule is kept in
-// one place on purpose: the exported methods of [Database] call it, and so do the methods of
-// the backend, the transactions and the readers under DALgo's framework layer (see
-// error_guard_values.go), which are the values handed out whose methods can return an error.
+// one place on purpose: the methods of [Database] that read, write or describe the schema call it,
+// the two transaction methods reach it through the backend under the DB field, and so do the
+// methods of that backend, of the transactions and of the readers under DALgo's framework layer
+// (see error_guard_values.go), which are the values handed out whose methods can return an error.
+// The DB field is assigned by the constructors: a [Database] whose DB field was assigned by other
+// code has, in its two transaction methods, the guard of the DB that code assigned.
 // The one error that does not pass it is the one a worker returns from a transaction: it is the
 // caller's own, not the adapter's, and comes back as it is (see [leaveTransaction]).
 // TestErrorsHoldNoConfiguration_TableNamesEveryErrorReturningMethod fails when a method that
@@ -28,6 +32,9 @@ import (
 // a server also reports 08P01 for a statement's own message (a wrong number of bound parameters,
 // under an execution mode that sends them as written): at a connection a server's or a pooler's
 // message for it can name a setting the startup sent, so the code is never copied with its message.
+// A statement can get a code of the list below as its own answer as well (3D000, for a function or a
+// command that is given the name of a database that is not there), and it is then classified in the
+// same way, with its code and without its message: the code is what to branch on.
 // The codes below were checked against the PostgreSQL error-codes appendix:
 //
 //   - 3D000 invalid_catalog_name: the database does not exist. The message names it.
@@ -67,6 +74,10 @@ func isConnectionState(code string) bool {
 //     connection that was established fails when it is lost. These hold no user, password or
 //     database, but the error of a socket names the addresses of both ends.
 //
+// The end of a stream is read as one wherever it is in the chain, whoever's stream it was: a value
+// that is cut short for its own decoder (encoding/binary reads four bytes of a column that holds two)
+// is read as a lost connection too. The guard reads the type of an error and cannot tell whose stream
+// ended; the direction is the safe one, more is classified and nothing of the error is shown.
 // An error that merely answers net.Error is not one: context.DeadlineExceeded does, and a statement
 // that ends on its context is the context's error, which the driver reports as such.
 func isConnectionFailure(err error) bool {
@@ -168,17 +179,29 @@ func markOwn(err error) error {
 // returned as it is. When the worker failed and the transaction could not then be rolled back, the
 // error is the one [connectionFailureOf] reads from both (a failure of the connection in either),
 // and otherwise DALgo's rollback error naming the two errors as they were.
-func leaveTransaction(err error) error {
+//
+// The one exception is a transaction whose context ended: when the worker failed and ctx has
+// ended, the worker's error is returned as it is, whatever the rollback said. A statement that ends
+// on its context makes the driver close its connection, and database/sql rolls the transaction
+// back itself when its context ends, from a goroutine of its own, so the rollback the adapter asks
+// for finds either a finished transaction or a closed connection, according to which of the two
+// came first. Neither is a failure of the connection, and the result is the worker's error,
+// in which the context's error is found, in both orders.
+func leaveTransaction(ctx context.Context, err error) error {
 	switch e := err.(type) {
 	case nil:
 		return nil
 	case workerError:
 		return e.err
 	case endedTransaction:
+		own, isOwn := e.OriginalError().(workerError)
+		if isOwn && ctx.Err() != nil {
+			return own.err
+		}
 		if failure := connectionFailureOf(err); failure != nil {
 			return failure
 		}
-		if own, isOwn := e.OriginalError().(workerError); isOwn {
+		if isOwn {
 			return dal.NewRollbackError(e.RollbackError(), own.err)
 		}
 		return err

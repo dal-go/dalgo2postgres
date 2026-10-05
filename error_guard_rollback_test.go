@@ -18,19 +18,24 @@ import (
 // transactionKind runs a worker that reads inside a transaction of one kind, and returns what the
 // Database's method returned.
 type transactionKind struct {
-	name string
-	run  func(db *Database, worker func(ctx context.Context, tx dal.ReadSession) error) error
+	name  string
+	runIn func(ctx context.Context, db *Database, worker func(ctx context.Context, tx dal.ReadSession) error) error
+}
+
+// run is runIn under a context that never ends.
+func (k transactionKind) run(db *Database, worker func(ctx context.Context, tx dal.ReadSession) error) error {
+	return k.runIn(context.Background(), db, worker)
 }
 
 func transactionKinds() []transactionKind {
 	return []transactionKind{
-		{"read transaction", func(db *Database, worker func(context.Context, dal.ReadSession) error) error {
-			return db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+		{"read transaction", func(ctx context.Context, db *Database, worker func(context.Context, dal.ReadSession) error) error {
+			return db.RunReadonlyTransaction(ctx, func(ctx context.Context, tx dal.ReadTransaction) error {
 				return worker(ctx, tx)
 			})
 		}},
-		{"read-write transaction", func(db *Database, worker func(context.Context, dal.ReadSession) error) error {
-			return db.RunReadwriteTransaction(context.Background(), func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+		{"read-write transaction", func(ctx context.Context, db *Database, worker func(context.Context, dal.ReadSession) error) error {
+			return db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
 				return worker(ctx, tx)
 			})
 		}},
@@ -234,28 +239,28 @@ func TestConnectionFailureOf_ATransactionThatCouldNotBeRolledBack(t *testing.T) 
 // error (with the worker's error unmarked) when neither error it names is a failure of the connection.
 func TestLeaveTransaction(t *testing.T) {
 	plain, rollback := errors.New("a plain error"), errors.New("the rollback failed")
-	if got := leaveTransaction(nil); got != nil {
+	if got := leaveTransaction(context.Background(), nil); got != nil {
 		t.Errorf("leaveTransaction(nil) = %v", got)
 	}
-	if got := leaveTransaction(markOwn(plain)); got != plain { //nolint:errorlint // the same value
+	if got := leaveTransaction(context.Background(), markOwn(plain)); got != plain { //nolint:errorlint // the same value
 		t.Errorf("the worker's error = %v, want the same error", got)
 	}
-	if got := leaveTransaction(plain); got != plain { //nolint:errorlint // the same value
+	if got := leaveTransaction(context.Background(), plain); got != plain { //nolint:errorlint // the same value
 		t.Errorf("an error of the transaction that is no failure = %v, want the same error", got)
 	}
-	if _, ok := leaveTransaction(fmt.Errorf("failed to commit transaction: %w", droppedFailures()[0].err())).(*ConnectionError); !ok {
+	if _, ok := leaveTransaction(context.Background(), fmt.Errorf("failed to commit transaction: %w", droppedFailures()[0].err())).(*ConnectionError); !ok {
 		t.Error("a commit that failed on the connection is not a *ConnectionError")
 	}
 	ownRollback := dal.NewRollbackError(rollback, markOwn(plain))
 	var kept rollbackShape
-	if !errors.As(leaveTransaction(ownRollback), &kept) || kept.OriginalError() != plain || kept.RollbackError() != rollback { //nolint:errorlint // the same values
-		t.Errorf("leaveTransaction(%v) = %v, want a rollback error naming the worker's error as it returned it", ownRollback, leaveTransaction(ownRollback))
+	if !errors.As(leaveTransaction(context.Background(), ownRollback), &kept) || kept.OriginalError() != plain || kept.RollbackError() != rollback { //nolint:errorlint // the same values
+		t.Errorf("leaveTransaction(%v) = %v, want a rollback error naming the worker's error as it returned it", ownRollback, leaveTransaction(context.Background(), ownRollback))
 	}
 	foreign := dal.NewRollbackError(rollback, plain)
-	if got := leaveTransaction(foreign); got != foreign { //nolint:errorlint // the same value
+	if got := leaveTransaction(context.Background(), foreign); got != foreign { //nolint:errorlint // the same value
 		t.Errorf("a rollback error of no worker of this backend = %v, want the same error", got)
 	}
-	if got := leaveTransaction(dal.NewRollbackError(connectFailure(t, refuseEveryDial), markOwn(plain))); got == nil {
+	if got := leaveTransaction(context.Background(), dal.NewRollbackError(connectFailure(t, refuseEveryDial), markOwn(plain))); got == nil {
 		t.Error("a rollback that failed on the connection is no error")
 	} else if _, ok := got.(*ConnectionError); !ok {
 		t.Errorf("a rollback that failed on the connection = %T, want a *ConnectionError", got)

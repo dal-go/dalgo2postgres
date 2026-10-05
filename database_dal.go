@@ -14,12 +14,14 @@ var _ dal.DB = (*Database)(nil)
 
 // --- dal.DB delegation ---
 //
-// Every error of these methods passes leaveAdapter (see error_guard.go), and so does every error
-// of a value they hand out: the transaction a worker is given and the readers a query returns. The
-// embedded DB field is DALgo's layer over the guarded backend (see guardDatabase), so its errors
-// pass the same function: the transactions and their errors in the backend, and the reads and
-// writes of the methods below once more. The error a worker returns is the one exception: it is
-// the caller's own and comes back as it is.
+// The errors of the methods below pass leaveAdapter (see error_guard.go) in the method itself, and
+// so does every error of a value they hand out: the transaction a worker is given and the readers a
+// query returns. The two transaction methods are the exception: they call the embedded DB field as
+// it is, which is DALgo's layer over the guarded backend (see guardDatabase), and their errors pass
+// the same function in that backend. The constructors assign the DB field: a Database whose DB
+// field was assigned by other code has, in its two transaction methods, the guard of the DB that
+// code assigned. The error a worker returns is the other exception: it is the caller's own and
+// comes back as it is.
 
 // RunReadonlyTransaction runs f in a read transaction. The transaction f is given is DALgo's, over a
 // transaction of the adapter whose methods answer as the methods of the Database do. The error f
@@ -27,7 +29,10 @@ var _ dal.DB = (*Database)(nil)
 // it (the begin, the commit, the rollback) is guarded. When f failed and the transaction could not
 // then be rolled back, the error is a *ConnectionError if the connection failed (f's error holds one,
 // or the rollback failed on the connection), and otherwise DALgo's rollback error, which names f's
-// error and the rollback's.
+// error and the rollback's. When the context ended and f failed, the result is f's error as it is,
+// whatever the rollback said: a statement that ends on its context makes the driver close its
+// connection and database/sql rolls the transaction back itself, so the rollback finds a finished
+// transaction or a closed connection, and neither is a failure of the connection.
 func (d *Database) RunReadonlyTransaction(ctx context.Context, f dal.ROTxWorker, opts ...dal.TransactionOption) error {
 	return d.DB.RunReadonlyTransaction(ctx, f, opts...)
 }

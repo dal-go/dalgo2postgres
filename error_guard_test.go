@@ -76,6 +76,22 @@ func (s standIn) onLazyDatabase(call func(ctx context.Context, db *Database) []e
 	}}
 }
 
+// onEmbeddedDB runs call against the dal.DB the exported DB field of a Database whose connection
+// fails holds: DALgo's layer over the guarded backend, called without the Database's own methods.
+func (s standIn) onEmbeddedDB(call func(ctx context.Context, db dal.DB) []error) errorCall {
+	return errorCall{run: func(t *testing.T) []error {
+		return call(context.Background(), s.handle(t).DB)
+	}}
+}
+
+// onEmbeddedBackend runs call against the backend DALgo's layer of the exported DB field is built
+// over, called without any layer above it.
+func (s standIn) onEmbeddedBackend(call func(ctx context.Context, backend dal.Backend) []error) errorCall {
+	return errorCall{run: func(t *testing.T) []error {
+		return call(context.Background(), dal.BackendOf(s.handle(t).DB))
+	}}
+}
+
 // inReadonlyTransaction runs call inside a read transaction whose statements all fail with the
 // stand-in's failure. The commit fails the same way, and its error is one of the call's.
 func (s standIn) inReadonlyTransaction(call func(ctx context.Context, tx dal.ReadTransaction) []error) errorCall {
@@ -153,6 +169,7 @@ func ordersRef() dal.CollectionRef { return dal.NewRootCollectionRef("orders", "
 func errorCalls(s standIn) map[string]errorCall {
 	onLazyDatabase, inReadonlyTransaction, inReadwriteTransaction := s.onLazyDatabase, s.inReadonlyTransaction, s.inReadwriteTransaction
 	onReader, onRecordsetReader := s.onReader, s.onRecordsetReader
+	onEmbeddedDB, onEmbeddedBackend := s.onEmbeddedDB, s.onEmbeddedBackend
 	ref := ordersRef()
 	key := dalrecord.NewKeyWithID("orders", "1")
 	table := map[string]errorCall{
@@ -278,6 +295,110 @@ func errorCalls(s standIn) map[string]errorCall {
 		}},
 		"Database.Upsert": onLazyDatabase(func(ctx context.Context, db *Database) []error {
 			return []error{db.Upsert(ctx, ordersRecord())}
+		}),
+
+		// The dal.DB of the exported DB field: DALgo's layer over the guarded backend.
+		"DB.ExecuteQueryToRecordsReader": onEmbeddedDB(func(ctx context.Context, db dal.DB) []error {
+			_, err := db.ExecuteQueryToRecordsReader(ctx, selectOrders())
+			return []error{err}
+		}),
+		"DB.ExecuteQueryToRecordsetReader": onEmbeddedDB(func(ctx context.Context, db dal.DB) []error {
+			_, err := db.ExecuteQueryToRecordsetReader(ctx, selectOrders())
+			return []error{err}
+		}),
+		"DB.Exists": onEmbeddedDB(func(ctx context.Context, db dal.DB) []error {
+			_, err := db.Exists(ctx, key)
+			return []error{err}
+		}),
+		"DB.Get": onEmbeddedDB(func(ctx context.Context, db dal.DB) []error {
+			rec := unreadRecord()
+			err := db.Get(ctx, rec)
+			return []error{err, rec.Error()}
+		}),
+		"DB.GetMulti": onEmbeddedDB(func(ctx context.Context, db dal.DB) []error {
+			rec := unreadRecord()
+			var errs []error
+			if err := db.GetMulti(ctx, []dalrecord.Record{rec}); err != nil {
+				errs = append(errs, err)
+			}
+			return append(errs, rec.Error())
+		}),
+		"DB.RunReadonlyTransaction": onEmbeddedDB(func(ctx context.Context, db dal.DB) []error {
+			return []error{db.RunReadonlyTransaction(ctx, func(context.Context, dal.ReadTransaction) error { return nil })}
+		}),
+		"DB.RunReadwriteTransaction": onEmbeddedDB(func(ctx context.Context, db dal.DB) []error {
+			return []error{db.RunReadwriteTransaction(ctx, func(context.Context, dal.ReadwriteTransaction) error { return nil })}
+		}),
+		"DB.Select": onEmbeddedDB(func(ctx context.Context, db dal.DB) []error {
+			_, err := db.(interface {
+				Select(context.Context, dal.Query) (dal.Reader, error)
+			}).Select(ctx, textQuery())
+			return []error{err}
+		}),
+
+		// The backend under DALgo's layer of the exported DB field, and the writes outside a
+		// transaction it has.
+		"Backend.CanExecuteJoin": onEmbeddedBackend(func(ctx context.Context, backend dal.Backend) []error {
+			return []error{backend.(dal.NativeJoinProvider).CanExecuteJoin(ctx, joinQuery())}
+		}),
+		"Backend.Delete": onEmbeddedBackend(func(ctx context.Context, backend dal.Backend) []error {
+			return []error{backend.(writeDB).Delete(ctx, key)}
+		}),
+		"Backend.DeleteMulti": onEmbeddedBackend(func(ctx context.Context, backend dal.Backend) []error {
+			return []error{backend.(writeDB).DeleteMulti(ctx, []*dalrecord.Key{key})}
+		}),
+		"Backend.ExecuteQueryToRecordsReader": onEmbeddedBackend(func(ctx context.Context, backend dal.Backend) []error {
+			_, err := backend.ExecuteQueryToRecordsReader(ctx, selectOrders())
+			return []error{err}
+		}),
+		"Backend.ExecuteQueryToRecordsetReader": onEmbeddedBackend(func(ctx context.Context, backend dal.Backend) []error {
+			_, err := backend.ExecuteQueryToRecordsetReader(ctx, selectOrders())
+			return []error{err}
+		}),
+		"Backend.Exists": onEmbeddedBackend(func(ctx context.Context, backend dal.Backend) []error {
+			_, err := backend.Exists(ctx, key)
+			return []error{err}
+		}),
+		"Backend.Get": onEmbeddedBackend(func(ctx context.Context, backend dal.Backend) []error {
+			rec := unreadRecord()
+			err := backend.Get(ctx, rec)
+			return []error{err, rec.Error()}
+		}),
+		"Backend.GetMulti": onEmbeddedBackend(func(ctx context.Context, backend dal.Backend) []error {
+			rec := unreadRecord()
+			var errs []error
+			if err := backend.GetMulti(ctx, []dalrecord.Record{rec}); err != nil {
+				errs = append(errs, err)
+			}
+			return append(errs, rec.Error())
+		}),
+		"Backend.Insert": onEmbeddedBackend(func(ctx context.Context, backend dal.Backend) []error {
+			return []error{backend.(writeDB).Insert(ctx, ordersRecord())}
+		}),
+		"Backend.JoinFields": onEmbeddedBackend(func(ctx context.Context, backend dal.Backend) []error {
+			_, err := backend.(dal.JoinFieldsProvider).JoinFields(ctx, dal.NewRootCollectionRef("orders", "a"))
+			return []error{err}
+		}),
+		"Backend.RunReadonlyTransaction": onEmbeddedBackend(func(ctx context.Context, backend dal.Backend) []error {
+			return []error{backend.RunReadonlyTransaction(ctx, func(context.Context, dal.ReadTransaction) error { return nil })}
+		}),
+		"Backend.RunReadwriteTransaction": onEmbeddedBackend(func(ctx context.Context, backend dal.Backend) []error {
+			return []error{backend.RunReadwriteTransaction(ctx, func(context.Context, dal.ReadwriteTransaction) error { return nil })}
+		}),
+		"Backend.Set": onEmbeddedBackend(func(ctx context.Context, backend dal.Backend) []error {
+			return []error{backend.(writeDB).Set(ctx, ordersRecord())}
+		}),
+		"Backend.SetMulti": onEmbeddedBackend(func(ctx context.Context, backend dal.Backend) []error {
+			return []error{backend.(writeDB).SetMulti(ctx, []dalrecord.Record{ordersRecord()})}
+		}),
+		"Backend.Update": onEmbeddedBackend(func(ctx context.Context, backend dal.Backend) []error {
+			return []error{backend.(writeDB).Update(ctx, key, someUpdates())}
+		}),
+		"Backend.UpdateMulti": onEmbeddedBackend(func(ctx context.Context, backend dal.Backend) []error {
+			return []error{backend.(writeDB).UpdateMulti(ctx, []*dalrecord.Key{key}, someUpdates())}
+		}),
+		"Backend.Upsert": onEmbeddedBackend(func(ctx context.Context, backend dal.Backend) []error {
+			return []error{backend.(writeDB).Upsert(ctx, ordersRecord())}
 		}),
 
 		// The transaction handed to a worker of RunReadonlyTransaction.
@@ -498,11 +619,14 @@ func TestErrorsHoldNoConfiguration_JoinsAndGroupedQueries(t *testing.T) {
 }
 
 // handedOutTypes are the types of the values the adapter hands out, keyed as the table keys its
-// calls: the Database, the transactions a worker is given and the readers a query returns.
+// calls: the Database, the two values behind its exported DB field (DALgo's layer, and the backend
+// under it), the transactions a worker is given and the readers a query returns.
 func handedOutTypes(t *testing.T) map[string]reflect.Type {
 	t.Helper()
 	types := map[string]reflect.Type{"Database": reflect.TypeOf(&Database{})}
 	db := transactionalDatabase(t, errors.New("unused"))
+	types["DB"] = reflect.TypeOf(db.DB)
+	types["Backend"] = reflect.TypeOf(dal.BackendOf(db.DB))
 	if err := db.RunReadonlyTransaction(context.Background(), func(_ context.Context, tx dal.ReadTransaction) error {
 		types["ReadTransaction"] = reflect.TypeOf(tx)
 		return nil
@@ -579,6 +703,8 @@ func TestErrorsHoldNoConfiguration_TableNamesEveryErrorReturningMethod(t *testin
 // least their methods, so that a type that stopped implementing one is noticed here and not by a consumer.
 func TestErrorsHoldNoConfiguration_HandedOutValuesHaveTheirInterfacesMethods(t *testing.T) {
 	declared := map[string]reflect.Type{
+		"DB":                   reflect.TypeOf((*dal.DB)(nil)).Elem(),
+		"Backend":              reflect.TypeOf((*dal.Backend)(nil)).Elem(),
 		"ReadTransaction":      reflect.TypeOf((*dal.ReadTransaction)(nil)).Elem(),
 		"ReadwriteTransaction": reflect.TypeOf((*dal.ReadwriteTransaction)(nil)).Elem(),
 		"RecordsReader":        reflect.TypeOf((*dal.RecordsReader)(nil)).Elem(),
