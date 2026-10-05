@@ -106,9 +106,9 @@ func expectedGroups(rows int) []map[string]any {
 	return out
 }
 
-// joinQuery is the orders of a table joined to their customers, with the text of the order,
+// pushdownJoinQuery is the orders of a table joined to their customers, with the text of the order,
 // in the order of the order's id.
-func joinQuery(orders, customers string) dal.StructuredQuery {
+func pushdownJoinQuery(orders, customers string) dal.StructuredQuery {
 	on := dal.NewComparison(dal.NewFieldRef("o", "customer_id"), dal.Equal, dal.NewFieldRef("c", "id"))
 	return dal.From(dal.NewRootCollectionRef(orders, "o")).
 		Join(dal.NewJoinedSource(dal.NewRootCollectionRef(customers, "c"), dal.JoinInner, on)).
@@ -121,7 +121,7 @@ func joinQuery(orders, customers string) dal.StructuredQuery {
 		)
 }
 
-// checkJoinRows asserts the rows of joinQuery over n orders: the order ids in order, each
+// checkJoinRows asserts the rows of pushdownJoinQuery over n orders: the order ids in order, each
 // customer the order's own, each text noteLength bytes. It returns the bytes of text.
 func checkJoinRows(t *testing.T, rows []map[string]any, n int) (bytes int) {
 	t.Helper()
@@ -201,7 +201,7 @@ func TestPushdownIntegration_JoinOver50000RowsRunsOnTheServer(t *testing.T) {
 	f := openQueryFixture(t, "test_pd_join", IdentifierFoldLower, pushdownDDL())
 	for _, reader := range bothReaders {
 		t.Run(reader.name, func(t *testing.T) {
-			run := reader.run(f, joinQuery("pd_order", "pd_customer"))
+			run := reader.run(f, pushdownJoinQuery("pd_order", "pd_customer"))
 			if run.err != nil {
 				t.Fatalf("the join failed: %v\nstatements: %v", run.err, run.statements)
 			}
@@ -285,7 +285,7 @@ func TestPushdownIntegration_WithoutTheNativeRouteTheSameQueriesAreRefused(t *te
 	})
 	t.Run("a join asked of a database with no dialect is refused before any statement", func(t *testing.T) {
 		f.trace.reset()
-		rows, err := readRows(inMemory, joinQuery("pd_order", "pd_customer"))
+		rows, err := readRows(inMemory, pushdownJoinQuery("pd_order", "pd_customer"))
 		t.Logf("error: %v (rows returned: %d); statements: %v", err, len(rows), statementsSent(f))
 		var join *dal.JoinValidationError
 		if err == nil || !errors.As(err, &join) || join.Category != "join_plan" || len(rows) != 0 || len(statementsSent(f)) != 0 {
@@ -294,7 +294,7 @@ func TestPushdownIntegration_WithoutTheNativeRouteTheSameQueriesAreRefused(t *te
 	})
 	t.Run("the engine over the adapter's plain reads stops a join at its fetched-rows bound", func(t *testing.T) {
 		f.trace.reset()
-		rows, err := engineJoin(joinQuery("pd_order", "pd_customer"))
+		rows, err := engineJoin(pushdownJoinQuery("pd_order", "pd_customer"))
 		t.Logf("error: %v (rows returned: %d); statements: %v", err, len(rows), statementsSent(f))
 		var query *dal.QueryValidationError
 		if err == nil || !errors.As(err, &query) || query.Category != "query_limit" {
@@ -325,12 +325,12 @@ func TestPushdownIntegration_WithoutTheNativeRouteTheSameQueriesAreRefused(t *te
 			t.Errorf("the server's groups differ from the ones computed here: %s", rowDifference(want, wantRows))
 		}
 
-		nativeJoin, err := readRows(f.db, joinQuery("pd_order_small", "pd_customer_small"))
+		nativeJoin, err := readRows(f.db, pushdownJoinQuery("pd_order_small", "pd_customer_small"))
 		if err != nil {
 			t.Fatalf("native join: %v", err)
 		}
 		f.trace.reset()
-		memoryJoin, err := engineJoin(joinQuery("pd_order_small", "pd_customer_small"))
+		memoryJoin, err := engineJoin(pushdownJoinQuery("pd_order_small", "pd_customer_small"))
 		if err != nil {
 			t.Fatalf("in-memory join: %v", err)
 		}

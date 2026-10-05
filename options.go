@@ -225,7 +225,7 @@ func (d *Database) chooseIdentifierMode(identifierCase dalgo2sql.IdentifierCase)
 func newDatabaseFromSQL(sqlDB *sql.DB, schema dal.Schema, s settings, options []Option) *Database {
 	d := &Database{}
 	applyOptions(d, options)
-	d.DB = dalgo2sql.NewDatabase(sqlDB, schema, s.db)
+	d.DB = guardDatabase(dalgo2sql.NewDatabase(sqlDB, schema, s.db))
 	d.sqlDB = sqlDB
 	d.identifierMode = s.mode
 	return d

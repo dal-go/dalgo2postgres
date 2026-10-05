@@ -5,7 +5,7 @@ PostgreSQL-specific DALgo driver. Wraps `github.com/dal-go/dalgo2sql` to provide
 - structured queries — compiled by dalgo2sql's typed PostgreSQL compiler with every value
   bound and every name quoted, with filtering, ordering, grouping, aggregation and joins run
   on the server (see "Structured queries")
-- `dbschema.SchemaReader` — schema introspection via `information_schema` and `pg_indexes`
+- `dbschema.SchemaReader` — schema introspection via `information_schema`, `pg_catalog` and `pg_indexes`: every non-system schema, views told from tables, column defaults
 - `ddl.Applier` — PostgreSQL-flavored `CREATE TABLE` / `CREATE INDEX` / `DROP TABLE` / `ALTER TABLE`
 - `dal.ConcurrencyAware` — advertises `SupportsConcurrentConnections() = true`
   (PostgreSQL supports concurrent connections from multiple goroutines and processes,
@@ -466,8 +466,9 @@ recordset of that name.
 ## Schema reader options
 
 The schema reader (`ListCollections`, `DescribeCollection`, `ListIndexes`,
-`ListConstraints`, `ListReferrers`) lists tables and views of one PostgreSQL
-schema. Both constructors take optional settings:
+`ListConstraints`, `ListReferrers`) reads one PostgreSQL schema, the configured one;
+see "What the schema reader lists and describes" below for the others. Both
+constructors take optional settings:
 
 ```go
 db, err := dalgo2postgres.NewDatabase(dsn,
@@ -502,8 +503,7 @@ schema.
 equality is not exact (type `citext`, or a non-deterministic collation such as a
 case-insensitive ICU collation), in column order. It finds the table the way the
 schema reader does (reference schema, else `WithSchema`; name per
-`IdentifierMode`), except that it also answers for materialized views and foreign
-tables, which `DescribeCollection` reports as not found. It returns a not-found
+`IdentifierMode`). It returns a not-found
 error when the table does not exist, and an empty list when the table exists and
 none of its columns is `citext` or has a non-deterministic collation. A domain
 over `citext` and an array of `citext` are not reported (treat such columns as
@@ -530,12 +530,59 @@ its schema).
 
 A column whose type has no `dbschema.Type` (uuid, json, jsonb, arrays, enums,
 interval, inet, money, ...) is described as a `String` field; it never fails the
-table. Base tables and views are listed; `dbschema` has no collection kind, so a
-view cannot be told apart from a table in the result. Materialized views and
-foreign tables are not listed (PostgreSQL does not expose materialized views in
-`information_schema.tables`, and foreign tables are filtered out).
+table.
+
+### What the schema reader lists and describes
+
+**Schemas.** `ListSchemas(ctx)` returns the schemas a role can use (it has `USAGE` on
+them), in name order, without the system schemas (`pg_catalog`, `information_schema`,
+`pg_toast`, `pg_temp_N`, `pg_toast_temp_N`). A schema with no tables is listed.
+`dbschema` has no optional interface for listing schemas, so `ListSchemas`,
+`ListSchemaCollections` and `ListSchemaViews` belong to this adapter alone.
+
+**Collections.** `ListCollections(ctx, nil)` is unchanged in shape: the configured
+schema, in name order, each reference naming no schema. `ListSchemaCollections(ctx, schema)`
+lists any schema (an empty one means the configured one), each reference naming its
+schema, so handing it to `DescribeCollection` or `ListIndexes` reads that schema.
+A schema that does not exist lists nothing. Listed: tables, partitioned tables, views,
+materialized views and foreign tables, to the roles that own them or hold a privilege
+on them or on a column (the test `information_schema.tables` applies). A partition is
+listed, as `information_schema.tables` lists it, as a table of its own. Sequences,
+indexes and composite types are not collections.
+
+**Views.** `ListViews(ctx)` (the optional interface of the DataTug schema provider) and
+`ListSchemaViews(ctx, schema)` list the views and the materialized views, by the same
+references `ListCollections` and `ListSchemaCollections` give. A foreign table, a
+partitioned table and a partition are tables.
+
+**Defaults.** `DescribeCollection` sets `FieldDef.Default` to a `dbschema.DefaultLiteral`
+whose `Value` is the *text* of the expression as PostgreSQL prints it, a string:
+`'new'::text`, `now()`, `1`, `nextval('sales.hits_seq'::regclass)`. `dbschema.DefaultExpr`
+is sealed and has no case for an expression, so a literal of the text is the form it
+allows; read `Value` as SQL, never as the value of the default. A generated column's
+`Default` is the text `GENERATED ALWAYS AS (<expression>)`, which no plain default begins
+with. An identity column has `AutoIncrement` set and no `Default`. A column that only
+defaults to `nextval(...)` (`serial`) is a plain default to the catalog and is not marked
+`AutoIncrement`.
+
+**What it still does not do.**
+- It does not list the collections of every schema in one call: `ListCollections` reads
+  the configured schema, and a caller that wants all of them asks `ListSchemas` and then
+  `ListSchemaCollections` for each.
+- `ListConstraints`, `ListReferrers` and the foreign-key namespace keep their rule: one
+  schema, the one the reference names, else the configured one.
+- A materialized view is read from `pg_attribute`, because `information_schema` omits it;
+  a column of a domain type in one reads as a `String`, as an enum does, and has no
+  default, identity or generation (it cannot have any). Whether a generated column is
+  stored or virtual (PostgreSQL 18) is not reported.
+- `ListCollections` lists a foreign table and a materialized view now; before, it listed
+  neither.
 
 ## Connection errors
+
+An error from the adapter never holds the connection's configuration. A connection that fails, at open or at any later call, is a classified error with a fixed sentence: every error of a `*Database`, of the transaction a worker is given and of the readers a query returns passes one function, and a failure of the connection comes out as a `*ConnectionError` whose `Kind` says what failed, whose text is the fixed sentence of that kind (and the SQLSTATE of a server answer, never its message, which names a role or a database), and which names no part of the configuration at all after the open; nothing of the driver's error is in its chain, and `errors.Is` still finds `context.Canceled` and `context.DeadlineExceeded` in it. A failure of the connection is the driver's connect or configuration error anywhere in the chain; a server answer of a connection class (SQLSTATE classes 08 and 28, `3D000`, `53300`, `57P01` to `57P03`), which keeps its code and not the server's message, which names a role or a database; and how a connection that was open fails when it is lost: an error of the socket (a reset, a broken pipe, a timeout), the end of the stream, or a connection the driver had already closed. A statement can get a code of those classes as its own answer: `08P01` (a protocol violation) for a message that is malformed, such as a wrong number of bound parameters, and `3D000` for a function or a command that is given the name of a database that is not there (`SELECT pg_database_size('nope')`). The answer is reported as a connection error all the same, with its code and without the server's message, and the sentence of `3D000`, `28000`, `28P01`, `53300` and `57P03` says that the server refused the connection: the SQLSTATE is what to branch on. The end of a stream (`io.ErrUnexpectedEOF`) is read as a lost connection wherever it is in the chain, whoever's stream it was: a value that is cut short for its own decoder (a column of two bytes that a type reads four bytes of) is reported as a connection error of kind `FailureOther`, which names neither the column nor the cause. A statement that ends because its context was canceled or its deadline passed is the context's error, in a transaction too (see below). A statement error (a constraint, a type, a syntax class) is the server's own `*pgconn.PgError`, unchanged: it carries the server's message and, for many classes, a detail, which can quote the values and the names of the table, column and constraint concerned, and the message can also name a schema, a role or the database the statement concerns, so a consumer that prints one prints that text.
+
+The error a worker returns from `RunReadonlyTransaction` or `RunReadwriteTransaction` is its own and comes back as it is, whatever it holds: a worker that reads another database with the driver itself finds its own error, and the sentinel it wrapped, in the result. What the transaction adds around it (the begin, the commit, the rollback) is guarded. When the worker failed and the rollback then failed too, the error is a `*ConnectionError` if the connection failed (the worker's error holds one, or the rollback failed on the connection), and DALgo's rollback error, which names both errors, otherwise. When the context of the transaction has ended and the worker failed, the result is the worker's error as it is, whatever the rollback said: a statement that ends on its context makes the driver close its connection, and `database/sql` rolls the transaction back itself when its context ends, so the rollback finds a transaction that is finished or a connection that is closed, according to which came first, and neither is a failure of the connection. `errors.Is` finds the context's error in the result in both cases. The embedded `DB` field is DALgo's layer over the guarded backend, so its errors pass the same function as those of the methods of the `Database`; the constructors assign it, and the two transaction methods call it as it is, so a `Database` whose `DB` field was assigned by other code has, in its transactions, the guard of the `DB` that code assigned.
 
 `NewDatabase` and `NewDatabaseWithOptions` return a `*dalgo2postgres.ConnectionError`
 when they cannot open or reach the server. Its text is built, never filtered:
@@ -567,11 +614,11 @@ if errors.As(err, &connErr) {
 |---------------------|-----------------------------------------------------------------------|
 | `FailureInvalidDSN` | the driver cannot parse the string, or a file or service it names cannot be read; nothing is named |
 | `FailureMisread`    | the string would be read as something else than was meant; refused before any connection (below) |
-| `FailureNetwork`    | name resolution failed, or the connection was refused or reset        |
+| `FailureNetwork`    | name resolution failed, or the connection was refused, reset or broken |
 | `FailureTLS`        | the TLS handshake failed                                              |
 | `FailureTimeout`    | the attempt timed out or was canceled                                 |
 | `FailureServer`     | the server answered with an error; `SQLState` holds its five-character code |
-| `FailureOther`      | anything else (also the zero value)                                   |
+| `FailureOther`      | anything else (also the zero value), such as a connection that was open and ended without an error of the network |
 
 A part is named only when:
 
@@ -607,10 +654,7 @@ What this means for a string you write:
 
 Limits: an option value the driver does not keep (`sslpassword`, a path) cannot be
 compared with the host and the database, so one that equals them would show the
-host or database, which is only what it is. And this covers construction only: a
-later failure to connect (the pool opening a new connection, a dropped
-connection) comes from the driver without this treatment and may name the
-database user, never the password.
+host or database, which is only what it is.
 
 ## Type mapping
 
@@ -657,8 +701,8 @@ DALGO2POSTGRES_TEST_DSN='postgres://ovdb:ovdb@127.0.0.1:15432/ovdb?sslmode=disab
 `TestEndToEnd` then reports those two as skips that name the reason; the Conformance job
 fails on any other skip, and on a test of the families `TestEndToEnd`, `TestTypeMatrixIntegration_`,
 `TestServerPinsIntegration_`, `TestStructuredQueryIntegration_`, `TestFixturesIntegration_`,
-`TestPushdownIntegration_`, `TestAccessIntegration_` and `TestProbesIntegration_` that does not run
-to a pass.
+`TestPushdownIntegration_`, `TestAccessIntegration_`, `TestProbesIntegration_` and
+`TestConnectionFailureIntegration_` that does not run to a pass.
 
 **The DSN must name a throwaway database.** The tests create and drop whole schemas with
 `CASCADE`: the ones named `test_*`, the schema `main` that the join fixtures name (it is dropped

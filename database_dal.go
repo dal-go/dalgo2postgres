@@ -13,33 +13,56 @@ import (
 var _ dal.DB = (*Database)(nil)
 
 // --- dal.DB delegation ---
+//
+// The errors of the methods below pass leaveAdapter (see error_guard.go) in the method itself, and
+// so does every error of a value they hand out: the transaction a worker is given and the readers a
+// query returns. The two transaction methods are the exception: they call the embedded DB field as
+// it is, which is DALgo's layer over the guarded backend (see guardDatabase), and their errors pass
+// the same function in that backend. The constructors assign the DB field: a Database whose DB
+// field was assigned by other code has, in its two transaction methods, the guard of the DB that
+// code assigned. The error a worker returns is the other exception: it is the caller's own and
+// comes back as it is.
 
+// RunReadonlyTransaction runs f in a read transaction. The transaction f is given is DALgo's, over a
+// transaction of the adapter whose methods answer as the methods of the Database do. The error f
+// returns is its own and is returned as it is, whatever it holds; what the transaction adds around
+// it (the begin, the commit, the rollback) is guarded. When f failed and the transaction could not
+// then be rolled back, the error is a *ConnectionError if the connection failed (f's error holds one,
+// or the rollback failed on the connection), and otherwise DALgo's rollback error, which names f's
+// error and the rollback's. When the context ended and f failed, the result is f's error as it is,
+// whatever the rollback said: a statement that ends on its context makes the driver close its
+// connection and database/sql rolls the transaction back itself, so the rollback finds a finished
+// transaction or a closed connection, and neither is a failure of the connection.
 func (d *Database) RunReadonlyTransaction(ctx context.Context, f dal.ROTxWorker, opts ...dal.TransactionOption) error {
 	return d.DB.RunReadonlyTransaction(ctx, f, opts...)
 }
 
+// RunReadwriteTransaction runs f in a read-write transaction. The transaction f is given is DALgo's
+// (dal.WithoutValidation recognises it), over a transaction of the adapter whose methods answer as
+// the methods of the Database do. The error f returns is returned as it is, as for
+// [Database.RunReadonlyTransaction], which also says what the other errors of the call are.
 func (d *Database) RunReadwriteTransaction(ctx context.Context, f dal.RWTxWorker, opts ...dal.TransactionOption) error {
 	return d.DB.RunReadwriteTransaction(ctx, f, opts...)
 }
 
 func (d *Database) Get(ctx context.Context, record dalrecord.Record) error {
-	return d.DB.Get(ctx, record)
+	return guardedReads{d.DB}.Get(ctx, record)
 }
 
 func (d *Database) GetMulti(ctx context.Context, records []dalrecord.Record) error {
-	return d.DB.GetMulti(ctx, records)
+	return guardedReads{d.DB}.GetMulti(ctx, records)
 }
 
 func (d *Database) Exists(ctx context.Context, key *dalrecord.Key) (bool, error) {
-	return d.DB.Exists(ctx, key)
+	return guardedReads{d.DB}.Exists(ctx, key)
 }
 
 func (d *Database) ExecuteQueryToRecordsReader(ctx context.Context, query dal.Query) (dal.RecordsReader, error) {
-	return d.DB.ExecuteQueryToRecordsReader(ctx, query)
+	return guardedReads{d.DB}.ExecuteQueryToRecordsReader(ctx, query)
 }
 
 func (d *Database) ExecuteQueryToRecordsetReader(ctx context.Context, query dal.Query, opts ...recordset.Option) (dal.RecordsetReader, error) {
-	return d.DB.ExecuteQueryToRecordsetReader(ctx, query, opts...)
+	return guardedReads{d.DB}.ExecuteQueryToRecordsetReader(ctx, query, opts...)
 }
 
 // --- what the database declares it runs on the server ---
@@ -76,7 +99,7 @@ func (d *Database) QueryCapabilities() dal.QueryCapabilities {
 // declares no join support declines with [dal.ErrNotSupported].
 func (d *Database) CanExecuteJoin(ctx context.Context, q dal.StructuredQuery) error {
 	if provider, ok := dal.As[dal.NativeJoinProvider](d.DB); ok {
-		return provider.CanExecuteJoin(ctx, q)
+		return leaveAdapter(provider.CanExecuteJoin(ctx, q))
 	}
 	return dal.ErrNotSupported
 }
@@ -86,7 +109,7 @@ func (d *Database) CanExecuteJoin(ctx context.Context, q dal.StructuredQuery) er
 // DALgo takes for a source that cannot supply its schema.
 func (d *Database) JoinFields(ctx context.Context, source dal.RecordsetSource) ([]string, error) {
 	if provider, ok := dal.As[dal.JoinFieldsProvider](d.DB); ok {
-		return provider.JoinFields(ctx, source)
+		return guarded(provider.JoinFields(ctx, source))
 	}
 	return nil, nil
 }
@@ -135,7 +158,7 @@ func (d *Database) Set(ctx context.Context, record dalrecord.Record) error {
 	if !ok {
 		return dal.ErrNotImplementedYet
 	}
-	return w.Set(ctx, record)
+	return leaveCall(w.Set(ctx, record), record)
 }
 
 func (d *Database) SetMulti(ctx context.Context, records []dalrecord.Record) error {
@@ -143,7 +166,7 @@ func (d *Database) SetMulti(ctx context.Context, records []dalrecord.Record) err
 	if !ok {
 		return dal.ErrNotImplementedYet
 	}
-	return w.SetMulti(ctx, records)
+	return leaveCall(w.SetMulti(ctx, records), records...)
 }
 
 func (d *Database) Insert(ctx context.Context, record dalrecord.Record, opts ...dal.InsertOption) error {
@@ -151,7 +174,7 @@ func (d *Database) Insert(ctx context.Context, record dalrecord.Record, opts ...
 	if !ok {
 		return dal.ErrNotImplementedYet
 	}
-	return w.Insert(ctx, record, opts...)
+	return leaveCall(w.Insert(ctx, record, opts...), record)
 }
 
 func (d *Database) Upsert(ctx context.Context, record dalrecord.Record) error {
@@ -159,7 +182,7 @@ func (d *Database) Upsert(ctx context.Context, record dalrecord.Record) error {
 	if !ok {
 		return dal.ErrNotImplementedYet
 	}
-	return w.Upsert(ctx, record)
+	return leaveCall(w.Upsert(ctx, record), record)
 }
 
 func (d *Database) Delete(ctx context.Context, key *dalrecord.Key) error {
@@ -167,7 +190,7 @@ func (d *Database) Delete(ctx context.Context, key *dalrecord.Key) error {
 	if !ok {
 		return dal.ErrNotImplementedYet
 	}
-	return w.Delete(ctx, key)
+	return leaveAdapter(w.Delete(ctx, key))
 }
 
 func (d *Database) DeleteMulti(ctx context.Context, keys []*dalrecord.Key) error {
@@ -175,7 +198,7 @@ func (d *Database) DeleteMulti(ctx context.Context, keys []*dalrecord.Key) error
 	if !ok {
 		return dal.ErrNotImplementedYet
 	}
-	return w.DeleteMulti(ctx, keys)
+	return leaveAdapter(w.DeleteMulti(ctx, keys))
 }
 
 func (d *Database) Update(ctx context.Context, key *dalrecord.Key, updates []update.Update, preconditions ...dal.Precondition) error {
@@ -183,7 +206,7 @@ func (d *Database) Update(ctx context.Context, key *dalrecord.Key, updates []upd
 	if !ok {
 		return dal.ErrNotImplementedYet
 	}
-	return w.Update(ctx, key, updates, preconditions...)
+	return leaveAdapter(w.Update(ctx, key, updates, preconditions...))
 }
 
 func (d *Database) UpdateMulti(ctx context.Context, keys []*dalrecord.Key, updates []update.Update, preconditions ...dal.Precondition) error {
@@ -191,7 +214,7 @@ func (d *Database) UpdateMulti(ctx context.Context, keys []*dalrecord.Key, updat
 	if !ok {
 		return dal.ErrNotImplementedYet
 	}
-	return w.UpdateMulti(ctx, keys, updates, preconditions...)
+	return leaveAdapter(w.UpdateMulti(ctx, keys, updates, preconditions...))
 }
 
 // UpdateRecord is not supported at the database level by dalgo2sql; use

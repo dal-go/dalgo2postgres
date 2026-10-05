@@ -13,6 +13,11 @@ import (
 // CreateCollection creates a table and its inline indexes transactionally.
 // On any error, the transaction rolls back and no schema state remains.
 func (d *Database) CreateCollection(ctx context.Context, c dbschema.CollectionDef, opts ...ddl.Option) error {
+	return leaveAdapter(d.createCollection(ctx, c, opts...))
+}
+
+// createCollection is the body of [Database.CreateCollection].
+func (d *Database) createCollection(ctx context.Context, c dbschema.CollectionDef, opts ...ddl.Option) error {
 	o := ddl.ResolveOptions(opts...)
 	createSQL, err := buildCreateTableSQL(c, o)
 	if err != nil {
@@ -62,18 +67,18 @@ func (d *Database) inTx(ctx context.Context, fn func(*sql.Tx) error) error {
 func (d *Database) DropCollection(ctx context.Context, name string, opts ...ddl.Option) error {
 	o := ddl.ResolveOptions(opts...)
 	sqlStmt := buildDropTableSQL(name, o)
-	return d.inTx(ctx, func(tx *sql.Tx) error {
+	return leaveAdapter(d.inTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, sqlStmt); err != nil {
 			return fmt.Errorf("dalgo2postgres: DropCollection exec: %w", err)
 		}
 		return nil
-	})
+	}))
 }
 
 // AlterCollection applies ops in order inside a single transaction.
 // Partial failures roll back and leave the collection untouched.
 func (d *Database) AlterCollection(ctx context.Context, name string, ops ...ddl.AlterOp) error {
-	return d.inTx(ctx, func(tx *sql.Tx) error {
+	return leaveAdapter(d.inTx(ctx, func(tx *sql.Tx) error {
 		a := &postgresAlterApplier{ctx: ctx, tx: tx, table: name}
 		for _, op := range ops {
 			if err := op.ApplyTo(ctx, a); err != nil {
@@ -81,7 +86,7 @@ func (d *Database) AlterCollection(ctx context.Context, name string, ops ...ddl.
 			}
 		}
 		return nil
-	})
+	}))
 }
 
 // postgresAlterApplier implements ddl.Applier for the in-flight
