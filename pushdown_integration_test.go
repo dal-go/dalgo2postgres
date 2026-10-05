@@ -3,6 +3,7 @@ package dalgo2postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -130,7 +131,8 @@ func checkJoinRows(t *testing.T, rows []map[string]any, n int) (bytes int) {
 	for i, row := range rows {
 		id := int64(i + 1)
 		note, _ := row["note"].(string)
-		if row["order_id"] != id || row["customer"] != "customer "+strconv.FormatInt(id, 10) || len(note) != noteLength {
+		// DALgo's engine returns an integer as its own Go type, so it is compared as written.
+		if fmt.Sprint(row["order_id"]) != strconv.FormatInt(id, 10) || row["customer"] != "customer "+strconv.FormatInt(id, 10) || len(note) != noteLength {
 			t.Fatalf("row %d = order_id %v, customer %v, %d bytes of note; want order %d, its customer and %d bytes",
 				i, row["order_id"], row["customer"], len(note), id, noteLength)
 		}
