@@ -26,8 +26,8 @@ import (
 // exception) and 28 (invalid authorization specification), with which a server answers a
 // connection, or ends one. Class 08 is taken whole, 08P01 (protocol_violation) included, although
 // a server also reports 08P01 for a statement's own message (a wrong number of bound parameters,
-// under an execution mode that sends them as written): at a connection the same code carries a
-// message that names a setting the startup sent, so the code is never copied with its message.
+// under an execution mode that sends them as written): at a connection a server's or a pooler's
+// message for it can name a setting the startup sent, so the code is never copied with its message.
 // The codes below were checked against the PostgreSQL error-codes appendix:
 //
 //   - 3D000 invalid_catalog_name: the database does not exist. The message names it.
