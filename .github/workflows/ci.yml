@@ -194,6 +194,7 @@ jobs:
             TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames \
             TestTypeMatrixIntegration_FilterByColumnTypeAndConstantType \
             TestTypeMatrixIntegration_ProjectionAndOrderBy \
+            TestTypeMatrixIntegration_EveryIntegerAndFloatType \
             TestTypeMatrixIntegration_ValuesAtTheEdges \
             TestTypeMatrixIntegration_ArithmeticOnDoublePrecision \
             TestTypeMatrixIntegration_NumericWithAFractionIntoAnIntegerField \

@@ -422,20 +422,65 @@ func TestTypeMatrixIntegration_FilterByColumnTypeAndConstantType(t *testing.T) {
 	t.Run("rules", func(t *testing.T) {
 		for kind := range kindCount {
 			rule := matrixKinds[kind]
-			text := rule.marker
+			text, handed := rule.marker, rule.argType
 			if text == "" {
-				text = "no marker: the compiler writes " + rule.sql
+				text, handed = "no marker, the compiler writes "+rule.sql, "no argument"
 			}
-			codes := make([]string, 0, len(tallies[kind].refusals))
+			refusals, total := make([]string, 0, len(tallies[kind].refusals)), 0
 			for code, n := range tallies[kind].refusals {
-				codes = append(codes, fmt.Sprintf("%s x%d", code, n))
+				refusals = append(refusals, fmt.Sprintf("%s x%d", code, n))
+				total += n
 			}
-			sort.Strings(codes)
-			t.Logf("rule: a %s is written as %s, handed to the driver as %s; over %d column types it matched rows %d times, matched nothing %d times, and was refused %d times (%s)",
-				rule.label, text, rule.argType, len(matrixColumns), tallies[kind].matched, tallies[kind].empty,
-				len(codes), strings.Join(codes, ", "))
+			sort.Strings(refusals)
+			if len(refusals) == 0 {
+				refusals = append(refusals, "no refusal")
+			}
+			t.Logf("rule: a %s is written as %s and handed to the driver as %s. Over %d column types: rows matched %d times, nothing matched %d times, refused by the server %d times (%s)",
+				rule.label, text, handed, len(matrixColumns), tallies[kind].matched, tallies[kind].empty, total, strings.Join(refusals, ", "))
 		}
 	})
+}
+
+// Every Go integer and float type the dialect binds, not only int, uint and float64: the
+// dialect types a constant by its kind, so all signed integers are written alike and
+// handed over as int64, all unsigned integers as numeric text, and a float of either size
+// as numeric text of its own shortest decimal. Each runs against a column of the type
+// that matches it best and finds the row whose value is 2.
+func TestTypeMatrixIntegration_EveryIntegerAndFloatType(t *testing.T) {
+	f := openTypeFixture(t, "test_tm_sizes", "UTC", typeMatrixDDL...)
+	for _, tc := range []struct {
+		column   string
+		constant any
+		marker   string
+		argType  string
+	}{
+		{"i8", int(2), "$1::bigint", "int64"},
+		{"i8", int8(2), "$1::bigint", "int64"},
+		{"i8", int16(2), "$1::bigint", "int64"},
+		{"i8", int32(2), "$1::bigint", "int64"},
+		{"i8", int64(2), "$1::bigint", "int64"},
+		{"i8", uint(2), "$1::numeric", "string"},
+		{"i8", uint8(2), "$1::numeric", "string"},
+		{"i8", uint16(2), "$1::numeric", "string"},
+		{"i8", uint32(2), "$1::numeric", "string"},
+		{"i8", uint64(2), "$1::numeric", "string"},
+		{"i2", int8(2), "$1::bigint", "int64"},
+		{"i4", int32(2), "$1::bigint", "int64"},
+		{"num", float32(2), "$1::numeric", "string"},
+		{"num", float64(2), "$1::numeric", "string"},
+		{"f4", float32(2), "$1::numeric", "string"},
+		{"f8", float64(2), "$1::numeric", "string"},
+	} {
+		label := fmt.Sprintf("%s %T(%v)", tc.column, tc.constant, tc.constant)
+		o := observe(t, f, filterQuery("tm", tc.column, dal.Equal, tc.constant))
+		check(t, label, o, rowsOf(2))
+		if want := fmt.Sprintf(`SELECT "id" FROM "tm" WHERE "%s" = %s ORDER BY "id" ASC`, tc.column, tc.marker); o.statement != want {
+			t.Errorf("%s: statement = %s, want %s", label, o.statement, want)
+		}
+		if len(o.args) != 1 || fmt.Sprintf("%T", o.args[0]) != tc.argType {
+			t.Errorf("%s: arguments = %s, want one of type %s", label, argsText(o.args), tc.argType)
+		}
+	}
 }
 
 // A projection returns each column type as one Go type, and ORDER BY sorts it with the NULL

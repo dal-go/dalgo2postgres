@@ -159,6 +159,91 @@ connection's `search_path` resolves. `WithSchema` affects only the schema reader
   ordinal in the result (`"0"`, `"1"`, ...), whether a primary key is configured or not: a
   group is not a row of the table, so no key is read and no hidden column is added.
 
+### Constants and column types
+
+A constant is typed by its Go type, never by its value, and the server compares it with the
+column. `TestTypeMatrixIntegration_FilterByColumnTypeAndConstantType` runs every Go type
+against a column of each of `smallint`, `integer`, `bigint`, `numeric`, `real`,
+`double precision`, `boolean`, `date`, `timestamp`, `timestamptz`, `uuid`, `jsonb` and `text`
+on PostgreSQL 17, and prints the statement, the argument and the answer of each pair
+(`go test -v`).
+
+| Go type of the constant | The statement writes | The driver is handed |
+|---|---|---|
+| signed integer (`int`, `int8` ... `int64`) | `$n::bigint` | `int64` |
+| unsigned integer (`uint` ... `uint64`) | `$n::numeric` | its decimal text |
+| `float32`, `float64` (a whole number too) | `$n::numeric` | its shortest decimal text |
+| `string` | `$n`, untyped | the string |
+| `bool` | `$n::boolean` | `bool` |
+| `time.Time` | `$n::timestamptz` | `time.Time` |
+| `[]byte` | `$n::bytea` | `[]byte` |
+| `nil` with `==` | `IS NULL` | nothing |
+| `nil` with another operator | `$n`, untyped | `nil`; a comparison with NULL is unknown, so no row |
+
+What the server answers, as observed:
+
+- **A number against a number** compares as numbers, whatever the types: an integer column
+  against `1.5` is a miss, not an error, and `2.0` as a `float64` finds the integer 2.
+- **A constant of another type than its column is a server error, never a wrong match**: a
+  number, a bool, a time or bytes against `boolean`, `date`, `timestamp`, `timestamptz`,
+  `uuid`, `jsonb` or `text`, a bool, a time or bytes against a number, and bytes against any
+  of the columns above (none is a `bytea`), are `42883` (no such operator).
+- **A string** is read by the server as the column's own type, so a date, a UUID or a JSON
+  document is matched by its text; a string that is no value of the type is `22P02` (`22007`
+  for a date or a time). Any string is a `text`.
+- **`time.Time` against `date` or `timestamp`** compares in the session's time zone: in UTC,
+  `2021-06-15T12:30:00Z` finds the timestamp `2021-06-15 12:30:00`; in `Asia/Tokyo` it does
+  not, and `03:30Z` does. Know the zone of your sessions.
+- **A bigint above 2^53** is matched exactly by an `int64`, a `uint64` or a string, and read
+  back exactly into an integer field (`NUMERIC` too, through a struct); a `float64` cannot
+  carry it (2^53+1 is 2^53), so it finds nothing. In a map, a `NUMERIC` is a `float64`, which
+  holds about 15 digits.
+- **`'Infinity'::numeric`** (PostgreSQL 14 and later) is matched by `math.Inf(1)`, `-Infinity`
+  by `math.Inf(-1)` and `NaN` by `math.NaN()`, and read back as those `float64` values.
+- **A float constant against a `real` column** is compared as `double precision`, as psql
+  does with a numeric literal: a `real` that holds `0.1` is `0.10000000149011612` when
+  widened, so `float32(0.1)` and `0.1` find nothing, while the string `"0.1"` (read by the
+  server as a `real`) and the `float64` the reader returned for the row do. Against `double
+  precision` both find it. Filter a `real` column by a string, or by a range.
+- **Arithmetic is on `double precision`**: `i4 * 2` on 2147483647 is `4294967294` (a
+  `float64`), where the server alone would refuse it with `22003`; a bigint beyond 2^53 loses
+  its last digits, and `/` is not an integer division.
+- **A `NUMERIC` with a fraction cannot be read into an integer field**: the read fails with
+  `column "num": value 1.5 is not an int64`; a whole `NUMERIC` can.
+- **ORDER BY** follows the column's collation, not Go's string order: with the database's
+  `en_US.utf8`, `São Paulo` sorts before `Shanghai`. A table whose order a caller compares
+  with Go's declares its text `COLLATE "C"`. NULLs sort first ascending and last descending;
+  a `NOT NULL` column has no `NULLS` clause, except on the nullable side of a `LEFT JOIN`.
+- **Joins**: a join of two text columns whose collations differ, neither the database's
+  default (`"C"` against `"POSIX"`), is accepted by the compiler (both are text) and planned
+  onto the server, which refuses it with `42P22` (could not determine which collation to
+  use). A text column with a collation of its own against one with the default joins.
+- **A select-all over a join** is one `SELECT *`, and the server lists the base source's
+  columns first, then each joined source's, in `FROM` order.
+- **A column named like its source's alias** (`SELECT "x" FROM "t" AS "x"`) is the column; a
+  name that is no column of the source, bare or qualified, is refused before the server,
+  because the server would read it as the whole row or as a function of it
+  (`f.to_jsonb`).
+- **Two aliases that fold to one name** (`Total` and `TOTAL`) are refused before the server in
+  `IdentifierFoldLower`; in `IdentifierExact` they are two columns.
+
+Known limits, each pinned by a test and reported to dalgo and dalgo2sql:
+
+- The **recordset reader** (`ExecuteQueryToRecordsetReader`, the path DataTug reads) holds no
+  NULL: a typed column returns the zero value of its type (`0`, `false`, `""`, the zero
+  time) for a NULL, so a caller cannot tell the two apart. The records reader returns `nil`.
+- The recordset reader **swallows a run-time error in the middle of the rows**: a cast that
+  fails at row 4 of 5 ends the read after row 3 with `dal.ErrNoMoreRecords`, and
+  `dal.ExecuteQueryAndReadAllToRecordset` returns three rows and no error (inside a read
+  transaction the caller sees only `commit unexpectedly resulted in rollback`). The records
+  reader returns the server's error. Do not read a query that can fail at run time through the
+  recordset reader until dalgo2sql returns `rows.Err()` there.
+- In `IdentifierFoldLower`, a **row-level access condition** that spells a field in another
+  case than the table stores it (`Country` for `country`) is not satisfied on `Exists` or
+  `Update`, which read the row into a map keyed by the stored names: the access layer compares
+  names exactly and the stored names are lower case, so it denies a row the policy allows. It
+  fails closed. Spell the names as stored.
+
 ### The connection a read holds
 
 The catalog query and the statement must see one session (each connection has its own
@@ -370,12 +455,21 @@ docker run -d \
   postgres:17
 ```
 
-Then run the tests:
+Then run the tests. Two sub-tests of the shared end2end suite (`TestEndToEnd`, which runs
+`end2end.TestDalgoDB` of dalgo in `IdentifierFoldLower`) cannot run in that mode, because the
+access layer compares names exactly and a key read returns the stored lower-case names
+(`TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames` asserts why). The Conformance
+job excludes them by name, and so must you:
 
 ```sh
 DALGO2POSTGRES_TEST_DSN='postgres://ovdb:ovdb@127.0.0.1:15432/ovdb?sslmode=disable' \
-    go test ./... -count=1 -v
+    go test ./... -count=1 -v \
+    -skip '^TestEndToEnd$/^query$/^access_conditions$/^(point_reads_follow_the_condition|writes_follow_the_condition)$'
 ```
+
+`TestEndToEnd` then reports those two as skips that name the reason; the Conformance job
+fails on any other skip, and on a test of the families `TestEndToEnd`, `TestTypeMatrixIntegration_`,
+`TestServerPinsIntegration_` and `TestStructuredQueryIntegration_` that does not run to a pass.
 
 ## PostgreSQL driver: `github.com/jackc/pgx/v5/stdlib` (pure Go, `CGO_ENABLED=0`)
 
