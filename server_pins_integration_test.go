@@ -266,7 +266,7 @@ func TestServerPinsIntegration_TextJoinKeysWithDifferentCollations(t *testing.T)
 			t.Errorf("plan = %+v, err = %v; want a plan that is not native: the server cannot compare the two", plan, err)
 		}
 		o := observe(t, f, q)
-		t.Logf("statements: %v\n    result: %s", statementsSent(f), o.result())
+		t.Logf("statements: %v\n    result: %s\n    rows: %v (error: %v)", statementsSent(f), o.result(), o.rows, o.err)
 		check(t, `collation "C" against "POSIX", in DALgo's engine`, o, rowsOf(1))
 		for _, statement := range statementsSent(f) {
 			if strings.Contains(statement, " JOIN ") {
