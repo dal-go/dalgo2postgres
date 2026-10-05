@@ -2,6 +2,9 @@
 
 PostgreSQL-specific DALgo driver. Wraps `github.com/dal-go/dalgo2sql` to provide the `dal.DB` surface, and adds PostgreSQL-native implementations of:
 
+- structured queries — compiled by dalgo2sql's typed PostgreSQL compiler with every value
+  bound and every name quoted, with filtering, ordering, grouping, aggregation and joins run
+  on the server (see "Structured queries")
 - `dbschema.SchemaReader` — schema introspection via `information_schema` and `pg_indexes`
 - `ddl.Applier` — PostgreSQL-flavored `CREATE TABLE` / `CREATE INDEX` / `DROP TABLE` / `ALTER TABLE`
 - `dal.ConcurrencyAware` — advertises `SupportsConcurrentConnections() = true`
@@ -34,6 +37,129 @@ if err != nil {
 defer db.Close()
 ```
 
+## Structured queries
+
+A structured DALgo query (`dal.From(...).NewQuery()...`) reaches PostgreSQL through
+dalgo2sql's typed PostgreSQL compiler. `NewDatabase` and `NewDatabaseWithOptions` force
+`dalgo2sql.DbOptions.StructuredQueryDialect` to `"postgres"` whatever the caller passes
+(the empty string, `"sqlite"` and `"mysql"` are replaced), so no structured query can reach
+dalgo2sql's legacy text emitter, which writes values into the statement. A
+`NativeStructuredQueryCompiler` that a caller puts in `DbOptions` is kept: dalgo2sql
+consults it before the dialect, and it then replaces the typed compiler for that database.
+
+A read takes two statements on one connection: one catalog query that lists the columns of
+every table the query names (type, NOT NULL, collation), then the one `SELECT` compiled from
+the answer. **No value is written into a statement**: every constant is a bound argument,
+and every name is double-quoted. An injection string is compared as text.
+
+### What runs on the server
+
+- **Filters**: constants of each Go type (a whole number is `$n::bigint`, an unsigned
+  integer or a float `$n::numeric`, a bool `$n::boolean`, a `time.Time` `$n::timestamptz`,
+  bytes `$n::bytea`, a string is untyped so the server reads it as a date, a UUID or an
+  enum where the column says so); `== nil`, `isNull` and `isNotNull`; `IN` and `NOT IN`,
+  an empty list included. A constant that does not match its column (a number against
+  text) is a server error, not an empty result.
+- **ORDER BY, LIMIT and OFFSET**: NULLs sort first ascending and last descending, as in
+  DALgo, and the `NULLS` clause is left out for a NOT NULL column. `LIMIT` and `OFFSET` are
+  bound.
+- **GROUP BY and HAVING with `COUNT`, `SUM`, `AVG`, `MIN` and `MAX`**, and `COUNT DISTINCT`
+  and `SUM DISTINCT`, as one statement. `SUM` and `AVG` come back as `float64`, as in
+  DALgo's own engine. dalgo2sql declares `AVG DISTINCT` too; this repository's tests do not
+  run it.
+- **Arithmetic** (`+`, `-`, `*`, `/`) on `double precision`: `3 / 2` is `1.5`, and a division
+  by zero is NULL.
+- **Select-all with exclusions**: the columns of the table, in table order, minus the
+  excluded ones in any case (in the mode that folds names).
+- **Joins**, when each `ON` pair has the same type category (numbers with numbers, text with
+  text) or the same type: one statement with the `JOIN`.
+- Tables, views, materialized views and partitioned tables, and columns of a domain over a
+  domain.
+
+### What falls back to DALgo's engine
+
+DALgo's own engine is bounded, in memory: it stops at 10,000 rows of a join and 100,000
+groups of an aggregation (dalgo v0.89.4), and past them returns an error, not a partial
+result.
+
+- **A query with a subquery** (`EXISTS`, a scalar subquery, a derived source): DALgo reads
+  each source with plain statements and combines them itself.
+- **A join the database declines**: the `ON` types differ (text with an integer, a boolean
+  with an integer), a key's type has no usable equality (`json`, `xml`, geometric types,
+  `oid`, the `reg*` types), or the compiler cannot write the query.
+- **`FIRST` and `LAST`** are refused with an error, not run anywhere: PostgreSQL promises
+  no row order for them, and this database declares no stable row order.
+
+### Identifier modes
+
+`IdentifierFoldLower`, the default, lower-cases every name before it quotes it, which is
+what this package's DDL stores: a database this package created is read back with any
+spelling (`Album`, `album` and `ALBUM` are one table). `IdentifierExact` writes every name
+as the query spells it, inside quotes, so `Album` and `album` are two tables; choose it to
+read a database whose tables were created with mixed-case names (DataTug does). Either mode
+keeps the names the query asked for in the result (`Title` comes back as `Title`); a
+select-all returns the names the catalog has.
+
+```go
+db, err := dalgo2postgres.NewDatabase(dsn, dalgo2postgres.WithIdentifierMode(dalgo2postgres.IdentifierExact))
+```
+
+The mode is one setting with two spellings: `WithIdentifierMode`, and dalgo2sql's
+`DbOptions.IdentifierCase` (`IdentifierCaseExact`, `IdentifierCaseFoldLower`) for
+`NewDatabaseWithOptions`. Either one decides it, and it decides how the schema reader
+matches names too. Giving both with different modes is an error, and so is a value this
+package does not define: the constructor returns it before it connects, so a mount that
+meant to fold names never runs in the exact mode. Do not put a field mask or an access check
+on a database that folds names unless the names it compares are folded first, or `Total`
+passes a mask that names `total`.
+
+A structured query reads the schema its collection reference names
+(`dal.NewQualifiedRootCollectionRef("sales", "Album", "")`), else the schemas the
+connection's `search_path` resolves. `WithSchema` affects only the schema reader.
+
+### Results and errors
+
+- A `NUMERIC` column is read as `float64` (pgx delivers it as text), `NaN` included. A
+  `float64` holds about 15 significant digits exactly, so a longer `NUMERIC` is
+  rounded. Dates and times are `time.Time`.
+- A table the database does not have is a `*dalgo2sql.TableNotFoundError` (it matches
+  `dalgo2sql.ErrTableNotFound`) that names the table and the nearest one that exists:
+  `failed to get SQL reader: table "album" not found; did you mean "Album"? Table names
+  are case-sensitive.` (the last sentence is there in `IdentifierExact` only). No statement
+  is sent for it.
+- A read inside a transaction (`RunReadonlyTransaction`) compiles the same way, and its
+  catalog query runs on the transaction.
+
+### The connection a read holds
+
+The catalog query and the statement must see one session (each connection has its own
+`search_path`), so a structured read takes one connection from the pool for both and keeps
+it until the reader is done: it is given back when the reader is closed, when its rows are
+read to the end, when a statement fails, and when the context of the read ends, as the pool
+does for a read of its own. A caller that stops reading without closing the reader and
+without ending its context keeps the connection. When the pool is exhausted, the next read
+waits for a connection and ends with its own context if none is free.
+
+When the context of a read ends while its statement waits on the server, the caller gets the
+context's own error (`context.DeadlineExceeded` or `context.Canceled`). When it ends before
+the statement is sent (before the catalog query, or between the two statements), the lease
+gives the connection back as the context ends, and the read can fail on the closed
+connection first: the error is then the pool's `sql: connection is already closed` or the
+driver's `driver: bad connection`, not the context's. Check the context's own `Err()`
+instead of matching the read's error against it. In every case the connection goes back to
+the pool.
+
+### Key reads and writes
+
+`Get`, `Exists`, `Set`, `Insert`, `Update`, `Delete` and their multi forms take a collection,
+field or primary-key name that is a plain identifier (ASCII letters, digits and underscores,
+not starting with a digit, at most 255 bytes), written as given and unquoted, so PostgreSQL
+folds it to lower case. Any other name is refused with an error that matches
+`dalgo2sql.ErrUnsafeName` before a statement is sent; a table whose name needs quoting cannot
+be addressed by key, whatever the identifier mode. A nested key addresses one table whose
+name joins the collections of the key and of its parents with an underscore, the key's own
+first (`pets_owners`), and the primary key is looked up in the recordset of that name.
+
 ## Schema reader options
 
 The schema reader (`ListCollections`, `DescribeCollection`, `ListIndexes`,
@@ -55,6 +181,8 @@ db, err := dalgo2postgres.NewDatabase(dsn,
   `album` and answers not found.
 - `IdentifierExact` looks the table up under exactly the name given, so a table
   created as `"Album"` is found as `Album` and not as `album`.
+- The same mode decides how structured queries write names (see "Identifier
+  modes"), so the reader and the queries never disagree about a name.
 - A nil option is ignored; an unknown `IdentifierMode` makes the constructor
   return an error before it connects.
 
@@ -79,11 +207,12 @@ over `citext` and an array of `citext` are not reported (treat such columns as
 inexact yourself), and `char(n)` equality, which ignores trailing spaces, is not
 covered.
 
-`WithSchema` and `IdentifierExact` affect **only the schema reader**. The DDL
-this package writes still lower-cases every name (see "Identifier case folding"
-below), and record operations (`Get`, `Insert`, queries) address tables as
-`dalgo2sql` renders them and resolve them through the connection's
-`search_path`.
+`WithSchema` affects **only the schema reader**. The DDL this package writes
+still lower-cases every name (see "Identifier case folding" below), and key
+reads and writes and structured queries resolve tables through the connection's
+`search_path`, unless a collection reference names its schema. `IdentifierExact`
+does not change the DDL or key reads and writes either: they keep their rules
+(see "Key reads and writes").
 
 `ListReferrers` returns one `Referrer` per foreign key, with the referencing
 columns in key order. A table with two foreign keys into the queried table is
@@ -113,10 +242,11 @@ when they cannot open or reach the server. Its text is built, never filtered:
 - the **host, port and database name** the driver itself parsed, each only when it
   passes a strict check and is not repeated from a secret (below).
 
-Nothing but the host, port and database name the driver parsed, and no message of
-the driver or the server (not a setting name, not a server's "role ... does not
-exist"), is copied into it: those hold the user name and the password. For the same reason the driver's
-error is not reachable: `errors.Unwrap` returns nil. Callers branch on the fields:
+Nothing of the connection string but the host, port and database name the driver
+parsed, and no message of the driver or the server (not a setting name, not a
+server's "role ... does not exist"), is copied into it: those hold the user name
+and the password. For the same reason the driver's error is not reachable:
+`errors.Unwrap` returns nil. Callers branch on the fields:
 
 ```go
 var connErr *dalgo2postgres.ConnectionError
@@ -157,7 +287,9 @@ What this means for a string you write:
   single quotes. A keyword string whose host, user or database value holds an
   equals sign (the sign of a pair that a semicolon, comma or ampersand failed to
   separate, as in `host=h;user=u;password=p`) is refused before any connection is
-  attempted (`FailureMisread`); the error names nothing of it.
+  attempted (`FailureMisread`); the error names nothing of it. A name that really
+  holds an equals sign must be given in the URL form, percent-encoded
+  (`postgres://cn%3Dapp@h/d`).
 - Write a URL that **starts exactly** with `postgres://` or `postgresql://` and
   percent-encode a password with a special character (`p%2Fss`, not `p/ss`). A URL
   in literal quotes (as `docker --env-file` keeps them), with a leading space, in
@@ -220,14 +352,15 @@ This package uses **`github.com/jackc/pgx/v5/stdlib`** — a pure-Go PostgreSQL
 driver exposed through the standard `database/sql` interface (driver name `"pgx"`).
 No C toolchain is required; the package compiles with `CGO_ENABLED=0`.
 
-### Placeholder dialect
+### Placeholder dialect and structured query dialect
 
 PostgreSQL requires positional parameter markers `$1`, `$2`, … rather than the
 `?` style used by SQLite and MySQL. `dalgo2postgres` automatically sets
 `dalgo2sql.DbOptions.Placeholder = dalgo2sql.PlaceholderDollar` so that all
-SQL emitted through `dalgo2sql` uses the correct form. This field was added to
-`dalgo2sql` as a minimal backward-compatible extension; the zero value
-(`PlaceholderQuestion`) preserves the existing behavior for all other drivers.
+SQL emitted through `dalgo2sql` uses the correct form, and
+`dalgo2sql.DbOptions.StructuredQueryDialect = "postgres"` so that structured
+queries are compiled by the typed PostgreSQL compiler (see "Structured
+queries"). Both are forced: a caller's value is replaced.
 
 ### Duplicate-key classification
 
@@ -259,14 +392,16 @@ check.
 ### Identifier case folding
 
 PostgreSQL folds unquoted identifiers to lower case. `dalgo2postgres` quotes
-identifiers (so reserved words and otherwise-illegal names stay usable) but
-**lower-cases them first**, so the case-preserving quoted form agrees with the
-unquoted references that `dalgo2sql`'s DML and dalgo's structured-query
-rendering emit (which PostgreSQL also folds to lower case). DDL and DML thus
-always address the same physical identifier.
+identifiers in its DDL (so reserved words and otherwise-illegal names stay usable)
+but **lower-cases them first**, so the case-preserving quoted form agrees with the
+unquoted references that key reads and writes emit (which PostgreSQL also folds to
+lower case). DDL and key reads and writes thus always address the same physical
+identifier. Structured queries quote every name too, and in the default mode
+(`IdentifierFoldLower`) lower-case it first, which is the same identifier; in
+`IdentifierExact` they write the name as the query spells it (see "Identifier
+modes").
 
-Consequence: collection (table) and field (column) names are stored
-lower-cased. Typed clients round-trip transparently because `encoding/json`
-unmarshalling is case-insensitive; consumers reading raw records observe
-lower-cased field names. Fully case-preserving storage would require dalgo's
-structured-query `String()` to quote column identifiers, tracked upstream.
+Consequence: collection (table) and field (column) names created through this
+package are stored lower-cased. Typed clients round-trip transparently because
+`encoding/json` unmarshalling is case-insensitive; consumers reading raw records
+observe lower-cased field names.

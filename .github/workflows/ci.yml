@@ -135,6 +135,9 @@ jobs:
             GroupByHavingAndAggregates \
             Join \
             ArithmeticWithTheCast \
+            CountDistinct \
+            PlansJoinsOnTheServerOrInDALgo \
+            SubqueryRunsInDALgoOverPlainReads \
             SelectAllWithAnExclusionFoldLower \
             UnknownTableIsNotFoundWithASuggestion \
             ExactModeAndQualifiedSchema \

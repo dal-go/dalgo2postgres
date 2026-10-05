@@ -3,6 +3,7 @@ package dalgo2postgres
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"reflect"
 	"strings"
@@ -75,6 +76,12 @@ func (q *queryTrace) onEnd(hook func(statement string)) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.atEnd = hook
+}
+
+// isCatalogStatement says whether statement is dalgo2sql's catalog lookup. It holds
+// JOINs of its own, so a test that looks for the JOIN of a query skips it.
+func isCatalogStatement(statement string) bool {
+	return strings.HasPrefix(statement, "WITH RECURSIVE s(name)")
 }
 
 // sent returns the statements recorded so far.
@@ -423,12 +430,12 @@ func TestStructuredQueryIntegration_Join(t *testing.T) {
 	}
 	var joined int
 	for _, sent := range f.trace.sent() {
-		if strings.Contains(sent.sql, " JOIN ") {
+		if !isCatalogStatement(sent.sql) && strings.Contains(sent.sql, " JOIN ") {
 			joined++
 		}
 	}
 	if joined != 1 {
-		t.Errorf("statements = %v, want exactly one that joins on the server", f.trace.sent())
+		t.Errorf("%d statements join on the server, want exactly one: %v", joined, f.trace.sent())
 	}
 }
 
@@ -451,6 +458,85 @@ func TestStructuredQueryIntegration_ArithmeticWithTheCast(t *testing.T) {
 		rows := f.rows(t, albumFrom().NewQuery().Where(dal.WhereField("AlbumId", dal.Equal, tc.albumID)).SelectColumns(columns...))
 		if want := []map[string]any{tc.want}; !reflect.DeepEqual(rows, want) {
 			t.Errorf("album %d: rows = %v, want %v", tc.albumID, rows, want)
+		}
+	}
+}
+
+// DISTINCT: COUNT(DISTINCT x) is counted by the server too, in the same statement
+// as the other aggregates (see the group test above for the plain forms).
+func TestStructuredQueryIntegration_CountDistinct(t *testing.T) {
+	f := openQueryFixture(t, "test_sq_distinct", IdentifierFoldLower, albumDDL)
+	f.trace.reset()
+	rows := f.rows(t, albumFrom().NewQuery().GroupBy(field("ArtistId")).OrderBy(dal.AscendingField("ArtistId")).
+		SelectColumns(dal.Column{Expression: field("ArtistId")}, dal.CountDistinctAs(field("Code"), "codes"), dal.SumDistinctAs(field("AlbumId"), "ids")))
+	want := []map[string]any{
+		{"ArtistId": int64(1), "codes": int64(2), "ids": 3.0},
+		{"ArtistId": int64(2), "codes": int64(2), "ids": 12.0},
+	}
+	if !reflect.DeepEqual(rows, want) {
+		t.Errorf("rows = %v, want %v", rows, want)
+	}
+	if got := f.trace.last(t); !strings.Contains(got, "COUNT(DISTINCT") || !strings.Contains(got, "SUM(DISTINCT") {
+		t.Errorf("statement = %s, want the DISTINCT aggregates written for the server", got)
+	}
+}
+
+// A join runs on the server when each ON pair has the same type category (numbers
+// with numbers) and is left to DALgo's own engine when the types differ (text with
+// an integer): the plan DALgo makes from the database's answer.
+func TestStructuredQueryIntegration_PlansJoinsOnTheServerOrInDALgo(t *testing.T) {
+	f := openQueryFixture(t, "test_sq_plans", IdentifierFoldLower, albumDDL)
+	joiner, ok := dal.As[dal.NativeJoinProvider](f.db.DB)
+	if !ok {
+		t.Fatal("the backend declares no native join provider")
+	}
+	joinQuery := func(left, right string) dal.StructuredQuery {
+		on := dal.NewComparison(dal.NewFieldRef("a", left), dal.Equal, dal.NewFieldRef("r", right))
+		return dal.From(dal.NewRootCollectionRef("Album", "a")).
+			Join(dal.NewJoinedSource(dal.NewRootCollectionRef("Artist", "r"), dal.JoinInner, on)).
+			NewQuery().SelectColumns(dal.Column{Expression: dal.NewFieldRef("r", "Name"), Alias: "artist"})
+	}
+	for _, tc := range []struct {
+		name        string
+		left, right string
+		want        dal.JoinStrategy
+	}{
+		{"integer to integer", "ArtistId", "ArtistId", dal.JoinNative},
+		{"numeric to integer: one category", "Price", "ArtistId", dal.JoinNative},
+		{"text to integer: declined", "Title", "ArtistId", dal.JoinGeneric},
+		{"boolean to integer: declined", "InStock", "ArtistId", dal.JoinGeneric},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan, err := dal.PlanJoin(context.Background(), joinQuery(tc.left, tc.right), joiner)
+			if err != nil || plan.Strategy != tc.want {
+				t.Errorf("plan = %+v, err = %v; want %s", plan, err, tc.want)
+			}
+		})
+	}
+}
+
+// A query with a subquery is run by DALgo's own engine over plain reads of its
+// sources: no statement the server receives holds the subquery.
+func TestStructuredQueryIntegration_SubqueryRunsInDALgoOverPlainReads(t *testing.T) {
+	f := openQueryFixture(t, "test_sq_subquery", IdentifierFoldLower, albumDDL)
+	alice := dal.From(dal.NewRootCollectionRef("Artist", "r")).NewQuery().
+		Where(
+			dal.NewComparison(dal.NewFieldRef("r", "ArtistId"), dal.Equal, dal.NewFieldRef("a", "ArtistId")),
+			dal.NewComparison(dal.NewFieldRef("r", "Name"), dal.Equal, dal.NewConstant("Alice")),
+		).
+		SelectColumns(dal.Column{Expression: dal.NewFieldRef("r", "Name")})
+	q := dal.From(dal.NewRootCollectionRef("Album", "a")).NewQuery().
+		Where(dal.NewExistsCondition(alice)).
+		OrderBy(dal.Ascending(dal.NewFieldRef("a", "AlbumId"))).
+		SelectColumns(dal.Column{Expression: dal.NewFieldRef("a", "Title"), Alias: "Title"})
+	f.trace.reset()
+	rows := f.rows(t, q)
+	if want := []any{"First", "Second"}; !reflect.DeepEqual(titlesOf(rows), want) {
+		t.Errorf("titles = %v, want %v", titlesOf(rows), want)
+	}
+	for _, sent := range f.trace.sent() {
+		if !isCatalogStatement(sent.sql) && (strings.Contains(strings.ToUpper(sent.sql), "EXISTS") || strings.Contains(sent.sql, " JOIN ")) {
+			t.Errorf("a statement carries the subquery: %s", sent.sql)
 		}
 	}
 }
@@ -506,7 +592,7 @@ func TestStructuredQueryIntegration_UnknownTableIsNotFoundWithASuggestion(t *tes
 		if target.Name != "Albums" || target.SuggestedName != "album" || target.CaseSensitive {
 			t.Errorf("error = %+v, want Albums not found, suggesting album, not case-sensitive", *target)
 		}
-		if want := `table "Albums" not found; did you mean "album"?`; err.Error() != want {
+		if want := `failed to get SQL reader: table "Albums" not found; did you mean "album"?`; err.Error() != want {
 			t.Errorf("message = %q, want %q", err, want)
 		}
 	})
@@ -518,7 +604,7 @@ func TestStructuredQueryIntegration_UnknownTableIsNotFoundWithASuggestion(t *tes
 		if target.SuggestedName != "Album" || !target.CaseSensitive {
 			t.Errorf("error = %+v, want album not found, suggesting Album, case-sensitive", *target)
 		}
-		if want := `table "album" not found; did you mean "Album"? Table names are case-sensitive.`; err.Error() != want {
+		if want := `failed to get SQL reader: table "album" not found; did you mean "Album"? Table names are case-sensitive.`; err.Error() != want {
 			t.Errorf("message = %q, want %q", err, want)
 		}
 	})
@@ -633,12 +719,22 @@ func TestStructuredQueryIntegration_ReadsRunOnOneLeasedConnection(t *testing.T) 
 }
 
 // A context that ends before the catalog lookup, between it and the statement, or
-// while the statement waits on the server returns the connection to the pool and
-// gives the caller the context's own error.
+// while the statement waits on the server returns the connection to the pool.
+//
+// What the caller sees differs. While the statement waits, it is the context's own
+// error (context.DeadlineExceeded here). Before the statement is sent, the lease gives
+// the connection back the moment the context ends, so the read can fail on the closed
+// connection before the driver looks at the context: the caller sees the pool's
+// `sql: connection is already closed` or the driver's `driver: bad connection`, or the
+// context's error when the driver is first. CI saw `driver: bad connection` at the start
+// of the catalog lookup and `sql: connection is already closed` between the two; a caller
+// must check its own context (ctx.Err()) rather than rely on errors.Is(err, ctx.Err()).
 func TestStructuredQueryIntegration_ContextEndsBetweenAndDuringTheStatements(t *testing.T) {
 	testDSN(t) // a skip shows on this test, not only on its subtests
-	isCatalog := func(statement string) bool { return strings.HasPrefix(statement, "WITH RECURSIVE s(name)") }
 	query := func() dal.StructuredQuery { return albumQuery().SelectColumns(titleColumn()) }
+	endedReadError := func(err error) bool {
+		return errors.Is(err, context.Canceled) || errors.Is(err, sql.ErrConnDone) || errors.Is(err, driver.ErrBadConn)
+	}
 	assertPoolIsFree := func(t *testing.T, f *queryFixture) {
 		t.Helper()
 		if got := f.sqlDB.Stats().InUse; got != 0 {
@@ -656,14 +752,15 @@ func TestStructuredQueryIntegration_ContextEndsBetweenAndDuringTheStatements(t *
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		f.trace.onStart(func(statement string) {
-			if isCatalog(statement) {
+			if isCatalogStatement(statement) {
 				cancel()
 			}
 		})
 		_, err := f.db.ExecuteQueryToRecordsReader(ctx, query())
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("error = %v, want one matching context.Canceled", err)
+		if !endedReadError(err) {
+			t.Errorf("error = %v, want the context's or the closed connection's", err)
 		}
+		t.Logf("the caller saw: %v", err)
 		assertPoolIsFree(t, f)
 	})
 	t.Run("between the catalog lookup and the statement", func(t *testing.T) {
@@ -671,16 +768,17 @@ func TestStructuredQueryIntegration_ContextEndsBetweenAndDuringTheStatements(t *
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		f.trace.onEnd(func(statement string) {
-			if isCatalog(statement) {
+			if isCatalogStatement(statement) {
 				cancel()
 			}
 		})
 		_, err := f.db.ExecuteQueryToRecordsReader(ctx, query())
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("error = %v, want one matching context.Canceled", err)
+		if !endedReadError(err) {
+			t.Errorf("error = %v, want the context's or the closed connection's", err)
 		}
+		t.Logf("the caller saw: %v", err)
 		for _, sent := range f.trace.sent() {
-			if !isCatalog(sent.sql) {
+			if !isCatalogStatement(sent.sql) {
 				t.Errorf("the statement %q was sent after the context ended", sent.sql)
 			}
 		}
@@ -705,7 +803,7 @@ func TestStructuredQueryIntegration_ContextEndsBetweenAndDuringTheStatements(t *
 			t.Errorf("error = %v, want one matching context.DeadlineExceeded", err)
 		}
 		sent := f.trace.sent()
-		if len(sent) != 2 || !isCatalog(sent[0].sql) || isCatalog(sent[1].sql) {
+		if len(sent) != 2 || !isCatalogStatement(sent[0].sql) || isCatalogStatement(sent[1].sql) {
 			t.Errorf("statements = %v, want the deadline to end the read while the second statement waited", sent)
 		}
 		assertPoolIsFree(t, f)

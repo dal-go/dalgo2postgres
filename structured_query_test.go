@@ -532,6 +532,7 @@ func TestNewDatabase_StructuredReadLeasesOneConnection(t *testing.T) {
 	})
 	t.Run("back when the context ends, with no Close", func(t *testing.T) {
 		sqlDB, mock := newStructuredMock(t)
+		sqlDB.SetMaxOpenConns(1) // the one connection is the reader's until the lease gives it back
 		db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
 		expectRead(mock)
 		ctx, cancel := context.WithCancel(context.Background())
@@ -540,13 +541,46 @@ func TestNewDatabase_StructuredReadLeasesOneConnection(t *testing.T) {
 			t.Fatal(err)
 		}
 		cancel()
-		deadline := time.Now().Add(5 * time.Second)
-		for inUse(sqlDB) != 0 && time.Now().Before(deadline) {
-			time.Sleep(5 * time.Millisecond)
+		// Asking the pool for a connection waits until the lease has given the reader's
+		// back: it returns once the context's end has been handled, or fails after the
+		// bound if the lease never lets go.
+		waiting, stopWaiting := context.WithTimeout(context.Background(), 30*time.Second)
+		defer stopWaiting()
+		conn, err := sqlDB.Conn(waiting)
+		if err != nil {
+			t.Fatalf("the connection was not given back after the context ended: %v", err)
 		}
-		if got := inUse(sqlDB); got != 0 {
-			t.Errorf("connections in use after the context ended = %d, want 0", got)
-		}
+		_ = conn.Close()
 		_ = reader.Close()
 	})
+}
+
+// What the database declares it runs on the server: grouping, HAVING, ORDER BY and the
+// aggregates with their DISTINCT forms, and no more. FIRST, LAST, a group-key order and
+// a stable row order are not promised by PostgreSQL, so they stay false, and DALgo
+// plans a grouped query natively and refuses FIRST and LAST.
+func TestNewDatabase_DeclaresWhatItRunsOnTheServer(t *testing.T) {
+	sqlDB, _ := newStructuredMock(t)
+	db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
+	provider, ok := dal.As[dal.QueryCapabilitiesProvider](db.DB)
+	if !ok {
+		t.Fatal("the backend declares no query capabilities")
+	}
+	want := dal.QueryCapabilities{
+		GroupBy: true, Having: true, OrderBy: true,
+		Aggregate: dal.AggregateCapabilities{
+			Count: true, CountDistinct: true, Sum: true, SumDistinct: true, Avg: true, AvgDistinct: true, Min: true, Max: true,
+		},
+	}
+	got := provider.QueryCapabilities()
+	if got != want {
+		t.Errorf("capabilities = %+v, want %+v", got, want)
+	}
+	grouped := albumFrom().NewQuery().GroupBy(field("Title")).SelectColumns(titleColumn(), dal.SumAs(field("Price"), "total"))
+	if plan, err := dal.PlanAggregation(grouped, got); err != nil || plan.Strategy != dal.AggregationNative {
+		t.Errorf("plan = %+v, err = %v; want a native aggregation", plan, err)
+	}
+	if _, ok := dal.As[dal.NativeJoinProvider](db.DB); !ok {
+		t.Error("the backend declares no native join provider")
+	}
 }
