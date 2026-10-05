@@ -150,6 +150,14 @@ connection's `search_path` resolves. `WithSchema` affects only the schema reader
   adds, which is not in the record's data. A query that reads into a record of its own
   (`SelectIntoRecord`) fills that record. With no primary key configured, the ID is the
   placeholder `__dalgo_record_id`, not an identity of the row.
+- A recordset is found by the source name **as the query spells it**, also in
+  `IdentifierFoldLower`, which folds the name only in the statement. A recordset registered as
+  `album` is not found for a query that spells `Album`: the statement reads the right table,
+  yet every record's ID is the placeholder `__dalgo_record_id`, with no error. Register the
+  recordset under the spelling your queries use.
+- The rows of a grouped query (one with `GroupBy` or an aggregate) are keyed by their
+  ordinal in the result (`"0"`, `"1"`, ...), whether a primary key is configured or not: a
+  group is not a row of the table, so no key is read and no hidden column is added.
 
 ### The connection a read holds
 

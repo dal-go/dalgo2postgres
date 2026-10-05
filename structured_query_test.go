@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -882,6 +883,55 @@ func TestNewDatabase_RecordsCarryTheirKey(t *testing.T) {
 		}
 		if data := got[0].Data(); !reflect.DeepEqual(data, map[string]any{"Name": "One"}) {
 			t.Errorf("data = %v, want only Name", data)
+		}
+	})
+	// dalgo2sql looks the recordset up by the source name exactly as the query spells it,
+	// also in the mode that folds names: the statement reads the table (it writes
+	// "widgets" whatever the case), but the recordset registered as widgets is not found
+	// for a query that spells Widgets, so no key is read and every record carries the
+	// placeholder, silently. Register the recordset under the spelling the queries use.
+	t.Run("the recordset is found by the source name as the query spells it", func(t *testing.T) {
+		spelledWithACapital := dal.From(dal.NewRootCollectionRef("Widgets", "")).NewQuery().SelectColumns(nameColumn)
+		got := run(t, keyOptions("widgets"), idAndName, `SELECT "name" FROM "widgets"`,
+			sqlmock.NewRows([]string{"name"}).AddRow("One").AddRow("Two"), spelledWithACapital)
+		if len(got) != 2 {
+			t.Fatalf("records = %d, want 2", len(got))
+		}
+		for i, record := range got {
+			if key := record.Key(); key.Collection() != "Widgets" || key.ID != "__dalgo_record_id" {
+				t.Errorf("record %d: key = %v, want Widgets/__dalgo_record_id: the recordset registered as widgets is not the one a query spelled Widgets finds", i, key)
+			}
+		}
+	})
+	// A grouped row is no row of the table, so it has no key to read: its ID is its
+	// ordinal in the result, "0", "1", ..., with a primary key configured or not, and the
+	// statement adds no hidden column for it.
+	t.Run("the rows of a grouped query are keyed by their ordinal", func(t *testing.T) {
+		grouped := widgets().GroupBy(dal.NewFieldRef("", "Name")).SelectColumns(nameColumn,
+			dal.Column{Expression: dal.NewAggregate(dal.COUNT, false, dal.Star()), Alias: "n"})
+		for _, tc := range []struct {
+			name string
+			opts dalgo2sql.DbOptions
+		}{
+			{"with a primary key configured", keyOptions("widgets")},
+			{"with none", dalgo2sql.DbOptions{}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				got := run(t, tc.opts, idAndName, `SELECT "name", COUNT(*) AS "n" FROM "widgets" GROUP BY "name"`,
+					sqlmock.NewRows([]string{"name", "n"}).AddRow("One", int64(2)).AddRow("Two", int64(1)).AddRow("Three", int64(5)),
+					grouped)
+				if len(got) != 3 {
+					t.Fatalf("records = %d, want 3", len(got))
+				}
+				for i, record := range got {
+					if key := record.Key(); key.Collection() != "widgets" || key.ID != strconv.Itoa(i) {
+						t.Errorf("record %d: key = %v, want widgets/%d", i, key, i)
+					}
+				}
+				if data := got[1].Data(); !reflect.DeepEqual(data, map[string]any{"Name": "Two", "n": int64(1)}) {
+					t.Errorf("data = %v, want the group's columns only", data)
+				}
+			})
 		}
 	})
 	t.Run("a record of the query's own is filled and keyed", func(t *testing.T) {

@@ -208,6 +208,55 @@ func TestIdentifierModeFollowsTheResolvedSetting(t *testing.T) {
 	}
 }
 
+// An Option is a func over *Database, so it can set any field of the value it is given,
+// the embedded dal.DB included. The constructor builds the Database, applies the options,
+// and only then assigns the handles and the mode it resolved, so an option written by a
+// caller cannot swap the dalgo2sql database for one built with no dialect (whose
+// structured queries would reach the legacy text emitter), nor the *sql.DB under it, nor
+// the identifier mode the settings resolved. The option below does all three: with the
+// options applied last, the first statement the database sends would be the legacy
+// emitter's and not the typed compiler's catalog query.
+func TestNewDatabaseFromSQL_AnOptionCannotSwapTheHandlesTheConstructorAssigns(t *testing.T) {
+	sqlDB, mock := newStructuredMock(t)
+	otherDB, otherMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := otherMock.ExpectationsWereMet(); err != nil {
+			t.Errorf("the handle an option swapped in was used: %v", err)
+		}
+		_ = otherDB.Close()
+	})
+	legacy := dalgo2sql.NewDatabase(otherDB, dal.NewSchema(nil, nil), dalgo2sql.DbOptions{})
+	swap := func(d *Database) {
+		d.DB = legacy
+		d.sqlDB = otherDB
+		d.identifierMode = IdentifierExact
+	}
+
+	db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{}, swap)
+
+	if db.sqlDB != sqlDB {
+		t.Error("an option replaced the *sql.DB under the Database")
+	}
+	if got := db.resolveName("Album"); got != "album" {
+		t.Errorf("resolveName(Album) = %q, want album: an option replaced the identifier mode the settings resolved", got)
+	}
+	mock.ExpectQuery(catalogStatement).WithArgs(`"album"`).WillReturnRows(albumCatalog(`"album"`))
+	mock.ExpectQuery(`SELECT "title" FROM "album" WHERE "albumid" = $1::bigint`).
+		WithArgs(int64(7)).
+		WillReturnRows(sqlmock.NewRows([]string{"title"}).AddRow("Seven"))
+	reader, err := db.ExecuteQueryToRecordsReader(context.Background(),
+		albumFrom().NewQuery().Where(dal.WhereField("AlbumId", dal.Equal, 7)).SelectColumns(titleColumn()))
+	if err != nil {
+		t.Fatalf("ExecuteQueryToRecordsReader: %v", err)
+	}
+	if rows := readAll(t, reader); len(rows) != 1 || rows[0]["Title"] != "Seven" {
+		t.Errorf("rows = %v, want one row titled Seven, read by the typed compiler's statement", rows)
+	}
+}
+
 func TestNewDatabaseWithOptions_RejectsUnknownIdentifierModeBeforeConnecting(t *testing.T) {
 	// The DSN is unusable on purpose: the error must come from the option check,
 	// before any connection is attempted.

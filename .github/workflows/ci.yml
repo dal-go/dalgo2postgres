@@ -42,17 +42,16 @@ jobs:
       code_coverage: true
       # Backstop floor. This job runs without a database, so the DB-backed
       # tests skip here and only the unit and sqlmock tests count; the real
-      # floor is in the integration job below. Measured on this branch's head
-      # merged with main, which holds NonDeterministicTextColumns, as CI runs
-      # it (`go test -count=1 -cover ./...`): 65.4%. The floor stays at 62: the
-      # margin is wide enough for a pull request that adds code only a live
-      # server tests. With both version tests skipped
+      # floor is in the integration job below. Measured as CI runs it
+      # (`go test -count=1 -cover ./...`): 71.9% on the head of pull request
+      # 13 and on this branch's head. The floor is 71, that value rounded down,
+      # which leaves less than a point in which coverage can fall unnoticed
+      # while a pull request still has room to add code only a live server
+      # tests. With both version tests skipped
       # (-skip 'TestResolveVersion|TestAdapterReportsVersion') the total is
-      # 63.9%, and with only TestAdapterReportsVersion skipped 65.3%, so this
-      # floor does not protect the version tests; raise it to 65 once the
-      # wave's remaining pull requests have landed, to make it do so. Must rise
-      # with the PostgreSQL wave; never lower it.
-      min_test_coverage_percent: 62
+      # 70.4%, so this floor also protects the version tests, as the floor of 62
+      # did not. Must rise with the PostgreSQL wave; never lower it.
+      min_test_coverage_percent: 71
 
   # Runs the shared dalgotest conformance suite against a real PostgreSQL.
   #
@@ -155,12 +154,10 @@ jobs:
           DALGO2POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/dalgo_test?sslmode=disable
       - name: Integration coverage floor
         # The floor that matters: this is the only job where the database
-        # tests run. Measured on this branch's head merged with main, which
-        # holds NonDeterministicTextColumns and its integration test, as CI
-        # runs it (CI log "Integration coverage: 86.7%"). The floor is that
-        # value rounded down. Must rise with the PostgreSQL wave; never lower
-        # it.
+        # tests run. Measured as CI runs it (CI log "Integration coverage"):
+        # 90.0% on the head of pull request 13. The floor is 89, that value
+        # rounded down. Must rise with the PostgreSQL wave; never lower it.
         run: |
           total=$(go tool cover -func=profile.cov | awk '$1 == "total:" {print $3}' | sed 's/%//')
           echo "Integration coverage: $total%"
-          awk -v t="$total" -v m="86" 'BEGIN { if (t < m) { print "Integration coverage " t "% is below required " m "%"; exit 1 } }'
+          awk -v t="$total" -v m="89" 'BEGIN { if (t < m) { print "Integration coverage " t "% is below required " m "%"; exit 1 } }'
