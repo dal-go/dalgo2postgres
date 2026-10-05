@@ -184,3 +184,36 @@ func TestConnectionFailureIntegration_StatementErrorsKeepTheServersMessageAndDet
 		})
 	}
 }
+
+// A session the server ends in the middle of a transaction (an administrator terminates the
+// backend, as a shutdown does) is a connection error from both transaction methods: whichever way
+// the end reaches the caller (the answer to the statement, the end of the stream, the commit that
+// finds the connection closed), and whether the worker returns the statement's error or not, and
+// the rollback that follows cannot succeed. The worker here ends its own session.
+func TestConnectionFailureIntegration_ASessionTheServerEndsInATransaction(t *testing.T) {
+	testDSN(t)
+	for _, kind := range transactionKinds() {
+		t.Run(kind.name, func(t *testing.T) {
+			db := lazyDatabaseWith(t, func(*pgx.ConnConfig) {})
+			err := kind.run(db, func(ctx context.Context, tx dal.ReadSession) error {
+				reader, err := tx.ExecuteQueryToRecordsReader(ctx, dal.NewTextQuery("SELECT pg_terminate_backend(pg_backend_pid())", nil))
+				if err != nil {
+					return err
+				}
+				defer func() { _ = reader.Close() }()
+				for {
+					if _, err := reader.Next(); err != nil {
+						if errors.Is(err, dal.ErrNoMoreRecords) {
+							return nil
+						}
+						return err
+					}
+				}
+			})
+			failure := assertAClassifiedConnectionError(t, err)
+			if failure != nil && failure.Kind == FailureServer && failure.SQLState != "57P01" {
+				t.Errorf("SQLSTATE = %q, want 57P01 (admin_shutdown) when the server's answer reached the caller", failure.SQLState)
+			}
+		})
+	}
+}

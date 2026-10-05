@@ -22,8 +22,10 @@ import (
 type FailureKind int
 
 const (
-	// FailureOther is any failure the kinds below do not describe. It is the
-	// zero value.
+	// FailureOther is any failure the kinds below do not describe, such as a
+	// connection that was open and ended without an error of the network (the end
+	// of the stream, a connection the driver had already closed). It is the zero
+	// value.
 	FailureOther FailureKind = iota
 	// FailureInvalidDSN: the driver cannot parse the connection string, or a file
 	// or service the string names cannot be read.
@@ -34,7 +36,7 @@ const (
 	// refused before any connection is attempted.
 	FailureMisread
 	// FailureNetwork: the server could not be reached (name resolution, refused or
-	// reset connection).
+	// reset connection, a broken pipe).
 	FailureNetwork
 	// FailureTLS: the TLS handshake with the server failed.
 	FailureTLS
@@ -86,7 +88,9 @@ func (k FailureKind) sentence(sqlState string) string {
 // [NewDatabase] and [NewDatabaseWithOptions] when the connection to PostgreSQL
 // cannot be opened or verified, and by every other call of this package (a read, a
 // write, a transaction, the schema reader, a reader a query returned) when its
-// connection fails later, for example when the pool must make a connection again.
+// connection fails later, for example when the pool must make a connection again,
+// or when a connection that was open is lost (a reset or a timeout of the socket,
+// the end of the stream, a connection the driver had already closed).
 //
 // Its text is built only from a fixed sentence chosen by Kind and from the parts
 // below that passed a strict check. Nothing of the connection string but those
@@ -296,23 +300,30 @@ func isTLS(err error) bool {
 // anyInTree reports whether match is true for err or for any error reachable from
 // it through Unwrap() error or Unwrap() []error.
 func anyInTree(err error, match func(error) bool) bool {
+	return findInTree(err, match) != nil
+}
+
+// findInTree returns the first error, err itself or one reachable from it through
+// Unwrap() error or Unwrap() []error (depth first, in the order errors.As walks), for which
+// match is true, and nil when there is none.
+func findInTree(err error, match func(error) bool) error {
 	if err == nil {
-		return false
+		return nil
 	}
 	if match(err) {
-		return true
+		return err
 	}
 	switch wrapped := err.(type) {
 	case interface{ Unwrap() error }:
-		return anyInTree(wrapped.Unwrap(), match)
+		return findInTree(wrapped.Unwrap(), match)
 	case interface{ Unwrap() []error }:
 		for _, inner := range wrapped.Unwrap() {
-			if anyInTree(inner, match) {
-				return true
+			if found := findInTree(inner, match); found != nil {
+				return found
 			}
 		}
 	}
-	return false
+	return nil
 }
 
 func isNetwork(err error) bool {
@@ -393,7 +404,15 @@ func isURL(dsn string) bool {
 // deadline passed. It is the one place a *ConnectionError is made from a cause, for the
 // open and for every later call.
 func newConnectionError(op string, cause error) *ConnectionError {
-	kind, sqlState := classify(cause)
+	return newConnectionErrorFrom(op, cause, cause)
+}
+
+// newConnectionErrorFrom is [newConnectionError] for a cause that holds more than the failure of
+// the connection: the kind and the SQLSTATE code are those of failure, the error inside cause that
+// made it one (another server error in the same chain, a statement's, does not give its code), and
+// whether the context was canceled or its deadline passed is read from the whole cause.
+func newConnectionErrorFrom(op string, failure, cause error) *ConnectionError {
+	kind, sqlState := classify(failure)
 	return &ConnectionError{
 		Kind:     kind,
 		SQLState: sqlState,

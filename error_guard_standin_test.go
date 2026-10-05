@@ -6,9 +6,12 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"os"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -95,6 +98,42 @@ func serverAnswers(code, message string) pgconn.DialFunc {
 	}
 }
 
+// droppedFailure is how a connection that was established and then lost fails, in the shape pgx or
+// the operating system gives it: a reset or a timeout of the socket, the end of the stream, a
+// connection pgx has already closed. Each holds the host marker (a read on a socket names the
+// address of the peer), so a call that lets one through is seen. kind is what the adapter says of it.
+type droppedFailure struct {
+	name string
+	kind FailureKind
+	err  func() error
+}
+
+func socketAddress() net.Addr {
+	return &net.UnixAddr{Name: "/var/run/" + markHost + "/.s.PGSQL.5432", Net: "unix"}
+}
+
+func droppedFailures() []droppedFailure {
+	return []droppedFailure{
+		{"reset by the peer", FailureNetwork, func() error {
+			return &net.OpError{Op: "read", Net: "unix", Source: &net.UnixAddr{Name: "@", Net: "unix"}, Addr: socketAddress(),
+				Err: os.NewSyscallError("read", syscall.ECONNRESET)}
+		}},
+		{"broken pipe", FailureNetwork, func() error {
+			return fmt.Errorf("write failed: %w", &net.OpError{Op: "write", Net: "unix", Source: &net.UnixAddr{Name: "@", Net: "unix"}, Addr: socketAddress(),
+				Err: os.NewSyscallError("write", syscall.EPIPE)})
+		}},
+		{"the socket timed out", FailureTimeout, func() error {
+			return fmt.Errorf("timeout: %w", &net.OpError{Op: "read", Net: "unix", Addr: socketAddress(), Err: os.ErrDeadlineExceeded})
+		}},
+		{"the stream ended", FailureOther, func() error {
+			return fmt.Errorf("receive from %s: %w", markHost, io.ErrUnexpectedEOF)
+		}},
+		{"the connection was closed", FailureOther, func() error {
+			return fmt.Errorf("%s: %w", markHost, pgconn.ErrConnClosed)
+		}},
+	}
+}
+
 // ordersRecordsets declares the table the record calls of the tests use, keyed by "id".
 func ordersRecordsets() map[string]*dalgo2sql.Recordset {
 	return map[string]*dalgo2sql.Recordset{
@@ -124,10 +163,10 @@ func lazyDatabase(t *testing.T, dial pgconn.DialFunc) *Database {
 }
 
 // failingStatements is a database/sql connector whose connections open and begin a transaction,
-// and then fail every statement and every commit with failure. It is for the values the adapter
-// hands out that live on a connection (a transaction), which a network that refuses every dial
-// never lets exist.
-type failingStatements struct{ failure error }
+// and then fail every statement and every commit with failure, and every rollback with
+// rollbackFailure (none when it is nil). It is for the values the adapter hands out that live on a
+// connection (a transaction), which a network that refuses every dial never lets exist.
+type failingStatements struct{ failure, rollbackFailure error }
 
 func (c failingStatements) Connect(context.Context) (driver.Conn, error) {
 	return failingConn(c), nil
@@ -138,7 +177,7 @@ type failingDriver struct{}
 
 func (failingDriver) Open(string) (driver.Conn, error) { return nil, errors.New("not used") }
 
-type failingConn struct{ failure error }
+type failingConn struct{ failure, rollbackFailure error }
 
 func (c failingConn) Prepare(string) (driver.Stmt, error) { return nil, c.failure }
 func (failingConn) Close() error                          { return nil }
@@ -147,15 +186,22 @@ func (c failingConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, erro
 	return failingTx(c), nil
 }
 
-type failingTx struct{ failure error }
+type failingTx struct{ failure, rollbackFailure error }
 
-func (t failingTx) Commit() error { return t.failure }
-func (failingTx) Rollback() error { return nil }
+func (t failingTx) Commit() error   { return t.failure }
+func (t failingTx) Rollback() error { return t.rollbackFailure }
 
 // transactionalDatabase is a Database whose connections fail every statement with failure.
 func transactionalDatabase(t *testing.T, failure error) *Database {
 	t.Helper()
-	sqlDB := sql.OpenDB(failingStatements{failure})
+	return rollbackFailingDatabase(t, failure, nil)
+}
+
+// rollbackFailingDatabase is a Database whose connections fail every statement with failure and
+// every rollback with rollbackFailure.
+func rollbackFailingDatabase(t *testing.T, failure, rollbackFailure error) *Database {
+	t.Helper()
+	sqlDB := sql.OpenDB(failingStatements{failure, rollbackFailure})
 	t.Cleanup(func() { _ = sqlDB.Close() })
 	return databaseOver(t, sqlDB)
 }

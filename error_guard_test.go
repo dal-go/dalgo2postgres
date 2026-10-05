@@ -41,19 +41,46 @@ type errorCall struct {
 	run     func(t *testing.T) []error
 }
 
-// onLazyDatabase runs call against a Database that opened lazily, over a network that refuses
-// every dial.
-func onLazyDatabase(call func(ctx context.Context, db *Database) []error) errorCall {
+// standIn is the connection the calls of the table are made against: how it fails.
+type standIn struct {
+	name string
+	// failure is the error the connection yields.
+	failure func(t *testing.T) error
+	// handle is a Database whose every call that needs a connection fails with that error.
+	handle func(t *testing.T) *Database
+}
+
+// standIns are the connections the table is made against: one that cannot be made (a handle that
+// opened lazily, over a network that refuses every dial), and each way a connection that was
+// made is lost.
+func standIns() []standIn {
+	ins := []standIn{{
+		name:    "connect failure",
+		failure: func(t *testing.T) error { return connectFailure(t, refuseEveryDial) },
+		handle:  func(t *testing.T) *Database { return lazyDatabase(t, refuseEveryDial) },
+	}}
+	for _, dropped := range droppedFailures() {
+		ins = append(ins, standIn{
+			name:    dropped.name,
+			failure: func(*testing.T) error { return dropped.err() },
+			handle:  func(t *testing.T) *Database { return transactionalDatabase(t, dropped.err()) },
+		})
+	}
+	return ins
+}
+
+// onLazyDatabase runs call against a Database whose connection fails.
+func (s standIn) onLazyDatabase(call func(ctx context.Context, db *Database) []error) errorCall {
 	return errorCall{run: func(t *testing.T) []error {
-		return call(context.Background(), lazyDatabase(t, refuseEveryDial))
+		return call(context.Background(), s.handle(t))
 	}}
 }
 
 // inReadonlyTransaction runs call inside a read transaction whose statements all fail with the
-// stand-in's connect failure. The commit fails the same way, and its error is one of the call's.
-func inReadonlyTransaction(call func(ctx context.Context, tx dal.ReadTransaction) []error) errorCall {
+// stand-in's failure. The commit fails the same way, and its error is one of the call's.
+func (s standIn) inReadonlyTransaction(call func(ctx context.Context, tx dal.ReadTransaction) []error) errorCall {
 	return errorCall{run: func(t *testing.T) []error {
-		db := transactionalDatabase(t, connectFailure(t, refuseEveryDial))
+		db := transactionalDatabase(t, s.failure(t))
 		var errs []error
 		outer := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
 			errs = call(ctx, tx)
@@ -64,9 +91,9 @@ func inReadonlyTransaction(call func(ctx context.Context, tx dal.ReadTransaction
 }
 
 // inReadwriteTransaction is inReadonlyTransaction for a read-write transaction.
-func inReadwriteTransaction(call func(ctx context.Context, tx dal.ReadwriteTransaction) []error) errorCall {
+func (s standIn) inReadwriteTransaction(call func(ctx context.Context, tx dal.ReadwriteTransaction) []error) errorCall {
 	return errorCall{run: func(t *testing.T) []error {
-		db := transactionalDatabase(t, connectFailure(t, refuseEveryDial))
+		db := transactionalDatabase(t, s.failure(t))
 		var errs []error
 		outer := db.RunReadwriteTransaction(context.Background(), func(ctx context.Context, tx dal.ReadwriteTransaction) error {
 			errs = call(ctx, tx)
@@ -76,11 +103,11 @@ func inReadwriteTransaction(call func(ctx context.Context, tx dal.ReadwriteTrans
 	}}
 }
 
-// onReader runs call against a records reader whose rows end in the stand-in's connect failure.
-func onReader(plain bool, call func(reader dal.RecordsReader) []error) errorCall {
+// onReader runs call against a records reader whose rows end in the stand-in's failure.
+func (s standIn) onReader(plain bool, call func(reader dal.RecordsReader) []error) errorCall {
 	return errorCall{plain: plain, run: func(t *testing.T) []error {
 		db, mock := mockedDatabase(t)
-		failure := connectFailure(t, refuseEveryDial)
+		failure := s.failure(t)
 		mock.ExpectQuery("").WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1).RowError(0, failure).CloseError(failure))
 		reader, err := db.ExecuteQueryToRecordsReader(context.Background(), textQuery())
 		if err != nil {
@@ -91,10 +118,10 @@ func onReader(plain bool, call func(reader dal.RecordsReader) []error) errorCall
 }
 
 // onRecordsetReader is onReader for a recordset reader.
-func onRecordsetReader(plain bool, call func(reader dal.RecordsetReader) []error) errorCall {
+func (s standIn) onRecordsetReader(plain bool, call func(reader dal.RecordsetReader) []error) errorCall {
 	return errorCall{plain: plain, run: func(t *testing.T) []error {
 		db, mock := mockedDatabase(t)
-		failure := connectFailure(t, refuseEveryDial)
+		failure := s.failure(t)
 		mock.ExpectQuery("").WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1).RowError(0, failure).CloseError(failure))
 		reader, err := db.ExecuteQueryToRecordsetReader(context.Background(), textQuery())
 		if err != nil {
@@ -123,7 +150,9 @@ func ordersRef() dal.CollectionRef { return dal.NewRootCollectionRef("orders", "
 
 // errorCalls is the table of every call that can return an error, keyed by the kind of value it
 // is called on and its name. Each entry is made against a stand-in whose connection fails.
-func errorCalls() map[string]errorCall {
+func errorCalls(s standIn) map[string]errorCall {
+	onLazyDatabase, inReadonlyTransaction, inReadwriteTransaction := s.onLazyDatabase, s.inReadonlyTransaction, s.inReadwriteTransaction
+	onReader, onRecordsetReader := s.onReader, s.onRecordsetReader
 	ref := ordersRef()
 	key := dalrecord.NewKeyWithID("orders", "1")
 	table := map[string]errorCall{
@@ -136,7 +165,7 @@ func errorCalls() map[string]errorCall {
 		}),
 		"Database.Close": {run: func(t *testing.T) []error {
 			db, mock := mockedDatabase(t)
-			mock.ExpectClose().WillReturnError(connectFailure(t, refuseEveryDial))
+			mock.ExpectClose().WillReturnError(s.failure(t))
 			return []error{db.Close()}
 		}},
 		"Database.CreateCollection": onLazyDatabase(func(ctx context.Context, db *Database) []error {
@@ -245,7 +274,7 @@ func errorCalls() map[string]errorCall {
 			return []error{db.UpdateMulti(ctx, []*dalrecord.Key{key}, someUpdates())}
 		}),
 		"Database.UpdateRecord": {plain: true, run: func(t *testing.T) []error {
-			return []error{lazyDatabase(t, refuseEveryDial).UpdateRecord(context.Background(), ordersRecord(), someUpdates())}
+			return []error{s.handle(t).UpdateRecord(context.Background(), ordersRecord(), someUpdates())}
 		}},
 		"Database.Upsert": onLazyDatabase(func(ctx context.Context, db *Database) []error {
 			return []error{db.Upsert(ctx, ordersRecord())}
@@ -430,8 +459,10 @@ func assertCall(t *testing.T, name string, call errorCall) {
 // Every call of the table, against a connection that fails, yields only errors that hold no part
 // of the configuration, and, unless the call never reaches a connection, a classified one.
 func TestErrorsHoldNoConfiguration_EveryCall(t *testing.T) {
-	for name, call := range errorCalls() {
-		t.Run(name, func(t *testing.T) { assertCall(t, name, call) })
+	for _, in := range standIns() {
+		for name, call := range errorCalls(in) {
+			t.Run(in.name+"/"+name, func(t *testing.T) { assertCall(t, name, call) })
+		}
 	}
 }
 
@@ -442,25 +473,27 @@ func TestErrorsHoldNoConfiguration_JoinsAndGroupedQueries(t *testing.T) {
 	id := dal.NewFieldRef("", "id")
 	grouped := dal.From(dal.NewRootCollectionRef("orders", "")).NewQuery().GroupBy(id).
 		SelectColumns(dal.Column{Expression: id}, dal.Column{Expression: dal.NewAggregate(dal.COUNT, false, dal.Star()), Alias: "n"})
-	for name, query := range map[string]dal.Query{"join": joinQuery(), "grouped": grouped} {
-		t.Run(name+" on the database", func(t *testing.T) {
-			call := onLazyDatabase(func(ctx context.Context, db *Database) []error {
-				_, records := db.ExecuteQueryToRecordsReader(ctx, query)
-				_, recordsets := db.ExecuteQueryToRecordsetReader(ctx, query)
-				return []error{records, recordsets}
+	for _, in := range standIns() {
+		for name, query := range map[string]dal.Query{"join": joinQuery(), "grouped": grouped} {
+			t.Run(in.name+"/"+name+" on the database", func(t *testing.T) {
+				call := in.onLazyDatabase(func(ctx context.Context, db *Database) []error {
+					_, records := db.ExecuteQueryToRecordsReader(ctx, query)
+					_, recordsets := db.ExecuteQueryToRecordsetReader(ctx, query)
+					return []error{records, recordsets}
+				})
+				call.inChain = true
+				assertCall(t, name, call)
 			})
-			call.inChain = true
-			assertCall(t, name, call)
-		})
-		t.Run(name+" in a transaction", func(t *testing.T) {
-			call := inReadonlyTransaction(func(ctx context.Context, tx dal.ReadTransaction) []error {
-				_, records := tx.ExecuteQueryToRecordsReader(ctx, query)
-				_, recordsets := tx.ExecuteQueryToRecordsetReader(ctx, query)
-				return []error{records, recordsets}
+			t.Run(in.name+"/"+name+" in a transaction", func(t *testing.T) {
+				call := in.inReadonlyTransaction(func(ctx context.Context, tx dal.ReadTransaction) []error {
+					_, records := tx.ExecuteQueryToRecordsReader(ctx, query)
+					_, recordsets := tx.ExecuteQueryToRecordsetReader(ctx, query)
+					return []error{records, recordsets}
+				})
+				call.inChain = true
+				assertCall(t, name, call)
 			})
-			call.inChain = true
-			assertCall(t, name, call)
-		})
+		}
 	}
 }
 
@@ -505,7 +538,7 @@ func handedOutTypes(t *testing.T) map[string]reflect.Type {
 // to an interface the adapter hands out (or that this package adds) is found here, whether the
 // adapter guards it or not, and fails the test until it is in the table and its stand-in is made.
 func TestErrorsHoldNoConfiguration_TableNamesEveryErrorReturningMethod(t *testing.T) {
-	table := errorCalls()
+	table := errorCalls(standIns()[0])
 	errorType := reflect.TypeOf((*error)(nil)).Elem()
 	methods := map[string]bool{}
 	for kind, ty := range handedOutTypes(t) {

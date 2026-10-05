@@ -50,6 +50,11 @@ func (g guardedReads) ExecuteQueryToRecordsetReader(ctx context.Context, query d
 
 // guardedRecordsReader is a records reader whose every error is guarded. dal.ErrNoMoreRecords,
 // which ends a result, is not a failure and is returned as it is.
+//
+// The guard recognises a failure of the connection by the type of an error in its chain (see
+// isConnectionFailure). A layer under the readers that turns an error into text loses the type, and
+// the guard cannot recognise what it can no longer see: a new version of dalgo2sql is checked
+// against the reader entries of the table in error_guard_test.go before it is taken.
 type guardedRecordsReader struct{ dal.RecordsReader }
 
 func (r guardedRecordsReader) Next() (dalrecord.Record, error) {
@@ -58,7 +63,8 @@ func (r guardedRecordsReader) Next() (dalrecord.Record, error) {
 func (r guardedRecordsReader) Cursor() (string, error) { return guarded(r.RecordsReader.Cursor()) }
 func (r guardedRecordsReader) Close() error            { return leaveAdapter(r.RecordsReader.Close()) }
 
-// guardedRecordsetReader is a recordset reader whose every error is guarded.
+// guardedRecordsetReader is a recordset reader whose every error is guarded; what is said of
+// [guardedRecordsReader] holds for it.
 type guardedRecordsetReader struct{ dal.RecordsetReader }
 
 func (r guardedRecordsetReader) Next() (recordset.Row, recordset.Recordset, error) {
@@ -219,15 +225,19 @@ func (b guardedBackend) SupportsConcurrentConnections() bool {
 	return b.inner.SupportsConcurrentConnections()
 }
 
+// RunReadonlyTransaction runs f in a read transaction whose methods are guarded. The error f returns
+// is the caller's own and is returned as it is; what the transaction adds around it passes the guard
+// (see [leaveTransaction]).
 func (b guardedBackend) RunReadonlyTransaction(ctx context.Context, f dal.ROTxWorker, opts ...dal.TransactionOption) error {
-	return leaveAdapter(b.inner.RunReadonlyTransaction(ctx, func(ctx context.Context, tx dal.ReadTransaction) error {
-		return f(ctx, newGuardedReadTransaction(tx))
+	return leaveTransaction(b.inner.RunReadonlyTransaction(ctx, func(ctx context.Context, tx dal.ReadTransaction) error {
+		return markOwn(f(ctx, newGuardedReadTransaction(tx)))
 	}, opts...))
 }
 
+// RunReadwriteTransaction is RunReadonlyTransaction for a read-write transaction.
 func (b guardedBackend) RunReadwriteTransaction(ctx context.Context, f dal.RWTxWorker, opts ...dal.TransactionOption) error {
-	return leaveAdapter(b.inner.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
-		return f(ctx, newGuardedReadwriteTransaction(tx))
+	return leaveTransaction(b.inner.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+		return markOwn(f(ctx, newGuardedReadwriteTransaction(tx)))
 	}, opts...))
 }
 

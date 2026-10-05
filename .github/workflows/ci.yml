@@ -98,7 +98,10 @@ jobs:
         # `go test` prints "ok" for a package whose tests all SKIPPED, so a
         # green job here would not by itself prove the conformance suite ran —
         # which is exactly the vacuously-green outcome this job exists to
-        # prevent. Run verbose and assert on the result line.
+        # prevent. Run verbose and assert on the result line. -count=1 keeps the
+        # test cache out: setup-go restores the build cache, and a cached package
+        # replays the PASS lines of an earlier run, which the assertions below
+        # would read as this leg's own.
         run: |
           set -o pipefail
           # Sub-tests of the shared end2end suite (TestEndToEnd) that cannot run in
@@ -111,7 +114,7 @@ jobs:
           # (Update), and TestEndToEnd reports each of them as a skip that names it (the
           # allow-list of skips below). Keep the two lists the same.
           not_run='^TestEndToEnd$/^query$/^access_conditions$/^(point_reads_follow_the_condition|writes_follow_the_condition)$'
-          go test -race -v -skip "$not_run" -coverprofile=profile.cov ./... 2>&1 | tee /tmp/gotest.log
+          go test -race -v -count=1 -skip "$not_run" -coverprofile=profile.cov ./... 2>&1 | tee /tmp/gotest.log
           if grep -qE '^\s*--- SKIP: TestConformance' /tmp/gotest.log; then
             echo "::error::TestConformance SKIPPED - the DSN did not reach the tests"
             exit 1
@@ -241,16 +244,17 @@ jobs:
           done
           # The server's answers to a connection that opens lazily (a wrong password, a
           # database that is not there, a role that may not log in), each met at the first
-          # call of a handle, and a statement error that reaches the caller unchanged. They
-          # skip on their own when the DSN does not reach them, which the allow-list above
-          # already refuses; a PASS line is required for each by name, so a test that is
-          # renamed, deleted or never reached fails the job. Add a new test of the family
-          # to this list.
+          # call of a handle, a session the server ends in the middle of a transaction, and
+          # a statement error that reaches the caller unchanged. They skip on their own when
+          # the DSN does not reach them, which the allow-list above already refuses; a PASS
+          # line is required for each by name, so a test that is renamed, deleted or never
+          # reached fails the job. Add a new test of the family to this list.
           for name in \
             WrongPasswordAtTheFirstCall \
             MissingDatabaseAtTheFirstCall \
             RoleThatMayNotLogInAtTheFirstCall \
-            StatementErrorsKeepTheServersMessageAndDetail; do
+            StatementErrorsKeepTheServersMessageAndDetail \
+            ASessionTheServerEndsInATransaction; do
             if ! grep -qE "^\s*--- PASS: TestConnectionFailureIntegration_${name} \(" /tmp/gotest.log; then
               echo "::error::TestConnectionFailureIntegration_${name} did not run to a pass"
               exit 1

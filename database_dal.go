@@ -15,20 +15,29 @@ var _ dal.DB = (*Database)(nil)
 // --- dal.DB delegation ---
 //
 // Every error of these methods passes leaveAdapter (see error_guard.go), and so does every error
-// of a value they hand out: the transaction a worker is given and the readers a query returns.
-// Use these methods, not the embedded DB field, which is the unguarded delegate.
+// of a value they hand out: the transaction a worker is given and the readers a query returns. The
+// embedded DB field is DALgo's layer over the guarded backend (see guardDatabase), so its errors
+// pass the same function: the transactions and their errors in the backend, and the reads and
+// writes of the methods below once more. The error a worker returns is the one exception: it is
+// the caller's own and comes back as it is.
 
 // RunReadonlyTransaction runs f in a read transaction. The transaction f is given is DALgo's, over a
-// transaction of the adapter whose methods answer as the methods of the Database do.
+// transaction of the adapter whose methods answer as the methods of the Database do. The error f
+// returns is its own and is returned as it is, whatever it holds; what the transaction adds around
+// it (the begin, the commit, the rollback) is guarded. When f failed and the transaction could not
+// then be rolled back, the error is a *ConnectionError if the connection failed (f's error holds one,
+// or the rollback failed on the connection), and otherwise DALgo's rollback error, which names f's
+// error and the rollback's.
 func (d *Database) RunReadonlyTransaction(ctx context.Context, f dal.ROTxWorker, opts ...dal.TransactionOption) error {
-	return leaveAdapter(d.DB.RunReadonlyTransaction(ctx, f, opts...))
+	return d.DB.RunReadonlyTransaction(ctx, f, opts...)
 }
 
 // RunReadwriteTransaction runs f in a read-write transaction. The transaction f is given is DALgo's
 // (dal.WithoutValidation recognises it), over a transaction of the adapter whose methods answer as
-// the methods of the Database do.
+// the methods of the Database do. The error f returns is returned as it is, as for
+// [Database.RunReadonlyTransaction], which also says what the other errors of the call are.
 func (d *Database) RunReadwriteTransaction(ctx context.Context, f dal.RWTxWorker, opts ...dal.TransactionOption) error {
-	return leaveAdapter(d.DB.RunReadwriteTransaction(ctx, f, opts...))
+	return d.DB.RunReadwriteTransaction(ctx, f, opts...)
 }
 
 func (d *Database) Get(ctx context.Context, record dalrecord.Record) error {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -91,6 +92,61 @@ func TestLeaveAdapter(t *testing.T) {
 	})
 }
 
+// A connection that was established and is lost (a reset or a timeout of the socket, the end of the
+// stream, a connection the driver has already closed) is a failure of the connection, with the kind
+// of what happened and nothing of the error: the address a socket error names is the peer's.
+func TestLeaveAdapter_ALostConnection(t *testing.T) {
+	for _, dropped := range droppedFailures() {
+		for how, in := range map[string]error{
+			"as it is":                   dropped.err(),
+			"wrapped":                    fmt.Errorf("failed to get SQL reader: %w", dropped.err()),
+			"among the errors of a join": errors.Join(errors.New("another"), dropped.err()),
+		} {
+			t.Run(dropped.name+" "+how, func(t *testing.T) {
+				got, ok := leaveAdapter(in).(*ConnectionError)
+				if !ok {
+					t.Fatalf("leaveAdapter(%v) is not a *ConnectionError", in)
+				}
+				if got.Kind != dropped.kind || got.SQLState != "" || got.Host != "" || got.Port != "" || got.Database != "" {
+					t.Errorf("got %+v, want kind %d and nothing named", *got, dropped.kind)
+				}
+				assertHoldsNoConfiguration(t, dropped.name, got)
+				var opErr *net.OpError
+				if errors.As(got, &opErr) {
+					t.Error("errors.As finds the socket's error")
+				}
+			})
+		}
+	}
+}
+
+// timeoutOfItsOwn is a net.Error that is no failure of the connection of the driver.
+type timeoutOfItsOwn struct{}
+
+func (timeoutOfItsOwn) Error() string   { return "a timeout of its own" }
+func (timeoutOfItsOwn) Timeout() bool   { return true }
+func (timeoutOfItsOwn) Temporary() bool { return true }
+
+// What is not a failure of the connection stays as it is. An error that merely answers net.Error
+// is not one (context.DeadlineExceeded answers it), so a statement that ends on its context stays
+// a context error; and the end of a result, which is io.EOF in some layers, is not one either.
+func TestLeaveAdapter_WhatIsNotALostConnectionStays(t *testing.T) {
+	for name, in := range map[string]error{
+		"a deadline that passed":           context.DeadlineExceeded,
+		"a deadline that passed, wrapped":  fmt.Errorf("timeout: %w", context.DeadlineExceeded),
+		"a context that was canceled":      fmt.Errorf("query: %w", context.Canceled),
+		"a timeout of another kind":        timeoutOfItsOwn{},
+		"the end of a stream":              io.EOF,
+		"an error that names a connection": errors.New("connection reset by peer"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := leaveAdapter(in); got != in { //nolint:errorlint // the same value
+				t.Errorf("leaveAdapter(%v) = %v, want the same error", in, got)
+			}
+		})
+	}
+}
+
 // A server answer of a connection class is a connection error that keeps only its SQLSTATE; the
 // server's message and detail, which name a role or a database, are not kept. An answer of any
 // other class is the server's, unchanged.
@@ -127,6 +183,20 @@ func TestLeaveAdapter_ServerAnswersByClass(t *testing.T) {
 			}
 		})
 	}
+	t.Run("the code is the one of the answer that made it a connection error", func(t *testing.T) {
+		statement := serverError("23505")
+		for name, in := range map[string]error{
+			"a statement error joined with a shutdown":    errors.Join(statement, serverError("57P01")),
+			"a statement error wrapped beside it":         fmt.Errorf("%w; %w", statement, serverError("57P01")),
+			"a shutdown joined with a statement error":    errors.Join(serverError("57P01"), statement),
+			"a statement error beside a wrapped shutdown": errors.Join(statement, fmt.Errorf("a: %w", serverError("57P01"))),
+		} {
+			got, ok := leaveAdapter(in).(*ConnectionError)
+			if !ok || got.Kind != FailureServer || got.SQLState != "57P01" {
+				t.Errorf("%s: got %#v, want a FailureServer error with SQLSTATE 57P01", name, got)
+			}
+		}
+	})
 	t.Run("a code of the wrong shape that claims a class is classified and keeps no code", func(t *testing.T) {
 		got, ok := leaveAdapter(serverError("28P01 " + markPassword)).(*ConnectionError)
 		if !ok || got.Kind != FailureServer || got.SQLState != "" {
