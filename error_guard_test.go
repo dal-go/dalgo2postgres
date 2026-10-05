@@ -34,7 +34,11 @@ type errorCall struct {
 	// plain says the call never reaches a connection: its error is a constant of DALgo, not a
 	// failure of the connection, so it must hold no marker but need not be a *ConnectionError.
 	plain bool
-	run   func(t *testing.T) []error
+	// inChain says DALgo's own diagnostic (a join's) carries the failure: the error is the
+	// diagnostic, whose text names the step and ends in the fixed sentence, and the classified
+	// *ConnectionError is in its chain.
+	inChain bool
+	run     func(t *testing.T) []error
 }
 
 // onLazyDatabase runs call against a Database that opened lazily, over a network that refuses
@@ -410,6 +414,13 @@ func assertCall(t *testing.T, name string, call errorCall) {
 		if call.plain || err == nil {
 			continue
 		}
+		var failure *ConnectionError
+		if call.inChain && errors.As(err, &failure) {
+			if !strings.HasSuffix(err.Error(), failure.Error()) {
+				t.Errorf("%s: the text %q does not end in the fixed sentence %q", what, err, failure)
+			}
+			continue
+		}
 		if _, ok := err.(*ConnectionError); !ok {
 			t.Errorf("%s: the error is %T %q, want a *ConnectionError", what, err, err)
 		}
@@ -433,18 +444,22 @@ func TestErrorsHoldNoConfiguration_JoinsAndGroupedQueries(t *testing.T) {
 		SelectColumns(dal.Column{Expression: id}, dal.Column{Expression: dal.NewAggregate(dal.COUNT, false, dal.Star()), Alias: "n"})
 	for name, query := range map[string]dal.Query{"join": joinQuery(), "grouped": grouped} {
 		t.Run(name+" on the database", func(t *testing.T) {
-			assertCall(t, name, onLazyDatabase(func(ctx context.Context, db *Database) []error {
+			call := onLazyDatabase(func(ctx context.Context, db *Database) []error {
 				_, records := db.ExecuteQueryToRecordsReader(ctx, query)
 				_, recordsets := db.ExecuteQueryToRecordsetReader(ctx, query)
 				return []error{records, recordsets}
-			}))
+			})
+			call.inChain = true
+			assertCall(t, name, call)
 		})
 		t.Run(name+" in a transaction", func(t *testing.T) {
-			assertCall(t, name, inReadonlyTransaction(func(ctx context.Context, tx dal.ReadTransaction) []error {
+			call := inReadonlyTransaction(func(ctx context.Context, tx dal.ReadTransaction) []error {
 				_, records := tx.ExecuteQueryToRecordsReader(ctx, query)
 				_, recordsets := tx.ExecuteQueryToRecordsetReader(ctx, query)
 				return []error{records, recordsets}
-			}))
+			})
+			call.inChain = true
+			assertCall(t, name, call)
 		})
 	}
 }

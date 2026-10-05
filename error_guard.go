@@ -11,10 +11,11 @@ import (
 // Every error that leaves this package passes [leaveAdapter]. A connection that fails, at
 // any call, is reported as a [*ConnectionError]: a fixed sentence chosen by the kind of
 // failure, the SQLSTATE of a server answer, and nothing of the cause. The rule is kept in
-// one place on purpose: the exported methods of [Database], and the values it hands out
-// whose methods can return an error (a transaction, a records reader, a recordset reader),
-// each call it, and TestErrorsHoldNoConfiguration_TableNamesEveryErrorReturningMethod fails
-// when a method that can return an error is not covered.
+// one place on purpose: the exported methods of [Database] call it, and so do the methods of
+// the backend, the transactions and the readers under DALgo's framework layer (see
+// error_guard_values.go), which are the values handed out whose methods can return an error.
+// TestErrorsHoldNoConfiguration_TableNamesEveryErrorReturningMethod fails when a method that
+// can return an error is not covered.
 
 // connectionStates are the SQLSTATE codes, besides the whole of classes 08 (connection
 // exception) and 28 (invalid authorization specification), with which a server answers a

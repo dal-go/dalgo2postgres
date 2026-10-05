@@ -18,20 +18,17 @@ var _ dal.DB = (*Database)(nil)
 // of a value they hand out: the transaction a worker is given and the readers a query returns.
 // Use these methods, not the embedded DB field, which is the unguarded delegate.
 
-// RunReadonlyTransaction runs f in a read transaction. The transaction f is given is the
-// adapter's: its methods answer as the methods of the Database do.
+// RunReadonlyTransaction runs f in a read transaction. The transaction f is given is DALgo's, over a
+// transaction of the adapter whose methods answer as the methods of the Database do.
 func (d *Database) RunReadonlyTransaction(ctx context.Context, f dal.ROTxWorker, opts ...dal.TransactionOption) error {
-	return leaveAdapter(d.DB.RunReadonlyTransaction(ctx, func(ctx context.Context, tx dal.ReadTransaction) error {
-		return f(ctx, newGuardedReadTransaction(tx))
-	}, opts...))
+	return leaveAdapter(d.DB.RunReadonlyTransaction(ctx, f, opts...))
 }
 
-// RunReadwriteTransaction runs f in a read-write transaction. The transaction f is given is the
-// adapter's: its methods answer as the methods of the Database do.
+// RunReadwriteTransaction runs f in a read-write transaction. The transaction f is given is DALgo's
+// (dal.WithoutValidation recognises it), over a transaction of the adapter whose methods answer as
+// the methods of the Database do.
 func (d *Database) RunReadwriteTransaction(ctx context.Context, f dal.RWTxWorker, opts ...dal.TransactionOption) error {
-	return leaveAdapter(d.DB.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
-		return f(ctx, newGuardedReadwriteTransaction(tx))
-	}, opts...))
+	return leaveAdapter(d.DB.RunReadwriteTransaction(ctx, f, opts...))
 }
 
 func (d *Database) Get(ctx context.Context, record dalrecord.Record) error {

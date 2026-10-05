@@ -138,7 +138,7 @@ func TestConnectionFailureIntegration_RoleThatMayNotLogInAtTheFirstCall(t *testi
 // type and a syntax error each reach the caller as the server's *pgconn.PgError, whose message
 // and detail are what the caller prints. The README says so.
 func TestConnectionFailureIntegration_StatementErrorsKeepTheServersMessageAndDetail(t *testing.T) {
-	table := uniqueTable(t, "stmt")
+	table := uniqueName("stmt") // short enough that the server does not cut the name of the key it derives from it
 	db := openTestDBWithOpts(t, dalgo2sql.DbOptions{Recordsets: map[string]*dalgo2sql.Recordset{
 		table: dalgo2sql.NewRecordset(table, dalgo2sql.Table, []dal.FieldRef{dal.Field("id")}),
 	}})
