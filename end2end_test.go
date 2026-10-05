@@ -30,8 +30,8 @@ import (
 // The fixture avoids the divergence; it does not hide it:
 // TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation pins the server's
 // order for a key in the database's collation, with the COLLATE "C" control, and the
-// divergence from the suite's keys-only contract is reported for dal-go/dalgo and
-// dal-go/dalgo2sql.
+// divergence from the suite's keys-only contract is for dal-go/dalgo and
+// dal-go/dalgo2sql (issues: not yet filed).
 var end2endDDL = []string{
 	`CREATE TABLE dalgoe2e_e2etest1 (id varchar(10) PRIMARY KEY, stringprop text, integerprop integer)`,
 	`CREATE TABLE dalgoe2e_e2etest2 (id varchar(10) PRIMARY KEY, stringprop text, integerprop integer)`,

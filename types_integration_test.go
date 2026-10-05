@@ -841,6 +841,10 @@ func TestTypeMatrixIntegration_ValuesAtTheEdges(t *testing.T) {
 			{"f4 real string 0.1", "f4", dal.Equal, "0.1", "$1", "0.1", rowsOf(1)},
 			{"f4 real float64 as the reader returns it", "f4", dal.Equal, widened, "$1::real", "0.10000000149011612", rowsOf(1)},
 			{"f4 real float64 as a lower bound", "f4", dal.GreaterThen, 0.1, "$1::real", "0.1", rowsOf(2)},
+			// A float is rounded to a real before it is compared, so a float64 that differs from
+			// 0.1 only past what a real holds (0.1000000001: a real has about seven digits) is
+			// the same real and finds the row that stores 0.1.
+			{"f4 real float64 0.1000000001, rounded to the real 0.1 before it is compared", "f4", dal.Equal, 0.1000000001, "$1::real", "0.1000000001", rowsOf(1)},
 			{"f8 double precision float32 0.1", "f8", dal.Equal, float32(0.1), "$1::numeric", "0.1", rowsOf(1)},
 			{"f8 double precision float64 0.1", "f8", dal.Equal, 0.1, "$1::numeric", "0.1", rowsOf(1)},
 		})

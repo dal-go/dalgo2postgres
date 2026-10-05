@@ -465,8 +465,8 @@ func TestServerPinsIntegration_NotNullColumnKeepsItsOrderByWithoutANullsClause(t
 // the fixture of TestEndToEnd gives the key COLLATE "C" and it passes.
 //
 // This is a DIVERGENCE from the shared suite's keys-only contract, not a rule and not a
-// defect of this package, reported for dal-go/dalgo (does the contract say the order is
-// Go's?) and dal-go/dalgo2sql (which writes the ORDER BY on the key): a real table does not
+// defect of this package, for dal-go/dalgo (does the contract say the order is
+// Go's?) and dal-go/dalgo2sql (which writes the ORDER BY on the key; issues: not yet filed): a real table does not
 // declare COLLATE "C". The test pins what the server does with the statement shown, prints
 // the database's collation, and runs the same rows under COLLATE "C" as the control that
 // equals sort.Strings. If the database's collation orders like C the pin shows nothing, and
@@ -510,7 +510,7 @@ func TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation(t *testi
 				"or a keys-only read is now in Go's order: then assert Go's order here, drop COLLATE \"C\" from the dalgotest_cities table in end2endDDL, and delete the limit in the README", ids, collate)
 		}
 		if want := []string{"São Paulo_São Paulo", "Shanghai_Shanghai", "Sindh_Karachi"}; !reflect.DeepEqual(ids, want) {
-			t.Errorf("keys = %v, want the linguistic order of %s: %v. This differs from sort.Strings, which the shared suite's keys-only contract asserts: a divergence reported for dal-go/dalgo and dal-go/dalgo2sql. "+
+			t.Errorf("keys = %v, want the linguistic order of %s: %v. This differs from sort.Strings, which the shared suite's keys-only contract asserts: a divergence for dal-go/dalgo and dal-go/dalgo2sql (issues: not yet filed). "+
 				"If the keys are now in Go's order, a keys-only read no longer follows the database's collation: assert Go's order for kc_default here, "+
 				"drop COLLATE \"C\" from the dalgotest_cities table in end2endDDL (end2end_test.go), and delete the limit in the README", ids, collate, want)
 		}
@@ -564,6 +564,11 @@ func TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimi
 		t.Fatalf("catalog: %v", err)
 	}
 	t.Logf("PostgreSQL %d, column v: attnotnull = %v, constraint validated = %v; rows 2 and 4 hold NULL", major, notNull, validated)
+	// The cause the pin below describes: the catalog calls the column NOT NULL while its
+	// constraint has not been validated against the rows that were there.
+	if !notNull || validated {
+		t.Fatalf("attnotnull = %v and the constraint's convalidated = %v, want true and false: the column is NOT NULL to the catalog and its constraint vouches for no row, which is the case this pin is about", notNull, validated)
+	}
 
 	ordered := func(by dal.OrderExpression) dal.StructuredQuery {
 		return dal.From(dal.NewRootCollectionRef("nv", "")).NewQuery().
@@ -597,7 +602,8 @@ func TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimi
 		}
 	}
 
-	// KNOWN DEFECT of dal-go/dalgo2sql (reported for it; a WRONG RESULT, not a rule): the
+	// KNOWN DEFECT of dal-go/dalgo2sql (a WRONG RESULT, not a rule; issue or pull request:
+	// not yet filed, replace this line with its number): the
 	// catalog says the column is NOT NULL, the compiler leaves out the NULLS clause for it, and
 	// the server's default puts the NULL rows last ascending and first descending, the opposite
 	// of DALgo's rule. With LIMIT 3 the two NULL rows are cut off ascending, and they are the

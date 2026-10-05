@@ -141,42 +141,57 @@ func checkJoinRows(t *testing.T, rows []map[string]any, n int) (bytes int) {
 	return bytes
 }
 
+// bothReaders are the two public reads of the database: the records reader and the recordset
+// reader (ExecuteQueryToRecordsetReader, the path DataTug reads). The pushdown proofs run
+// through each, and the answer is the same through either.
+var bothReaders = []struct {
+	name string
+	run  func(*queryFixture, dal.Query) adapterRun
+}{
+	{"through the records reader", runThroughAdapter},
+	{"through the recordset reader", runThroughRecordsetReader},
+}
+
 // A GROUP BY with 150,000 groups and a HAVING over 200,000 rows is one statement on the
 // server, and its answer has more groups than DALgo's engine holds.
 func TestPushdownIntegration_GroupByOver150000GroupsRunsOnTheServer(t *testing.T) {
 	f := openQueryFixture(t, "test_pd_group", IdentifierFoldLower, pushdownDDL())
-	run := runThroughAdapter(f, groupedQuery("pd_fact"))
-	if run.err != nil {
-		t.Fatalf("the grouped query failed: %v\nstatements: %v", run.err, run.statements)
-	}
-	if len(run.statements) != 1 {
-		t.Fatalf("%d statements were sent, want one: %v", len(run.statements), run.statements)
-	}
-	statement := run.statements[0]
-	t.Logf("statement: %s\nrows: %d groups", statement, len(run.rows))
-	for _, part := range []string{`FROM "pd_fact"`, `GROUP BY "grp"`, `HAVING`, `SUM("v")`, `COUNT(*)`} {
-		if !strings.Contains(statement, part) {
-			t.Errorf("statement = %s, want the server to group, filter the groups and aggregate: no %s", statement, part)
-		}
-	}
-	if len(run.rows) <= engineMaxGroups {
-		t.Errorf("the answer has %d groups, want more than the %d DALgo's engine holds: the proof proves nothing", len(run.rows), engineMaxGroups)
-	}
-	got, err := normalizeRows(run.rows)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want, err := normalizeRows(expectedGroups(factRows))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if difference := rowDifference(got, want); difference != "" {
-		t.Errorf("groups differ from the ones computed here: %s", difference)
-	}
-	// The argument of the HAVING is bound, and nothing else is: one value in all.
-	sent := f.trace.sent()
-	if last := sent[len(sent)-1]; len(valueArguments(last.args)) != 1 {
-		t.Errorf("arguments = %s, want the one bound value of the HAVING", argsText(valueArguments(last.args)))
+	for _, reader := range bothReaders {
+		t.Run(reader.name, func(t *testing.T) {
+			run := reader.run(f, groupedQuery("pd_fact"))
+			if run.err != nil {
+				t.Fatalf("the grouped query failed: %v\nstatements: %v", run.err, run.statements)
+			}
+			if len(run.statements) != 1 {
+				t.Fatalf("%d statements were sent, want one: %v", len(run.statements), run.statements)
+			}
+			statement := run.statements[0]
+			t.Logf("statement: %s\nrows: %d groups", statement, len(run.rows))
+			for _, part := range []string{`FROM "pd_fact"`, `GROUP BY "grp"`, `HAVING`, `SUM("v")`, `COUNT(*)`} {
+				if !strings.Contains(statement, part) {
+					t.Errorf("statement = %s, want the server to group, filter the groups and aggregate: no %s", statement, part)
+				}
+			}
+			if len(run.rows) <= engineMaxGroups {
+				t.Errorf("the answer has %d groups, want more than the %d DALgo's engine holds: the proof proves nothing", len(run.rows), engineMaxGroups)
+			}
+			got, err := normalizeRows(run.rows)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := normalizeRows(expectedGroups(factRows))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if difference := rowDifference(got, want); difference != "" {
+				t.Errorf("groups differ from the ones computed here: %s", difference)
+			}
+			// The argument of the HAVING is bound, and nothing else is: one value in all.
+			sent := f.trace.sent()
+			if last := sent[len(sent)-1]; len(valueArguments(last.args)) != 1 {
+				t.Errorf("arguments = %s, want the one bound value of the HAVING", argsText(valueArguments(last.args)))
+			}
+		})
 	}
 }
 
@@ -184,19 +199,23 @@ func TestPushdownIntegration_GroupByOver150000GroupsRunsOnTheServer(t *testing.T
 // DALgo's engine joins (10,000) and more bytes than it holds (16 MiB).
 func TestPushdownIntegration_JoinOver50000RowsRunsOnTheServer(t *testing.T) {
 	f := openQueryFixture(t, "test_pd_join", IdentifierFoldLower, pushdownDDL())
-	run := runThroughAdapter(f, joinQuery("pd_order", "pd_customer"))
-	if run.err != nil {
-		t.Fatalf("the join failed: %v\nstatements: %v", run.err, run.statements)
-	}
-	if len(run.statements) != 1 || countJoins(run.statements[0]) != 1 {
-		t.Fatalf("statements = %v, want exactly one, with the JOIN", run.statements)
-	}
-	t.Logf("statement: %s", run.statements[0])
-	bytes := checkJoinRows(t, run.rows, joinRows)
-	t.Logf("%d joined rows, %d bytes of text", len(run.rows), bytes)
-	if len(run.rows) <= engineMaxJoinRows || bytes <= engineMaxJoinBytes {
-		t.Errorf("the answer has %d rows and %d bytes, want more than %d rows and %d bytes: the proof proves nothing",
-			len(run.rows), bytes, engineMaxJoinRows, engineMaxJoinBytes)
+	for _, reader := range bothReaders {
+		t.Run(reader.name, func(t *testing.T) {
+			run := reader.run(f, joinQuery("pd_order", "pd_customer"))
+			if run.err != nil {
+				t.Fatalf("the join failed: %v\nstatements: %v", run.err, run.statements)
+			}
+			if len(run.statements) != 1 || countJoins(run.statements[0]) != 1 {
+				t.Fatalf("statements = %v, want exactly one, with the JOIN", run.statements)
+			}
+			t.Logf("statement: %s", run.statements[0])
+			bytes := checkJoinRows(t, run.rows, joinRows)
+			t.Logf("%d joined rows, %d bytes of text", len(run.rows), bytes)
+			if len(run.rows) <= engineMaxJoinRows || bytes <= engineMaxJoinBytes {
+				t.Errorf("the answer has %d rows and %d bytes, want more than %d rows and %d bytes: the proof proves nothing",
+					len(run.rows), bytes, engineMaxJoinRows, engineMaxJoinBytes)
+			}
+		})
 	}
 }
 
@@ -269,7 +288,7 @@ func TestPushdownIntegration_WithoutTheNativeRouteTheSameQueriesAreRefused(t *te
 		rows, err := readRows(inMemory, joinQuery("pd_order", "pd_customer"))
 		t.Logf("error: %v (rows returned: %d); statements: %v", err, len(rows), statementsSent(f))
 		var join *dal.JoinValidationError
-		if err == nil || !errors.As(err, &join) || len(rows) != 0 || len(statementsSent(f)) != 0 {
+		if err == nil || !errors.As(err, &join) || join.Category != "join_plan" || len(rows) != 0 || len(statementsSent(f)) != 0 {
 			t.Errorf("error = %v, rows %d, statements %v; want a join_plan refusal with no row and no statement", err, len(rows), statementsSent(f))
 		}
 	})

@@ -201,7 +201,7 @@ func TestStructuredQueryIntegration_RecordKeysFromTheCatalog(t *testing.T) {
 	t.Run("a keys-only read is ordered by the primary key, and reads every column", func(t *testing.T) {
 		statement, got := keysOf(t, f, from("ck_single").NewQuery().SelectKeysOnly(reflect.Int))
 		t.Logf("statement: %s", statement)
-		// KNOWN LIMIT of dal-go/dalgo2sql (reported for it; not a rule): a keys-only read is a
+		// KNOWN LIMIT of dal-go/dalgo2sql (issue: not yet filed; not a rule): a keys-only read is a
 		// select-all, so the server reads and sends every column of every row to return a key.
 		// It FAILS when dalgo2sql selects the key column only; assert then the statement
 		// SELECT "id" FROM "ck_single" ORDER BY "id" ASC, and delete the README's known limit.
@@ -288,10 +288,11 @@ func TestStructuredQueryIntegration_RecordKeysFromTheCatalog(t *testing.T) {
 	// without an error, and the records are keyed by the catalog's id and not by the code
 	// the recordset declares.
 	//
-	// KNOWN LIMIT of dal-go/dalgo2sql (reported for it; no fix is under way yet; not a
+	// KNOWN LIMIT of dal-go/dalgo2sql (issue: not yet filed; no fix is under way; not a
 	// rule): the two cases that are not found FAIL when dalgo2sql folds the registered names
 	// too, and say what to assert instead. Until then a caller in fold-lower mode registers
-	// its recordsets under lower case names (README, "How records are keyed").
+	// its recordsets under lower case names and spells the collection of every key the same
+	// way, because a key read folds nothing (README, "How a recordset is found").
 	t.Run("a recordset registered as Ck_Mixed is found when the query spells the source Ck_Mixed", func(t *testing.T) {
 		statement, got := keysOf(t, f, ordered("Ck_Mixed").SelectColumns(payload))
 		t.Logf("statement: %s", statement)
@@ -327,7 +328,7 @@ func TestStructuredQueryIntegration_RecordKeysFromTheCatalog(t *testing.T) {
 // ("primary key is not defined for recorset Ck_Decl") for a row that exists. No statement is
 // sent for it.
 //
-// KNOWN LIMIT of dal-go/dalgo2sql (reported for it; not a rule). The cases for the spelling
+// KNOWN LIMIT of dal-go/dalgo2sql (issue: not yet filed; not a rule). The cases for the spelling
 // Ck_Decl FAIL when a key read folds the name as a query does, and say what to assert instead:
 // the row is found, with the statement of the control. Until then, in IdentifierFoldLower, spell
 // the collection of every key in lower case, or register the recordset under the spelling the
@@ -341,7 +342,7 @@ func TestStructuredQueryIntegration_KeyReadFindsItsRecordsetOnlyUnderTheCollecti
 		`INSERT INTO ck_decl VALUES (1, 'k-a', 'a'), (2, 'k-b', 'b')`,
 	})
 	ctx := context.Background()
-	const fixed = "dalgo2sql now folds the collation of a key as a query does: assert here that the row is found, with the statement of the control (SELECT 1 FROM ck_decl WHERE code = $1, and the key as the argument), and delete this limit and the README's"
+	const fixed = "dalgo2sql now folds the collection of a key as a query does: assert here that the row is found, with the statement of the control (SELECT 1 FROM ck_decl WHERE code = $1, and the key as the argument), and delete this limit and the README's"
 
 	t.Run("control: a key spelled ck_decl finds the recordset", func(t *testing.T) {
 		f.trace.reset()

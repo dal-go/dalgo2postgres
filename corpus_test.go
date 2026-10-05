@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -13,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // The helpers of the query corpus: the DTQL fixtures of dal-go/dalgo that this package
@@ -292,12 +295,22 @@ const (
 
 var differenceKinds = []string{differsInRows, differsInStatements, differsInError}
 
-// divergence is one entry of testdata/postgres-divergences.json.
+// divergenceSuites are the suites of the corpus an entry can name: the two the tests run.
+var divergenceSuites = []string{"joins", "subqueries"}
+
+// divergence is one entry of testdata/postgres-divergences.json. An entry says which kinds of
+// difference the case has and also what the case does, so that the file holds a case to
+// its difference and not only to its kind: Error is the text the error of the case contains
+// (required with the kind "error"; the error must not be the server's), and Statements is
+// the number of statements the case sends, the catalog lookup left out (required with the
+// kind "statements", where every one of them must also be a plain read of one source).
 type divergence struct {
-	Suite   string   `json:"suite"`
-	Case    string   `json:"case"`
-	Differs []string `json:"differs"`
-	Reason  string   `json:"reason"`
+	Suite      string   `json:"suite"`
+	Case       string   `json:"case"`
+	Differs    []string `json:"differs"`
+	Reason     string   `json:"reason"`
+	Error      string   `json:"error,omitempty"`
+	Statements *int     `json:"statements,omitempty"`
 }
 
 func (d divergence) key() string { return d.Suite + "/" + d.Case }
@@ -308,8 +321,10 @@ type divergenceFile struct {
 	Divergences   []divergence `json:"divergences"`
 }
 
-// parseDivergences reads the divergence file: every entry names a suite, a case, one or
-// more kinds of difference from differenceKinds, and a reason; no case is listed twice.
+// parseDivergences reads the divergence file: every entry names a suite of the corpus, a
+// case, one or more kinds of difference from differenceKinds, a reason, and what the kinds
+// need (an error text for "error", a statement count for "statements"); no case is listed
+// twice.
 func parseDivergences(data []byte) (map[string]divergence, error) {
 	var file divergenceFile
 	if err := json.Unmarshal(data, &file); err != nil {
@@ -323,6 +338,8 @@ func parseDivergences(data []byte) (map[string]divergence, error) {
 		switch {
 		case entry.Suite == "" || entry.Case == "":
 			return nil, fmt.Errorf("an entry names no suite or no case: %+v", entry)
+		case !contains(divergenceSuites, entry.Suite):
+			return nil, fmt.Errorf("%s: unknown suite %q, want one of %v: an entry of another suite would never be checked", entry.key(), entry.Suite, divergenceSuites)
 		case strings.TrimSpace(entry.Reason) == "":
 			return nil, fmt.Errorf("%s: no reason", entry.key())
 		case len(entry.Differs) == 0:
@@ -332,6 +349,16 @@ func parseDivergences(data []byte) (map[string]divergence, error) {
 			if !contains(differenceKinds, kind) {
 				return nil, fmt.Errorf("%s: unknown kind of difference %q, want one of %v", entry.key(), kind, differenceKinds)
 			}
+		}
+		switch {
+		case contains(entry.Differs, differsInError) && strings.TrimSpace(entry.Error) == "":
+			return nil, fmt.Errorf("%s: it differs in %q and says no error text: any error would satisfy it", entry.key(), differsInError)
+		case !contains(entry.Differs, differsInError) && entry.Error != "":
+			return nil, fmt.Errorf("%s: it gives an error text and does not differ in %q", entry.key(), differsInError)
+		case contains(entry.Differs, differsInStatements) && entry.Statements == nil:
+			return nil, fmt.Errorf("%s: it differs in %q and says no statement count: any shape would satisfy it", entry.key(), differsInStatements)
+		case entry.Statements != nil && *entry.Statements < 0:
+			return nil, fmt.Errorf("%s: a statement count of %d", entry.key(), *entry.Statements)
 		}
 		if _, twice := listed[entry.key()]; twice {
 			return nil, fmt.Errorf("%s is listed twice", entry.key())
@@ -375,6 +402,92 @@ func divergenceVerdict(key string, observed []string, listed *divergence) string
 		return fmt.Sprintf("%s differs from its fixture in %s, and testdata/postgres-divergences.json says %s: update its entry", key, strings.Join(observed, ", "), strings.Join(want, ", "))
 	}
 	return ""
+}
+
+// notALeafRead says whether a statement is more than a plain read of one source: it holds a
+// join, a subquery or an EXISTS, which DALgo's own engine never sends.
+func notALeafRead(statement string) bool {
+	upper := strings.ToUpper(statement)
+	return strings.Contains(upper, " JOIN ") || strings.Contains(upper, "(SELECT") || strings.Contains(upper, "EXISTS")
+}
+
+// divergenceDetails holds a case to what its entry says it does, beyond the kinds: for a
+// difference in "error", the read must have failed with an error that contains the entry's
+// text and is not the server's (a refusal by the adapter or DALgo, not a server error that
+// would hide a different fault); for a statement count, the case must have sent that many
+// statements; and for a difference in "statements", each of them must be a plain read. It
+// returns the problems as sentences, and none when the case is as its entry says.
+func divergenceDetails(entry divergence, err error, statements []string) []string {
+	var problems []string
+	if contains(entry.Differs, differsInError) {
+		var server *pgconn.PgError
+		switch {
+		case err == nil:
+			problems = append(problems, fmt.Sprintf("%s says the read fails with %q, and it did not fail", entry.key(), entry.Error))
+		case errors.As(err, &server):
+			problems = append(problems, fmt.Sprintf("%s says the read is refused with %q, and the error is the server's (SQLSTATE %s): %v", entry.key(), entry.Error, server.Code, err))
+		case !strings.Contains(err.Error(), entry.Error):
+			problems = append(problems, fmt.Sprintf("%s says the read fails with %q, and the error is %q", entry.key(), entry.Error, err.Error()))
+		}
+	}
+	if entry.Statements != nil && len(statements) != *entry.Statements {
+		problems = append(problems, fmt.Sprintf("%s says %d statements are sent, and %d were: %q", entry.key(), *entry.Statements, len(statements), statements))
+	}
+	if contains(entry.Differs, differsInStatements) {
+		for _, statement := range statements {
+			if notALeafRead(statement) {
+				problems = append(problems, fmt.Sprintf("%s says every statement is a plain read, and one is not: %s", entry.key(), statement))
+			}
+		}
+	}
+	return problems
+}
+
+// unrunFixtures lists the problems of a directory of fixtures against the names the tests
+// run: a DTQL document in dir (name.dtql.yaml or name.dtql.json) that no test runs, which
+// would pass unnoticed, and a name that is run and has no document.
+func unrunFixtures(dir string, ran []string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var problems []string
+	present := map[string]bool{}
+	for _, entry := range entries {
+		name := entry.Name()
+		for _, suffix := range []string{".dtql.yaml", ".dtql.json"} {
+			if base, found := strings.CutSuffix(name, suffix); found {
+				present[base] = true
+				if !contains(ran, base) {
+					problems = append(problems, fmt.Sprintf("%s: %s is a fixture that no test runs: add a case for it", dir, name))
+				}
+			}
+		}
+	}
+	for _, name := range ran {
+		if !present[name] {
+			problems = append(problems, fmt.Sprintf("%s: a test runs %s and there is no such fixture", dir, name))
+		}
+	}
+	sort.Strings(problems)
+	return problems, nil
+}
+
+// inputlessCases are the cases of the subquery suite that hold no query of their own and are
+// not run, by name: the null truth table of IN and NOT IN, which the runnable in-correlated and
+// not-in-correlated cases carry. Any other case without an input is an error.
+var inputlessCases = []string{"in-not-in-null-table"}
+
+// unexpectedInputless lists the cases of the suite that hold no input and are not among the
+// ones that may.
+func unexpectedInputless(cases []suiteCase) []string {
+	var unexpected []string
+	for _, tc := range cases {
+		if tc.Input == "" && !contains(inputlessCases, tc.Name) {
+			unexpected = append(unexpected, tc.Name)
+		}
+	}
+	return unexpected
 }
 
 // unusedDivergences are the keys of listed entries of the suite that no case of the suite

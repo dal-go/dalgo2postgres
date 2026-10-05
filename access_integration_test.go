@@ -275,6 +275,8 @@ func TestAccessIntegration_HiddenFieldUnderAnAliasAndAnEmptyProjectionAreDenied(
 // A hidden field named in a join's ON condition, at any depth, in a filter, in an order and in
 // a scan order is denied before the adapter: no statement of any kind reaches the server, the
 // catalog lookup included. The control is the same shapes over the listed fields, which run.
+// The last five cases pin a limit of dal-go/dalgo, not a leak: a field of the joined source is
+// held to the listed source's list in the select list, WHERE, GROUP BY, HAVING and ORDER BY.
 func TestAccessIntegration_HiddenFieldInAJoinOrAScanOrderIsDeniedWithNoStatement(t *testing.T) {
 	forEachMode(t, func(t *testing.T, w accessWorld) {
 		f := w.f
@@ -285,8 +287,13 @@ func TestAccessIntegration_HiddenFieldInAJoinOrAScanOrderIsDeniedWithNoStatement
 		personField := func(name string) dal.Expression { return dal.NewFieldRef("p", w.name(name)) }
 		invoiceField := func(alias, name string) dal.Expression { return dal.NewFieldRef(alias, w.name(name)) }
 		on := func(left, right dal.Expression) dal.Condition { return dal.NewComparison(left, dal.Equal, right) }
+		selectedName := dal.Column{Expression: personField("Name")}
 		selectName := func(from dal.FromSource) dal.StructuredQuery {
-			return from.NewQuery().SelectColumns(dal.Column{Expression: personField("Name")})
+			return from.NewQuery().SelectColumns(selectedName)
+		}
+		// joined is Person joined to Invoice on the listed fields, which the list lets through.
+		joined := func() dal.FromSource {
+			return dal.From(person).Join(dal.NewJoinedSource(invoice("i"), dal.JoinInner, on(personField("PersonId"), invoiceField("i", "PersonId"))))
 		}
 
 		for _, tc := range []struct {
@@ -329,6 +336,31 @@ func TestAccessIntegration_HiddenFieldInAJoinOrAScanOrderIsDeniedWithNoStatement
 			{"an order by the hidden field",
 				w.persons().OrderBy(dal.AscendingField(w.name("Secret"))).SelectColumns(dal.Column{Expression: w.field("Name")}),
 				access.DecisionSlotFields, "Secret"},
+			// KNOWN LIMIT of dal-go/dalgo (a field list is held to the base source; it fails
+			// closed and does not leak): the list of the listed source Person is applied to
+			// every field of the select list, WHERE, GROUP BY, HAVING and ORDER BY of a join,
+			// whatever the source its qualifier names (the access layer attributes only a
+			// join's ON condition and a scan order to a source). So a column of the joined
+			// source Invoice is denied by Person's list when the list does not hold its name,
+			// though Invoice is allowed whole. When the access layer attributes these clauses
+			// by source, each case below FAILS and says what to assert instead.
+			{"a field of the joined source in the order, which the listed source's list does not hold",
+				joined().NewQuery().OrderBy(dal.Ascending(invoiceField("i", "InvoiceId"))).SelectColumns(selectedName),
+				access.DecisionSlotFields, "InvoiceId"},
+			{"a field of the joined source in the select list, which the listed source's list does not hold",
+				joined().NewQuery().SelectColumns(dal.Column{Expression: invoiceField("i", "Total")}),
+				access.DecisionSlotFields, "Total"},
+			{"a field of the joined source in WHERE, which the listed source's list does not hold",
+				joined().NewQuery().Where(dal.NewComparison(invoiceField("i", "Total"), dal.GreaterThen, dal.NewConstant(1))).SelectColumns(selectedName),
+				access.DecisionSlotWhere, "Total"},
+			{"a field of the joined source in GROUP BY, which the listed source's list does not hold",
+				joined().NewQuery().GroupBy(invoiceField("i", "Total")).SelectColumns(selectedName),
+				access.DecisionSlotFields, "Total"},
+			{"a field of the joined source in HAVING, which the listed source's list does not hold",
+				joined().NewQuery().GroupBy(personField("Name")).
+					Having(dal.NewComparison(dal.NewAggregate(dal.SUM, false, invoiceField("i", "Total")), dal.GreaterThen, dal.NewConstant(1))).
+					SelectColumns(selectedName),
+				access.DecisionSlotWhere, "Total"},
 		} {
 			f.trace.reset()
 			_, err := readThrough(ctx, session, tc.query)
@@ -341,9 +373,9 @@ func TestAccessIntegration_HiddenFieldInAJoinOrAScanOrderIsDeniedWithNoStatement
 		rows, err := readThrough(ctx, session, dal.From(person).Join(dal.NewJoinedSource(invoice("i"), dal.JoinInner, on(personField("PersonId"), invoiceField("i", "PersonId")))).
 			NewQuery().OrderBy(dal.Ascending(personField("PersonId"))).
 			SelectColumns(dal.Column{Expression: personField("Name"), Alias: "name"}))
-		// (An ORDER BY on a field of the joined source, i.InvoiceId, is held to the list of the
-		// listed source as well and is denied: it fails closed, and the denial is not asserted
-		// here.)
+		// (A field of the joined source in the select list, WHERE, GROUP BY, HAVING or ORDER BY
+		// is held to the list of the listed source as well and is denied: see the cases above.
+		// The control therefore selects and orders by fields of the listed source only.)
 		if err != nil {
 			t.Fatalf("a join over the listed fields: %v\nstatements: %v", err, statementsSent(f))
 		}

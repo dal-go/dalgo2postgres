@@ -2,11 +2,16 @@ package dalgo2postgres
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // These tests need no server: they test the helpers of the query corpus (corpus_test.go),
@@ -268,20 +273,99 @@ func TestParseDivergences(t *testing.T) {
 	if err != nil || len(listed) != 1 || listed["joins/a"].Reason != "because" {
 		t.Fatalf("parse = %v, %v; want the one entry", listed, err)
 	}
+	full := `{"schemaVersion":1,"divergences":[` +
+		`{"suite":"subqueries","case":"b","differs":["error","statements"],"error":"refused","statements":0,"reason":"r"}]}`
+	listed, err = parseDivergences([]byte(full))
+	if err != nil || listed["subqueries/b"].Error != "refused" || listed["subqueries/b"].Statements == nil || *listed["subqueries/b"].Statements != 0 {
+		t.Fatalf("parse = %v, %v; want the error text and a statement count of 0", listed, err)
+	}
+	counted := `{"schemaVersion":1,"divergences":[{"suite":"joins","case":"c","differs":["rows"],"statements":2,"reason":"r"}]}`
+	if listed, err = parseDivergences([]byte(counted)); err != nil || *listed["joins/c"].Statements != 2 {
+		t.Fatalf("parse = %v, %v; want a statement count that holds a case to it whatever its kind", listed, err)
+	}
 	for name, doc := range map[string]string{
-		"not JSON":        `{`,
-		"another version": `{"schemaVersion":2,"divergences":[]}`,
-		"no suite":        `{"schemaVersion":1,"divergences":[{"case":"a","differs":["rows"],"reason":"r"}]}`,
-		"no case":         `{"schemaVersion":1,"divergences":[{"suite":"s","differs":["rows"],"reason":"r"}]}`,
-		"no reason":       `{"schemaVersion":1,"divergences":[{"suite":"s","case":"a","differs":["rows"],"reason":" "}]}`,
-		"no kind":         `{"schemaVersion":1,"divergences":[{"suite":"s","case":"a","differs":[],"reason":"r"}]}`,
-		"an unknown kind": `{"schemaVersion":1,"divergences":[{"suite":"s","case":"a","differs":["speed"],"reason":"r"}]}`,
+		"not JSON":                    `{`,
+		"another version":             `{"schemaVersion":2,"divergences":[]}`,
+		"no suite":                    `{"schemaVersion":1,"divergences":[{"case":"a","differs":["rows"],"reason":"r"}]}`,
+		"no case":                     `{"schemaVersion":1,"divergences":[{"suite":"joins","differs":["rows"],"reason":"r"}]}`,
+		"an unknown suite":            `{"schemaVersion":1,"divergences":[{"suite":"s","case":"a","differs":["rows"],"reason":"r"}]}`,
+		"no reason":                   `{"schemaVersion":1,"divergences":[{"suite":"joins","case":"a","differs":["rows"],"reason":" "}]}`,
+		"no kind":                     `{"schemaVersion":1,"divergences":[{"suite":"joins","case":"a","differs":[],"reason":"r"}]}`,
+		"an unknown kind":             `{"schemaVersion":1,"divergences":[{"suite":"joins","case":"a","differs":["speed"],"reason":"r"}]}`,
+		"an error with no text":       `{"schemaVersion":1,"divergences":[{"suite":"subqueries","case":"a","differs":["error"],"reason":"r"}]}`,
+		"an error with a blank text":  `{"schemaVersion":1,"divergences":[{"suite":"subqueries","case":"a","differs":["error"],"error":" ","reason":"r"}]}`,
+		"an error text with no error": `{"schemaVersion":1,"divergences":[{"suite":"joins","case":"a","differs":["rows"],"error":"x","reason":"r"}]}`,
+		"statements with no count":    `{"schemaVersion":1,"divergences":[{"suite":"joins","case":"a","differs":["statements"],"reason":"r"}]}`,
+		"a negative count":            `{"schemaVersion":1,"divergences":[{"suite":"joins","case":"a","differs":["statements"],"statements":-1,"reason":"r"}]}`,
 		"a case twice": `{"schemaVersion":1,"divergences":[` +
-			`{"suite":"s","case":"a","differs":["rows"],"reason":"r"},{"suite":"s","case":"a","differs":["error"],"reason":"r"}]}`,
+			`{"suite":"joins","case":"a","differs":["rows"],"reason":"r"},{"suite":"joins","case":"a","differs":["rows"],"reason":"r"}]}`,
 	} {
 		if _, err := parseDivergences([]byte(doc)); err == nil {
 			t.Errorf("%s: parsed, want an error", name)
 		}
+	}
+}
+
+func TestDivergenceDetails(t *testing.T) {
+	count := func(n int) *int { return &n }
+	refusal := errors.New("join_plan at from: cannot load fields for recent: not supported: source dal.QuerySource")
+	server := fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: "42P01", Message: "not supported: source dal.QuerySource"})
+	plain := []string{`SELECT * FROM "a" AS "a"`, `SELECT * FROM "b" AS "b"`}
+	errorEntry := divergence{Suite: "subqueries", Case: "x", Differs: []string{differsInError}, Error: "not supported: source dal.QuerySource"}
+	statementsEntry := divergence{Suite: "joins", Case: "w", Differs: []string{differsInStatements}, Statements: count(2)}
+	for _, tc := range []struct {
+		name       string
+		entry      divergence
+		err        error
+		statements []string
+		want       string // a fragment of the problem, "" for none
+	}{
+		{"an error as the entry says", errorEntry, refusal, nil, ""},
+		{"no error where the entry lists one", errorEntry, nil, nil, "the read fails with"},
+		{"another error than the entry says", errorEntry, errors.New("boom"), nil, `the error is "boom"`},
+		{"the server's error with the same words", errorEntry, server, nil, "the error is the server's (SQLSTATE 42P01)"},
+		{"statements as the entry says, every one a plain read", statementsEntry, nil, plain, ""},
+		{"another number of statements", statementsEntry, nil, plain[:1], "says 2 statements are sent, and 1 were"},
+		{"a statement that is more than a plain read", statementsEntry, nil, []string{plain[0], `SELECT * FROM "a" INNER JOIN "b" ON 1`}, "says every statement is a plain read"},
+		{"a count on an entry of another kind holds the case to it", divergence{Suite: "subqueries", Case: "y", Differs: []string{differsInRows}, Statements: count(0)}, nil, plain, "says 0 statements are sent, and 2 were"},
+		{"no count and no error text: nothing more is held", divergence{Suite: "subqueries", Case: "z", Differs: []string{differsInRows}}, nil, plain, ""},
+	} {
+		problems := divergenceDetails(tc.entry, tc.err, tc.statements)
+		if (tc.want == "") != (len(problems) == 0) || (tc.want != "" && !strings.Contains(strings.Join(problems, "\n"), tc.want)) {
+			t.Errorf("%s: problems = %q, want one that says %q", tc.name, problems, tc.want)
+		}
+	}
+}
+
+func TestUnrunFixtures(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a.dtql.yaml", "b.dtql.json", "b.rows.json", "manifest.json", "c.error.json"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	problems, err := unrunFixtures(dir, []string{"a", "b"})
+	if err != nil || len(problems) != 0 {
+		t.Errorf("problems = %q, %v; want none: the documents a and b are run, the other files are no documents", problems, err)
+	}
+	problems, err = unrunFixtures(dir, []string{"a", "ghost"})
+	if err != nil || len(problems) != 2 {
+		t.Fatalf("problems = %q, %v; want two", problems, err)
+	}
+	wantProblem(t, problems, "b.dtql.json is a fixture that no test runs")
+	wantProblem(t, problems, "a test runs ghost and there is no such fixture")
+	if _, err := unrunFixtures(filepath.Join(dir, "nope"), nil); err == nil {
+		t.Error("a directory that does not exist was listed, want the error")
+	}
+}
+
+func TestUnexpectedInputless(t *testing.T) {
+	cases := []suiteCase{{Name: "in-not-in-null-table"}, {Name: "runnable", Input: "x.dtql.yaml"}, {Name: "forgotten"}}
+	if got := unexpectedInputless(cases); !reflect.DeepEqual(got, []string{"forgotten"}) {
+		t.Errorf("unexpected = %v, want only the case that is not named in inputlessCases", got)
+	}
+	if got := unexpectedInputless(cases[:2]); len(got) != 0 {
+		t.Errorf("unexpected = %v, want none", got)
 	}
 }
 

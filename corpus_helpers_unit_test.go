@@ -1,13 +1,17 @@
 package dalgo2postgres
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/dal-go/dalgo/dal"
+	"github.com/dal-go/dalgo2sql"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -156,5 +160,117 @@ func TestExpectedGroupsAndJoinRows(t *testing.T) {
 	}
 	if got := pushdownDDL(); len(got) != 12 || !strings.Contains(got[0], "generate_series(1, 200000)") {
 		t.Errorf("pushdownDDL = %v", got)
+	}
+}
+
+func TestCompareJoinRun(t *testing.T) {
+	want := []map[string]any{{"id": 1.0, "name": "Ada"}}
+	one := []string{`SELECT * FROM "a" INNER JOIN "b" ON 1`}
+	for _, tc := range []struct {
+		name     string
+		run      adapterRun
+		joins    int
+		observed []string
+	}{
+		{"as the fixture says", adapterRun{statements: one, rows: []map[string]any{{"id": int64(1), "name": "Ada"}}}, 1, nil},
+		{"a failed read", adapterRun{err: errors.New("boom")}, 1, []string{differsInError}},
+		{"two statements", adapterRun{statements: append(one, one[0]), rows: []map[string]any{{"id": int64(1), "name": "Ada"}}}, 1, []string{differsInStatements}},
+		{"another number of JOINs", adapterRun{statements: one, rows: []map[string]any{{"id": int64(1), "name": "Ada"}}}, 2, []string{differsInStatements}},
+		{"other rows", adapterRun{statements: one, rows: []map[string]any{{"id": int64(2), "name": "Ada"}}}, 1, []string{differsInRows}},
+		{"other statements and other rows", adapterRun{rows: nil}, 1, []string{differsInStatements, differsInRows}},
+	} {
+		observed, notes, err := compareJoinRun(tc.run, want, tc.joins)
+		if err != nil || !reflect.DeepEqual(observed, tc.observed) || len(notes) != len(tc.observed) {
+			t.Errorf("%s: observed = %v, notes = %v, error %v; want %v", tc.name, observed, notes, err, tc.observed)
+		}
+	}
+	if _, _, err := compareJoinRun(adapterRun{statements: one, rows: []map[string]any{{"bad": make(chan int)}}}, want, 1); err == nil {
+		t.Error("rows that JSON cannot hold were compared, want the error")
+	}
+}
+
+func TestCorrelatedCostProblems(t *testing.T) {
+	outer := `SELECT * FROM "Truth" AS "t"`
+	inner := `SELECT * FROM "Membership" AS "m"`
+	if problems := correlatedCostProblems("case", "Membership", 2, []string{outer, inner, inner}); len(problems) != 0 {
+		t.Errorf("problems = %q, want none for one outer read and one inner read per outer row", problems)
+	}
+	wantProblem(t, correlatedCostProblems("case", "Membership", 2, []string{outer, inner}), "sent 2 statements, want 3")
+	wantProblem(t, correlatedCostProblems("case", "Membership", 1, []string{outer, `SELECT * FROM "Other" AS "m"`}), "want an unfiltered read of every column of Membership")
+	wantProblem(t, correlatedCostProblems("case", "Membership", 1, []string{outer, inner + ` WHERE "m"."SetName" = $1`}), "want an unfiltered read")
+}
+
+// The recordset reader's rows are read into maps by column name, as the records reader's are.
+func TestReadRecordsetRows(t *testing.T) {
+	open := func(t *testing.T, rows *sqlmock.Rows) dal.RecordsetReader {
+		t.Helper()
+		sqlDB, mock := newStructuredMock(t)
+		db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
+		mock.ExpectQuery(catalogStatement).WithArgs(`"album"`).WillReturnRows(albumCatalog(`"album"`))
+		mock.ExpectQuery(`SELECT "albumid", "title" FROM "album"`).WillReturnRows(rows)
+		reader, err := db.ExecuteQueryToRecordsetReader(context.Background(),
+			albumFrom().NewQuery().SelectColumns(dal.Column{Expression: dal.NewFieldRef("", "AlbumId")}, titleColumn()))
+		if err != nil {
+			t.Fatalf("ExecuteQueryToRecordsetReader: %v", err)
+		}
+		t.Cleanup(func() { _ = reader.Close() })
+		return reader
+	}
+	typed := func() *sqlmock.Rows {
+		return sqlmock.NewRowsWithColumnDefinition(
+			sqlmock.NewColumn("albumid").OfType("INT4", int64(0)),
+			sqlmock.NewColumn("title").OfType("TEXT", ""))
+	}
+	t.Run("every row, by the name the query asked for, and a NULL as nil", func(t *testing.T) {
+		rows, err := readRecordsetRows(open(t, typed().AddRow(int64(1), "First").AddRow(int64(2), nil)))
+		want := []map[string]any{{"AlbumId": int64(1), "Title": "First"}, {"AlbumId": int64(2), "Title": nil}}
+		if err != nil || !reflect.DeepEqual(rows, want) {
+			t.Errorf("rows = %v, error %v; want %v", rows, err, want)
+		}
+	})
+	t.Run("no row is no rows", func(t *testing.T) {
+		rows, err := readRecordsetRows(open(t, typed()))
+		if err != nil || len(rows) != 0 {
+			t.Errorf("rows = %v, error %v; want none", rows, err)
+		}
+	})
+	t.Run("an error in the middle of the rows keeps the rows before it and is the reader's", func(t *testing.T) {
+		boom := errors.New("boom")
+		rows, err := readRecordsetRows(open(t, typed().AddRow(int64(1), "First").AddRow(int64(2), "Second").RowError(1, boom)))
+		if !errors.Is(err, boom) || len(rows) != 1 || rows[0]["Title"] != "First" {
+			t.Errorf("rows = %v, error %v; want the first row and the reader's error", rows, err)
+		}
+	})
+}
+
+func TestPlainNamesAndKeyPathProblems(t *testing.T) {
+	for text, want := range map[string]bool{
+		"canary": true, "_x9": true, "Mixed_Case": true, strings.Repeat("n", 64): true, strings.Repeat("n", 255): true,
+		strings.Repeat("n", 256): false, "9lives": false, "": false, "a b": false, `a"b`: false, "naïve": false, "a\x00b": false, "a;b": false,
+	} {
+		if got := isPlainName(text); got != want {
+			t.Errorf("isPlainName(%q) = %v, want %v", text, got, want)
+		}
+	}
+	// Of the probes, only the name of 64 bytes is a plain name: it is what the key paths pass to the server.
+	for _, probe := range probes {
+		if want := probe.label == "a name of 64 bytes"; isPlainName(probe.text) != want {
+			t.Errorf("probe %q: isPlainName = %v, want %v", probe.label, isPlainName(probe.text), want)
+		}
+	}
+	clean := []tracedStatement{{sql: "SELECT 1 FROM probe_keys WHERE code = $1"}}
+	if problems := keyPathProblems("l", "x'; DROP", clean, false); len(problems) != 0 {
+		t.Errorf("problems = %q, want none", problems)
+	}
+	wantProblem(t, keyPathProblems("l", "x", []tracedStatement{{sql: "SELECT 1; SELECT 2"}}, false), `holds ";"`)
+	wantProblem(t, keyPathProblems("l", "x", []tracedStatement{{sql: `SELECT "a" FROM t`}}, false), `holds "\""`)
+	text := strings.Repeat("n", 64)
+	named := []tracedStatement{{sql: "SELECT 1 FROM " + text + " WHERE code = $1"}}
+	wantProblem(t, keyPathProblems("l", text, named, false), "holds the text")
+	if problems := keyPathProblems("l", text, named, true); len(problems) != 0 {
+		t.Errorf("problems = %q, want none for a plain name the statement may write", problems)
+	}
+	if problems := keyPathProblems("l", "abc", []tracedStatement{{sql: "SELECT abc"}}, false); len(problems) != 0 {
+		t.Errorf("problems = %q, want none: a text of four bytes or fewer is not looked for", problems)
 	}
 }

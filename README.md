@@ -90,8 +90,15 @@ DALgo's own engine is bounded, in memory: it stops at 10,000 rows of a join and 
 groups of an aggregation (dalgo v0.89.6), and past them returns an error, not a partial
 result.
 
-- **A query with a subquery** (`EXISTS`, a scalar subquery, a derived source): DALgo reads
-  each source with plain statements and combines them itself.
+- **A query with a subquery** (`IN`, `EXISTS`, a scalar subquery): DALgo reads each source with
+  plain statements and combines them itself. A **correlated** subquery reads the whole inner
+  table, every column and no filter, once for each row of the outer table, after one read of the
+  outer table: 1 + 7 statements for 7 outer rows, and the server cannot shorten it. Where the
+  tables are large, a correlated subquery costs what they hold (the statement count of each
+  fixture case is asserted: `TestFixturesIntegration_SubqueriesRunInDALgoOverLeafReads`).
+  Issue for dal-go/dalgo (a correlated subquery read with the outer value as a filter): not
+  yet filed. A query with a **derived source** is not answered at all: it is refused (see the
+  known limits).
 - **A join the database declines**: the `ON` types differ (text with an integer, a boolean
   with an integer), or two text keys have different collations of their own, neither the
   database's default (the server cannot choose between them and refuses the comparison,
@@ -246,7 +253,10 @@ What the server answers, as observed:
   `0.10000000149011612` when widened, and a `numeric` `0.1` is not that number, so a numeric
   binding finds nothing; the dialect writes `$n::real` from the float's own decimal text, and
   `float32(0.1)`, `0.1`, the string `"0.1"` and the `float64` the reader returned for the row
-  all find it. Against `double precision` and `numeric` the binding stays `numeric`.
+  all find it. Against `double precision` and `numeric` the binding stays `numeric`. A float
+  is **rounded to a real before it is compared**, so one that differs from the stored real only
+  past the seven digits a real holds is the same real: `0.1000000001` finds the row that stores
+  `0.1`.
 - **Joins**: a text column with a collation of its own against one with the database's
   default joins on the server, in the collation of the first. Two columns with different
   collations of their own do not join on the server (`42P22`: the server cannot choose
@@ -261,9 +271,10 @@ What the server answers, as observed:
   `IdentifierFoldLower`; in `IdentifierExact` they are two columns.
 
 Known limits. Each is pinned by a test that prints the statement and the server's answer.
-The ones that follow are **defects or limits of dal-go/dalgo2sql**, reported to it; no fix of
-any of them is under way yet. Each test FAILS when the fix is released and says what to assert
-instead, so the line here is then deleted. They are observations, not rules to rely on.
+The ones that follow are **defects or limits of dal-go/dalgo2sql**. None has an issue or a pull
+request yet (each says "not yet filed" until it has, and then names it), and no fix of any of
+them is under way. Each test FAILS when the fix is released and says what to assert instead, so
+the line here is then deleted. They are observations, not rules to rely on.
 
 - **A column with a `NOT VALID` not-null constraint** (PostgreSQL 18; `ALTER TABLE ... ADD
   CONSTRAINT ... NOT NULL col NOT VALID`) that holds NULL rows is **sorted wrongly**, which is a
@@ -272,30 +283,32 @@ instead, so the line here is then deleted. They are observations, not rules to r
   descending, the opposite of DALgo's rule: `ORDER BY v LIMIT 3` over the values 3, NULL, 1, NULL,
   2 returns 1, 2, 3 where DALgo's rule gives the two NULL rows first
   (`TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimit` pins the
-  statement and the rows). Do not rely on the order of such a column until it is fixed, or
-  validate the constraint.
+  catalog's two facts, the statement and the rows). Do not rely on the order of such a column,
+  or of a `LIMIT` or `OFFSET` page over it, until it is fixed, or validate the constraint.
+  Issue or pull request: not yet filed.
 - **A derived source** (a query in `FROM` or in a join, DTQL's `from: {query: ...}`) is refused:
   DALgo's engine asks the adapter for the columns of each source, and dalgo2sql answers for a
   table and refuses for a derived source with `not supported: source dal.QuerySource`. Four
-  cases of the subquery fixtures are listed in `testdata/postgres-divergences.json` for it.
+  cases of the subquery fixtures are listed in `testdata/postgres-divergences.json` for it, the
+  simplest one (`FROM (query) AS recent`, no join) included. Issue: not yet filed.
 - **A wildcard between two explicit columns of a join** is not compiled for the server (the
   compiler refuses a wildcard that does not come first), so the join is declined to DALgo's
   engine, which reads each table with one statement and joins in memory, within its bounds. The
-  fixture `chinook-wildcard` is listed in the divergence file for it.
+  fixture `chinook-wildcard` is listed in the divergence file for it. Issue: not yet filed.
 
 - **A recordset registered under a name with capitals** (`Ck_Mixed`) is found only by a query
   that spells the source exactly so; dalgo2sql folds the name the query spells, never the
   registered names. For `ck_mixed` or `CK_MIXED` the recordset is ignored with no error and the
   records are keyed by the catalog's key instead of the declared one. In
-  `IdentifierFoldLower` register recordsets under lower case names. Reported for
-  dal-go/dalgo2sql.
+  `IdentifierFoldLower` register recordsets under lower case names, and spell the collection of
+  every key the same way (see "How a recordset is found"). Issue: not yet filed.
 - **A key read does not fold the collection of its key** (`Ck_Decl` for a recordset registered as
   `ck_decl`): the recordset is not found, and `Exists` and `Get` answer an error that matches
   `ErrRecordNotFound` for a row that exists (see "How a recordset is found"). A query finds it.
-  Reported for dal-go/dalgo2sql.
+  Issue: not yet filed.
 - **A keys-only read selects every column.** A read of keys only is sent as
   `SELECT * FROM "t" ORDER BY "id" ASC` for a table whose key the catalog gives, so the server
-  reads and sends every column of every row to return a key. Reported for dal-go/dalgo2sql
+  reads and sends every column of every row to return a key. Issue: not yet filed
   (`TestStructuredQueryIntegration_RecordKeysFromTheCatalog` pins the statement).
 
 Limits of this combination that are not defects of one library:
@@ -306,8 +319,8 @@ Limits of this combination that are not defects of one library:
   `sort.Strings` puts it last. The shared suite of dal-go/dalgo asserts the keys-only read of
   its cities in Go's order, so it fails here for a key in the database's collation; its fixture
   here declares `COLLATE "C"` (the control, which equals Go's order) and the divergence is
-  pinned by `TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation`. Reported
-  for dal-go/dalgo (is the order part of the contract?) and dal-go/dalgo2sql.
+  pinned by `TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation`. Issues for
+  dal-go/dalgo (is the order part of the contract?) and dal-go/dalgo2sql: not yet filed.
 - In `IdentifierFoldLower`, a **row-level access condition** that spells a field in another
   case than the table stores it (`Country` for `country`) is not satisfied on `Exists` or
   `Update`, which read the row into a map keyed by the stored names: the access layer compares
@@ -335,8 +348,14 @@ skipped, missing or not passing.
   subquery fixtures run in DALgo's engine over plain reads. Each case is compared with its
   fixture (numbers within 1e-9); a case that differs is listed in
   `testdata/postgres-divergences.json` with the reason, and the test fails for a difference that
-  is not listed and for a listed case that no longer differs
-  (`TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer`,
+  is not listed and for a listed case that no longer differs. An entry also says what the case
+  does: an `error` entry holds the text the refusal contains (and the error must not be the
+  server's), a `statements` entry the number of statements and that each is a plain read, and an
+  entry of a suite the tests do not run is refused. A fixture document that no test runs fails,
+  and so does a case with no input but the one named for it. The number of statements of every
+  subquery case is asserted, and a correlated subquery is shown to read the inner table once
+  per outer row (`TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer`, which runs each
+  join through both readers, `TestFixturesEveryJoinFixtureIsRunByATest`,
   `TestFixturesIntegration_SubqueriesRunInDALgoOverLeafReads`).
 - **Pushdown.** A `GROUP BY` with `HAVING` over 200,000 rows and 150,000 groups, and a join of
   50,000 orders to their customers (20,000,000 bytes of text), are each one statement in the
@@ -344,22 +363,41 @@ skipped, missing or not passing.
   16 MiB). The negative control runs the same queries over the same tables without the native
   route (a database with no dialect for the grouped query, DALgo's engine over the adapter's plain
   reads for the join), and the engine refuses them with its own limit; the same shapes over a few
-  rows are answered by both with the same rows (`TestPushdownIntegration_`).
+  rows are answered by both with the same rows (`TestPushdownIntegration_`). The two proofs run
+  through both public reads, the records reader and the recordset reader that DataTug reads, and
+  are one statement through either; the negative control reads through the records reader and
+  DALgo's engine.
 - **Access.** Through `access.SecureReadSession`: a row condition whose value holds a quote
   returns exactly the permitted rows, the value is a bound argument, and the table is whole
   afterwards; the alias of a hidden field and a projection with no permitted column are denied; a
   hidden field in a join's `ON` condition at any depth, in a filter, in an order and in a scan
   order is denied with no statement sent to the server; a session with no policy is denied; and a
   wider allow behind a conditional rule decides the row (`TestAccessIntegration_`, each in both
-  identifier modes). A field list is held to every field that orders the query, so an `ORDER BY`
-  on a field of a joined source is denied by the listed source's list: it fails closed. The shared access controls of dal-go/dalgo run beside them in `TestEndToEnd`.
+  identifier modes). A field list of the listed (base) source is applied to every field in a join's
+  select list, `WHERE`, `GROUP BY`, `HAVING` and `ORDER BY`, whatever source its qualifier
+  names: only a join's `ON` condition and a scan order are attributed to the source they name. So
+  a column of a joined source is read only when the list also holds its name, and `ORDER BY
+  i.InvoiceId`, `SELECT i.Total`, a filter, a `GROUP BY` and a `HAVING` on a field of the joined
+  `Invoice` are all denied by the listed `Person`'s list, with the code, the slot, the column and
+  no statement. It fails closed and does not leak; it is a limit of dal-go/dalgo (issue: not yet
+  filed), pinned by `TestAccessIntegration_HiddenFieldInAJoinOrAScanOrderIsDeniedWithNoStatement`.
+  The shared access controls of dal-go/dalgo run beside them in `TestEndToEnd`.
 - **Probes.** A canary table, and a quote, a double quote, doubled quotes, a semicolon with a
   second statement, comment markers, a NUL byte, a name of 64 bytes and a non-ASCII name written
-  where a value, a field, a collection, an alias, an `ORDER BY` field, a `GROUP BY` field and a
-  join key go, in both identifier modes. Each answer is rows, an empty result or an error built
-  before any statement (a NUL byte in a value is the server's own refusal); outside its quoted
-  identifiers no statement holds a marker, every value is a bound argument, and the canary is
-  unchanged (`TestProbesIntegration_NothingACallerWritesBecomesSQL`).
+  where a value (in a filter, an `IN` list and a `HAVING`), a field (in a filter, the select
+  list, an aggregate, `ORDER BY` and `GROUP BY`), the qualifier of a field, a collection, the
+  schema of a qualified collection, an alias (of a column, of the source and of a joined
+  source) and a join key go, in both identifier modes. Each answer is rows, an empty result or an
+  error built before any statement (a NUL byte in a value is the server's own refusal); outside
+  its quoted identifiers no statement holds a marker, every value is a bound argument, and the
+  canary is unchanged (`TestProbesIntegration_NothingACallerWritesBecomesSQL`). The key paths,
+  which are another emitter of SQL (plain names written unquoted), are probed in the same two
+  modes with the same texts as the collection of a key, as its ID, and as the field names and
+  the values of a write (`Exists`, `Get`, `Insert`, `Delete`): a text that is not a plain
+  identifier is refused with `ErrUnsafeName` and no statement, an ID and a value are arguments
+  read back as written, and nothing is left behind
+  (`TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath`). A join's `ON` condition
+  takes only an equality of two fields, so a value is no position of it.
 - **PostgreSQL 18.** A column with a `NOT VALID` not-null constraint and NULL rows under
   `ORDER BY` with `LIMIT` (`TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimit`;
   on 17 it asserts that the syntax is refused).
@@ -592,6 +630,13 @@ fails on any other skip, and on a test of the families `TestEndToEnd`, `TestType
 `TestServerPinsIntegration_`, `TestStructuredQueryIntegration_`, `TestFixturesIntegration_`,
 `TestPushdownIntegration_`, `TestAccessIntegration_` and `TestProbesIntegration_` that does not run
 to a pass.
+
+**The DSN must name a throwaway database.** The tests create and drop whole schemas with
+`CASCADE`: the ones named `test_*`, the schema `main` that the join fixtures name (it is dropped
+and created again whatever it holds), the schemas the probes name (the texts of the probes), and
+the conformance suite creates and drops its own tables in the connection's default schema. Never
+point `DALGO2POSTGRES_TEST_DSN` at a database that holds data. The example above is a container
+that exists for the tests.
 
 ## PostgreSQL driver: `github.com/jackc/pgx/v5/stdlib` (pure Go, `CGO_ENABLED=0`)
 
