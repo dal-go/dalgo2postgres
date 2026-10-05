@@ -22,8 +22,10 @@ import (
 type FailureKind int
 
 const (
-	// FailureOther is any failure the kinds below do not describe. It is the
-	// zero value.
+	// FailureOther is any failure the kinds below do not describe, such as a
+	// connection that was open and ended without an error of the network (the end
+	// of the stream, a connection the driver had already closed). It is the zero
+	// value.
 	FailureOther FailureKind = iota
 	// FailureInvalidDSN: the driver cannot parse the connection string, or a file
 	// or service the string names cannot be read.
@@ -34,7 +36,7 @@ const (
 	// refused before any connection is attempted.
 	FailureMisread
 	// FailureNetwork: the server could not be reached (name resolution, refused or
-	// reset connection).
+	// reset connection, a broken pipe).
 	FailureNetwork
 	// FailureTLS: the TLS handshake with the server failed.
 	FailureTLS
@@ -82,8 +84,13 @@ func (k FailureKind) sentence(sqlState string) string {
 	return kindSentences[k]
 }
 
-// ConnectionError is the error [NewDatabase] and [NewDatabaseWithOptions] return
-// when the connection to PostgreSQL cannot be opened or verified.
+// ConnectionError is the error a connection that fails is reported as: by
+// [NewDatabase] and [NewDatabaseWithOptions] when the connection to PostgreSQL
+// cannot be opened or verified, and by every other call of this package (a read, a
+// write, a transaction, the schema reader, a reader a query returned) when its
+// connection fails later, for example when the pool must make a connection again,
+// or when a connection that was open is lost (a reset or a timeout of the socket,
+// the end of the stream, a connection the driver had already closed).
 //
 // Its text is built only from a fixed sentence chosen by Kind and from the parts
 // below that passed a strict check. Nothing of the connection string but those
@@ -91,9 +98,13 @@ func (k FailureKind) sentence(sqlState string) string {
 // copied into it: those hold the user name, the password and other settings, and
 // callers print errors. For the same reason the driver's error is not reachable
 // through [errors.Unwrap], [errors.Is] or [errors.As]; branch on Kind and
-// SQLState instead.
+// SQLState instead. The one thing kept of it is whether the attempt ended because
+// its context was canceled or its deadline passed: [errors.Is] finds
+// [context.Canceled] and [context.DeadlineExceeded] in the error of such an
+// attempt.
 //
-// A part that is empty was not known, or could not be named safely.
+// A part that is empty was not known, or could not be named safely. An error of
+// a call after the connection was opened names no part at all.
 type ConnectionError struct {
 	// Kind is what failed.
 	Kind FailureKind
@@ -108,7 +119,14 @@ type ConnectionError struct {
 	// Database is the database name, named only when it passes the check.
 	Database string
 
-	op string // the step that failed: sql.Open or PingContext; empty for a refusal
+	op       string // the step that failed: sql.Open or PingContext; empty for a refusal and for a call after the open
+	canceled bool   // the attempt ended because its context was canceled
+	timedOut bool   // the attempt ended because its context's deadline passed
+}
+
+// Is reports the two context errors of the attempt that failed, and nothing else.
+func (e *ConnectionError) Is(target error) bool {
+	return (e.canceled && target == context.Canceled) || (e.timedOut && target == context.DeadlineExceeded) //nolint:errorlint // the sentinels themselves
 }
 
 // Error returns the text, built from the fixed sentence, the SQLSTATE code and
@@ -282,23 +300,30 @@ func isTLS(err error) bool {
 // anyInTree reports whether match is true for err or for any error reachable from
 // it through Unwrap() error or Unwrap() []error.
 func anyInTree(err error, match func(error) bool) bool {
+	return findInTree(err, match) != nil
+}
+
+// findInTree returns the first error, err itself or one reachable from it through
+// Unwrap() error or Unwrap() []error (depth first, in the order errors.As walks), for which
+// match is true, and nil when there is none.
+func findInTree(err error, match func(error) bool) error {
 	if err == nil {
-		return false
+		return nil
 	}
 	if match(err) {
-		return true
+		return err
 	}
 	switch wrapped := err.(type) {
 	case interface{ Unwrap() error }:
-		return anyInTree(wrapped.Unwrap(), match)
+		return findInTree(wrapped.Unwrap(), match)
 	case interface{ Unwrap() []error }:
 		for _, inner := range wrapped.Unwrap() {
-			if anyInTree(inner, match) {
-				return true
+			if found := findInTree(inner, match); found != nil {
+				return found
 			}
 		}
 	}
-	return false
+	return nil
 }
 
 func isNetwork(err error) bool {
@@ -373,16 +398,38 @@ func isURL(dsn string) bool {
 	return strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://")
 }
 
-// describe builds the error for a failure of op. The kind is decided from the
-// types in cause's chain, and cause itself goes no further: the result holds
-// nothing of it. The host, port and database are those of the driver's own
-// configuration, the one it parsed from the string or, for a configuration
-// registered with stdlib.RegisterConnConfig, the one in its connect error, and
-// only when they may be named (see [nameParts]).
+// newConnectionError builds the error for a failure from the types in cause's chain:
+// its kind, and its SQLSTATE code when the server answered one. The cause itself goes no
+// further: the result holds nothing of it but whether its context was canceled or its
+// deadline passed. It is the one place a *ConnectionError is made from a cause, for the
+// open and for every later call.
+func newConnectionError(op string, cause error) *ConnectionError {
+	return newConnectionErrorFrom(op, cause, cause)
+}
+
+// newConnectionErrorFrom is [newConnectionError] for a cause that holds more than the failure of
+// the connection: the kind and the SQLSTATE code are those of failure, the error inside cause that
+// made it one (another server error in the same chain, a statement's, does not give its code), and
+// whether the context was canceled or its deadline passed is read from the whole cause.
+func newConnectionErrorFrom(op string, failure, cause error) *ConnectionError {
+	kind, sqlState := classify(failure)
+	return &ConnectionError{
+		Kind:     kind,
+		SQLState: sqlState,
+		op:       op,
+		canceled: errors.Is(cause, context.Canceled),
+		timedOut: errors.Is(cause, context.DeadlineExceeded),
+	}
+}
+
+// describe builds the error for a failure of op. The kind is decided from the types in
+// cause's chain, and cause itself goes no further: the result holds nothing of it. The
+// host, port and database are those of the driver's own configuration, the one it parsed
+// from the string or, for a configuration registered with stdlib.RegisterConnConfig, the
+// one in its connect error, and only when they may be named (see [nameParts]).
 func (in dsnInfo) describe(op string, cause error) *ConnectionError {
-	kind, sqlState := classify(cause)
-	e := &ConnectionError{Kind: kind, SQLState: sqlState, op: op}
-	if kind == FailureInvalidDSN || in.misSplit {
+	e := newConnectionError(op, cause)
+	if e.Kind == FailureInvalidDSN || in.misSplit {
 		return e // nothing to name: the string was not read, or not read with confidence
 	}
 	cfg := in.cfg

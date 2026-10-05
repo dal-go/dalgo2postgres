@@ -154,6 +154,11 @@ func relationRefs(relations []relation, schema string, viewsOnly bool) []dal.Col
 // optional interface for listing schemas, so this method belongs to this adapter
 // alone.
 func (d *Database) ListSchemas(ctx context.Context) ([]string, error) {
+	return guarded(d.listSchemas(ctx))
+}
+
+// listSchemas is the reader behind [Database.ListSchemas].
+func (d *Database) listSchemas(ctx context.Context) ([]string, error) {
 	rows, err := d.sqlDB.QueryContext(ctx, listSchemasSQL)
 	if err != nil {
 		return nil, fmt.Errorf("dalgo2postgres: ListSchemas: %w", err)
@@ -180,7 +185,7 @@ func (d *Database) ListSchemas(ctx context.Context) ([]string, error) {
 // one. The name is a bound parameter; it is not folded or checked against
 // [Database.ListSchemas].
 func (d *Database) ListSchemaCollections(ctx context.Context, schema string) ([]dal.CollectionRef, error) {
-	return d.schemaRefs(ctx, schema, false, "ListSchemaCollections")
+	return guarded(d.schemaRefs(ctx, schema, false, "ListSchemaCollections"))
 }
 
 // ListViews returns the collections of the configured schema that are views,
@@ -189,18 +194,24 @@ func (d *Database) ListSchemaCollections(ctx context.Context, schema string) ([]
 // schema provider looks for to tell a view from a table, which dbschema cannot.
 // A foreign table and a partitioned table are tables, not views.
 func (d *Database) ListViews(ctx context.Context) ([]dal.CollectionRef, error) {
-	relations, err := listRelations(ctx, d.sqlDB, d.schemaName(), "ListViews")
-	if err != nil {
-		return nil, err
-	}
-	return relationRefs(relations, "", true), nil
+	return guarded(d.readRefs(ctx, d.schemaName(), "", true, "ListViews"))
 }
 
 // ListSchemaViews returns the views and materialized views of the named schema,
 // by the references [Database.ListSchemaCollections] gives. An empty schema means
 // the configured one.
 func (d *Database) ListSchemaViews(ctx context.Context, schema string) ([]dal.CollectionRef, error) {
-	return d.schemaRefs(ctx, schema, true, "ListSchemaViews")
+	return guarded(d.schemaRefs(ctx, schema, true, "ListSchemaViews"))
+}
+
+// readRefs reads the collections (or only the views) of readSchema, each by a reference that
+// names refSchema, or none when refSchema is empty (see [relationRefs]).
+func (d *Database) readRefs(ctx context.Context, readSchema, refSchema string, viewsOnly bool, op string) ([]dal.CollectionRef, error) {
+	relations, err := listRelations(ctx, d.sqlDB, readSchema, op)
+	if err != nil {
+		return nil, err
+	}
+	return relationRefs(relations, refSchema, viewsOnly), nil
 }
 
 // schemaRefs lists the collections (or only the views) of a schema, each by a
@@ -209,11 +220,7 @@ func (d *Database) schemaRefs(ctx context.Context, schema string, viewsOnly bool
 	if schema == "" {
 		schema = d.schemaName()
 	}
-	relations, err := listRelations(ctx, d.sqlDB, schema, op)
-	if err != nil {
-		return nil, err
-	}
-	return relationRefs(relations, schema, viewsOnly), nil
+	return d.readRefs(ctx, schema, schema, viewsOnly, op)
 }
 
 // generatedPrefix opens the text a generated column's default is recorded as.

@@ -19,11 +19,7 @@ import (
 // [Database.ListSchemaCollections] read the others.
 func (d *Database) ListCollections(ctx context.Context, parent *dalrecord.Key) ([]dal.CollectionRef, error) {
 	_ = parent // ignored
-	relations, err := listRelations(ctx, d.sqlDB, d.schemaName(), "ListCollections")
-	if err != nil {
-		return nil, err
-	}
-	return relationRefs(relations, "", false), nil
+	return guarded(d.readRefs(ctx, d.schemaName(), "", false, "ListCollections"))
 }
 
 // DescribeCollection returns the full schema definition for the named table,
@@ -43,14 +39,14 @@ func (d *Database) ListCollections(ctx context.Context, parent *dalrecord.Key) (
 // field rather than failing the whole table.
 func (d *Database) DescribeCollection(ctx context.Context, ref *dal.CollectionRef) (*dbschema.CollectionDef, error) {
 	name := d.resolveName(ref.Name())
-	return describeCollectionImpl(ctx, d.sqlDB, d.schemaFor(ref), name, collectionLabel(ref.Schema(), name))
+	return guarded(describeCollectionImpl(ctx, d.sqlDB, d.schemaFor(ref), name, collectionLabel(ref.Schema(), name)))
 }
 
 // ListIndexes returns the non-primary-key indexes on the named table via
 // pg_indexes, from the schema the reference names, else the configured schema.
 func (d *Database) ListIndexes(ctx context.Context, ref *dal.CollectionRef) ([]dbschema.IndexDef, error) {
 	name := d.resolveName(ref.Name())
-	return listIndexesImpl(ctx, d.sqlDB, d.schemaFor(ref), name, collectionLabel(ref.Schema(), name))
+	return guarded(listIndexesImpl(ctx, d.sqlDB, d.schemaFor(ref), name, collectionLabel(ref.Schema(), name)))
 }
 
 // ---- DescribeCollection impl ----
