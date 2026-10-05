@@ -44,12 +44,14 @@ jobs:
       # tests skip here and only the unit and sqlmock tests count; the real
       # floor is in the integration job below. Measured as CI runs it
       # (`go test -count=1 -cover ./...`): 86.7% on main at the merge of pull
-      # request 16 and 87.3% on the head of pull request 18. The floor is 86,
-      # one point below the second value, which leaves about a point in which
+      # request 16, 87.3% on the head of pull request 18, and 98.7% with the
+      # names of the ddl entries under one rule, whose unit tests run the
+      # statements of every entry on a mocked handle. The floor is 97, one
+      # point below the last value, which leaves about a point in which
       # coverage can fall unnoticed while a pull request still has room to add
       # code only a live server tests. Must rise with the PostgreSQL wave; never
       # lower it.
-      min_test_coverage_percent: 86
+      min_test_coverage_percent: 97
 
   # Runs the shared dalgotest conformance suite against a real PostgreSQL.
   #
@@ -172,8 +174,8 @@ jobs:
               exit 1
             fi
           done
-          # The shared end2end suite, the type matrix, the server pins and the schema reader's
-          # schemas, views and defaults. No skip is
+          # The shared end2end suite, the type matrix, the server pins, the schema reader's
+          # schemas, views, defaults and names, and the names of the DDL entries. No skip is
           # allowed in this job but the ones listed here, which are the sub-tests of
           # the shared suite that cannot run in fold-lower mode (see not_run above).
           # Two checks follow: a skip that is not in the list fails the job (so a skip
@@ -273,7 +275,9 @@ jobs:
             TestSchemaReaderIntegration_ListsViewsAndMaterializedViewsApartFromTables \
             TestSchemaReaderIntegration_DescribesEveryListedCollectionOfEverySchema \
             TestSchemaReaderIntegration_ReadsDefaultsIdentityAndGeneratedColumns \
-            TestSchemaReaderIntegration_NameOf64BytesAgainstAnObjectOf63; do
+            TestSchemaReaderIntegration_NameOf64BytesAgainstAnObjectOf63 \
+            TestSchemaReaderIntegration_NamesAreComparedWholeInAnyDatabaseEncoding \
+            TestDDLNamesIntegration_RefusedNamesLeaveEveryObjectAsItWas; do
             if ! grep -qE "^\s*--- PASS: ${name} \(" /tmp/gotest.log; then
               echo "::error::${name} did not run to a pass"
               exit 1

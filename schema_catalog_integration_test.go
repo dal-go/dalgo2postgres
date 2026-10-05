@@ -166,9 +166,7 @@ func TestSchemaReaderIntegration_ListsViewsAndMaterializedViewsApartFromTables(t
 		t.Errorf("ListSchemaViews(second) = %v", got)
 	}
 
-	// A schema nobody has is no collections, not an error. (The name is short: a name
-	// of more than 63 bytes is cut to 63 by the server's name type, so it would be the
-	// first schema's.)
+	// A schema nobody has is no collections, not an error.
 	if none, err := f.db.ListSchemaCollections(ctx, "no_such_schema_pg05"); err != nil || len(none) != 0 {
 		t.Errorf("ListSchemaCollections(missing) = %v, %v; want none", none, err)
 	}

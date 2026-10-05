@@ -10,6 +10,32 @@ import (
 	"github.com/dal-go/dalgo/ddl"
 )
 
+// Every call that creates, alters or drops builds all of its statements before
+// its transaction begins, and every name a statement writes passes [checkName] on
+// the way: a call with a name that is not a plain identifier of at most 63 bytes
+// is an error that matches dalgo2sql.ErrUnsafeName, and nothing is sent, not even
+// the beginning of a transaction.
+
+// ddlStep is one statement of a call that creates, alters or drops. what is the
+// words an error of the statement is reported under.
+type ddlStep struct {
+	statement string
+	what      string
+}
+
+// execSteps runs the statements of one call, in order, in one transaction: an error
+// of any rolls the transaction back.
+func (d *Database) execSteps(ctx context.Context, steps []ddlStep) error {
+	return d.inTx(ctx, func(tx *sql.Tx) error {
+		for _, s := range steps {
+			if _, err := tx.ExecContext(ctx, s.statement); err != nil {
+				return fmt.Errorf("dalgo2postgres: %s: %w", s.what, err)
+			}
+		}
+		return nil
+	})
+}
+
 // CreateCollection creates a table and its inline indexes transactionally.
 // On any error, the transaction rolls back and no schema state remains.
 func (d *Database) CreateCollection(ctx context.Context, c dbschema.CollectionDef, opts ...ddl.Option) error {
@@ -23,7 +49,7 @@ func (d *Database) createCollection(ctx context.Context, c dbschema.CollectionDe
 	if err != nil {
 		return err
 	}
-	indexSQLs := make([]string, 0, len(c.Indexes))
+	steps := []ddlStep{{createSQL, fmt.Sprintf("CreateCollection exec %q", createSQL)}}
 	for _, idx := range c.Indexes {
 		if idx.Collection == "" {
 			idx.Collection = c.Name
@@ -32,20 +58,9 @@ func (d *Database) createCollection(ctx context.Context, c dbschema.CollectionDe
 		if ierr != nil {
 			return ierr
 		}
-		indexSQLs = append(indexSQLs, s)
+		steps = append(steps, ddlStep{s, fmt.Sprintf("CreateCollection index exec %q", s)})
 	}
-
-	return d.inTx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, createSQL); err != nil {
-			return fmt.Errorf("dalgo2postgres: CreateCollection exec %q: %w", createSQL, err)
-		}
-		for _, s := range indexSQLs {
-			if _, err := tx.ExecContext(ctx, s); err != nil {
-				return fmt.Errorf("dalgo2postgres: CreateCollection index exec %q: %w", s, err)
-			}
-		}
-		return nil
-	})
+	return d.execSteps(ctx, steps)
 }
 
 func (d *Database) inTx(ctx context.Context, fn func(*sql.Tx) error) error {
@@ -65,38 +80,47 @@ func (d *Database) inTx(ctx context.Context, fn func(*sql.Tx) error) error {
 
 // DropCollection drops the table and all its indexes (Postgres cascades automatically).
 func (d *Database) DropCollection(ctx context.Context, name string, opts ...ddl.Option) error {
+	table, err := checkName(positionCollection, name)
+	if err != nil {
+		return leaveAdapter(err)
+	}
 	o := ddl.ResolveOptions(opts...)
-	sqlStmt := buildDropTableSQL(name, o)
-	return leaveAdapter(d.inTx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, sqlStmt); err != nil {
-			return fmt.Errorf("dalgo2postgres: DropCollection exec: %w", err)
-		}
-		return nil
-	}))
+	return leaveAdapter(d.execSteps(ctx, []ddlStep{{buildDropTableSQL(table, o), "DropCollection exec"}}))
 }
 
 // AlterCollection applies ops in order inside a single transaction.
 // Partial failures roll back and leave the collection untouched.
 func (d *Database) AlterCollection(ctx context.Context, name string, ops ...ddl.AlterOp) error {
-	return leaveAdapter(d.inTx(ctx, func(tx *sql.Tx) error {
-		a := &postgresAlterApplier{ctx: ctx, tx: tx, table: name}
-		for _, op := range ops {
-			if err := op.ApplyTo(ctx, a); err != nil {
-				return err
-			}
-		}
-		return nil
-	}))
+	return leaveAdapter(d.alterCollection(ctx, name, ops))
 }
 
-// postgresAlterApplier implements ddl.Applier for the in-flight
-// AlterCollection transaction. One instance per AlterCollection call.
-// All ApplyXxx methods run against the same *sql.Tx — rollback on any error
-// undoes the whole batch.
+// alterCollection is the body of [Database.AlterCollection]. The table is checked,
+// and the statement of every operation is built, before the transaction begins.
+func (d *Database) alterCollection(ctx context.Context, name string, ops []ddl.AlterOp) error {
+	table, err := checkName(positionCollection, name)
+	if err != nil {
+		return err
+	}
+	a := &postgresAlterApplier{table: table}
+	for _, op := range ops {
+		if err := op.ApplyTo(ctx, a); err != nil {
+			return err
+		}
+	}
+	return d.execSteps(ctx, a.steps)
+}
+
+// postgresAlterApplier implements ddl.Applier for one AlterCollection call: each
+// ApplyXxx method builds the statements of its operation and collects them. None
+// is sent until every operation of the call has been built, so one operation
+// that is refused refuses the whole call. One instance per AlterCollection call.
 type postgresAlterApplier struct {
-	ctx   context.Context
-	tx    *sql.Tx
-	table string
+	table checkedName
+	steps []ddlStep
+}
+
+func (a *postgresAlterApplier) add(statement, what string) {
+	a.steps = append(a.steps, ddlStep{statement, what})
 }
 
 func (a *postgresAlterApplier) ApplyAddField(ctx context.Context, f dbschema.FieldDef, opts ddl.Options) error {
@@ -104,81 +128,72 @@ func (a *postgresAlterApplier) ApplyAddField(ctx context.Context, f dbschema.Fie
 	if err != nil {
 		return err
 	}
-	if _, err := a.tx.ExecContext(ctx, sqlStmt); err != nil {
-		return fmt.Errorf("dalgo2postgres: ApplyAddField %q: %w", f.Name, err)
-	}
+	a.add(sqlStmt, fmt.Sprintf("ApplyAddField %q", f.Name))
 	return nil
 }
 
 func (a *postgresAlterApplier) ApplyDropField(ctx context.Context, name dal.FieldName, opts ddl.Options) error {
-	sqlStmt := buildAlterTableDropColumnSQL(a.table, name)
-	if _, err := a.tx.ExecContext(ctx, sqlStmt); err != nil {
-		return fmt.Errorf("dalgo2postgres: ApplyDropField %q: %w", name, err)
+	col, err := checkName(positionField, string(name))
+	if err != nil {
+		return err
 	}
+	a.add(buildAlterTableDropColumnSQL(a.table, col), fmt.Sprintf("ApplyDropField %q", name))
 	return nil
 }
 
 func (a *postgresAlterApplier) ApplyRenameField(ctx context.Context, oldName, newName dal.FieldName, opts ddl.Options) error {
-	sqlStmt := buildAlterTableRenameColumnSQL(a.table, oldName, newName)
-	if _, err := a.tx.ExecContext(ctx, sqlStmt); err != nil {
-		return fmt.Errorf("dalgo2postgres: ApplyRenameField %q->%q: %w", oldName, newName, err)
+	from, err := checkName(positionField, string(oldName))
+	if err != nil {
+		return err
 	}
+	to, err := checkName(positionField, string(newName))
+	if err != nil {
+		return err
+	}
+	a.add(buildAlterTableRenameColumnSQL(a.table, from, to), fmt.Sprintf("ApplyRenameField %q->%q", oldName, newName))
 	return nil
 }
 
 func (a *postgresAlterApplier) ApplyAddIndex(ctx context.Context, idx dbschema.IndexDef, opts ddl.Options) error {
 	if idx.Collection == "" {
-		idx.Collection = a.table
+		idx.Collection = a.table.String()
 	}
 	sqlStmt, err := buildCreateIndexSQL(idx, opts)
 	if err != nil {
 		return err
 	}
-	if _, err := a.tx.ExecContext(ctx, sqlStmt); err != nil {
-		return fmt.Errorf("dalgo2postgres: ApplyAddIndex %q: %w", idx.Name, err)
-	}
+	a.add(sqlStmt, fmt.Sprintf("ApplyAddIndex %q", idx.Name))
 	return nil
 }
 
 func (a *postgresAlterApplier) ApplyDropIndex(ctx context.Context, name string, opts ddl.Options) error {
-	sqlStmt := buildDropIndexSQL(name, opts)
-	if _, err := a.tx.ExecContext(ctx, sqlStmt); err != nil {
-		return fmt.Errorf("dalgo2postgres: ApplyDropIndex %q: %w", name, err)
+	index, err := checkName(positionIndex, name)
+	if err != nil {
+		return err
 	}
+	a.add(buildDropIndexSQL(index, opts), fmt.Sprintf("ApplyDropIndex %q", name))
 	return nil
 }
 
 // ApplyModifyField alters a column's type in PostgreSQL using ALTER COLUMN … TYPE.
 // PostgreSQL supports direct type alteration (unlike SQLite's create-new/copy/drop dance).
 func (a *postgresAlterApplier) ApplyModifyField(ctx context.Context, name dal.FieldName, newDef dbschema.FieldDef, opts ddl.Options) error {
-	if err := validateIdent(a.table); err != nil {
-		return err
-	}
-	if err := validateIdent(string(name)); err != nil {
+	col, err := checkName(positionField, string(name))
+	if err != nil {
 		return err
 	}
 	sqlType, err := postgresTypeFor(newDef)
 	if err != nil {
 		return fmt.Errorf("dalgo2postgres: ApplyModifyField %q: %w", name, err)
 	}
-	stmt := fmt.Sprintf(
-		"ALTER TABLE %s ALTER COLUMN %s TYPE %s",
-		quoteIdent(a.table), quoteIdent(string(name)), sqlType,
-	)
-	if _, err := a.tx.ExecContext(ctx, stmt); err != nil {
-		return fmt.Errorf("dalgo2postgres: ApplyModifyField %q: %w", name, err)
-	}
+	a.add(fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s", a.table.quoted(), col.quoted(), sqlType),
+		fmt.Sprintf("ApplyModifyField %q", name))
 	// Update nullability separately if needed.
-	var nullStmt string
+	nullability := "SET NOT NULL"
 	if newDef.Nullable {
-		nullStmt = fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP NOT NULL",
-			quoteIdent(a.table), quoteIdent(string(name)))
-	} else {
-		nullStmt = fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET NOT NULL",
-			quoteIdent(a.table), quoteIdent(string(name)))
+		nullability = "DROP NOT NULL"
 	}
-	if _, err := a.tx.ExecContext(ctx, nullStmt); err != nil {
-		return fmt.Errorf("dalgo2postgres: ApplyModifyField nullability %q: %w", name, err)
-	}
+	a.add(fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s %s", a.table.quoted(), col.quoted(), nullability),
+		fmt.Sprintf("ApplyModifyField nullability %q", name))
 	return nil
 }

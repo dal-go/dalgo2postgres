@@ -30,8 +30,8 @@ func (d *Database) listConstraints(ctx context.Context, ref *dal.CollectionRef) 
 	rows, err := d.sqlDB.QueryContext(ctx,
 		`SELECT constraint_name, constraint_type
 		 FROM information_schema.table_constraints
-		 WHERE table_schema = $1
-		   AND table_name   = $2
+		 WHERE table_schema = $1::text
+		   AND table_name   = $2::text
 		   AND constraint_type IN ('PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY')
 		 ORDER BY constraint_type, constraint_name`,
 		schema, name,
@@ -91,9 +91,9 @@ func (d *Database) listReferrers(ctx context.Context, ref *dal.CollectionRef) ([
 		 JOIN pg_catalog.pg_attribute AS source_column
 		   ON source_column.attrelid = source.oid AND source_column.attnum = source_key.attnum
 		 WHERE c.contype = 'f'
-		   AND source_ns.nspname = $1
-		   AND target_ns.nspname = $1
-		   AND target.relname    = $2
+		   AND source_ns.nspname = $1::text
+		   AND target_ns.nspname = $1::text
+		   AND target.relname    = $2::text
 		 ORDER BY source.relname, c.conname, c.oid, source_key.position`,
 		schema, name,
 	)

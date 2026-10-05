@@ -10,32 +10,49 @@ import (
 	"github.com/dal-go/dalgo/ddl"
 )
 
-// safeIdentRe matches identifier names that are safe to embed in SQL without
-// further escaping: ASCII letters, digits, and underscores only.
-// Postgres keywords, spaces, and special characters are intentionally excluded
-// because they require double-quoting; all identifiers are always double-quoted
-// by this package, so only the character-set check is enforced here.
+// safeIdentRe matches the names this package writes into the text of a statement:
+// ASCII letters, digits and underscores, not starting with a digit. Every name is
+// always double-quoted by this package, so a reserved word is usable, but a name
+// that needs quoting for another reason is not accepted.
 var safeIdentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// validateIdent returns an error if name is empty or contains characters
-// outside the safe ASCII identifier set.
-func validateIdent(name string) error {
-	if name == "" {
-		return fmt.Errorf("dalgo2postgres: identifier cannot be empty")
+// checkedName is a name that passed [checkName]. Only checkName makes one, and
+// every builder of a statement takes the names it writes as checkedName, so a
+// statement cannot be built from a name that was not checked.
+type checkedName struct{ name string }
+
+// checkName is the one rule for every name that a statement creating, altering or
+// dropping writes into its text, whatever the position (table, column, index,
+// primary-key name, field of an index). The name must be a plain identifier (see
+// safeIdentRe) of at most 63 bytes (see [maxIdentifierBytes]) after the
+// lower-casing [quoteIdent] applies. The refusal is an error that matches
+// [dalgo2sql.ErrUnsafeName] and reads as the schema reader's does; position says
+// what the name is (see the position constants).
+func checkName(position, name string) (checkedName, error) {
+	if err := checkIdentifierLength(position, strings.ToLower(name)); err != nil {
+		return checkedName{}, err
 	}
 	if !safeIdentRe.MatchString(name) {
-		return fmt.Errorf("dalgo2postgres: identifier %q contains characters not matching [A-Za-z_][A-Za-z0-9_]*", name)
+		return checkedName{}, newUnsafeNameError(position, name, reasonNotPlain)
 	}
-	return nil
+	return checkedName{name: name}, nil
 }
 
+// String is the name as it was given.
+func (n checkedName) String() string { return n.name }
+
+// quoted is the name as quoteIdent writes it.
+func (n checkedName) quoted() string { return quoteIdent(n.name) }
+
 // quoteIdent folds name to lower case and wraps it in double-quotes for
-// Postgres. Lower-casing makes the case-preserving quoted form agree with the
+// Postgres, doubling a double quote inside it, so the result is one quoted
+// identifier whatever the name holds: it is safe on its own, without its caller's
+// check. Lower-casing makes the case-preserving quoted form agree with the
 // unquoted references that dalgo2sql's DML and dal's structured-query
 // rendering emit (Postgres folds those to lower case), so DDL and DML always
 // address the same physical identifier. Quoting is retained so reserved words
-// and otherwise-illegal names remain usable. Caller must have validated name
-// first via validateIdent to prevent injection.
+// remain usable. The statements of this package take their names as
+// [checkedName] and write them with [checkedName.quoted].
 //
 // Consequence: collection and column names are stored lower-cased. Typed
 // clients round-trip transparently (JSON unmarshalling is case-insensitive);
@@ -43,11 +60,12 @@ func validateIdent(name string) error {
 // preserving storage would require dal's structured-query String() to quote
 // column identifiers — tracked upstream.
 func quoteIdent(name string) string {
-	return `"` + strings.ToLower(name) + `"`
+	return `"` + strings.ReplaceAll(strings.ToLower(name), `"`, `""`) + `"`
 }
 
 func buildCreateTableSQL(c dbschema.CollectionDef, opts ddl.Options) (string, error) {
-	if err := validateIdent(c.Name); err != nil {
+	table, err := checkName(positionCollection, c.Name)
+	if err != nil {
 		return "", err
 	}
 	var sb strings.Builder
@@ -55,7 +73,7 @@ func buildCreateTableSQL(c dbschema.CollectionDef, opts ddl.Options) (string, er
 	if opts.IfNotExists {
 		sb.WriteString("IF NOT EXISTS ")
 	}
-	sb.WriteString(quoteIdent(c.Name))
+	sb.WriteString(table.quoted())
 	sb.WriteString(" (")
 
 	// Build a set of PK field names for quick lookup.
@@ -75,7 +93,11 @@ func buildCreateTableSQL(c dbschema.CollectionDef, opts ddl.Options) (string, er
 	if len(c.PrimaryKey) > 0 {
 		pkNames := make([]string, len(c.PrimaryKey))
 		for i, n := range c.PrimaryKey {
-			pkNames[i] = quoteIdent(string(n))
+			pk, err := checkName(positionPrimaryKey, string(n))
+			if err != nil {
+				return "", err
+			}
+			pkNames[i] = pk.quoted()
 		}
 		parts = append(parts, "PRIMARY KEY ("+strings.Join(pkNames, ", ")+")")
 	}
@@ -85,17 +107,20 @@ func buildCreateTableSQL(c dbschema.CollectionDef, opts ddl.Options) (string, er
 }
 
 // buildColumnDecl renders one column declaration with double-quoted identifier
-// and PostgreSQL-specific type mapping.
+// and PostgreSQL-specific type mapping. The type is one of the closed list of
+// postgresTypeFor, or the field is refused. Nothing else of f is written: not its
+// default, and not AutoIncrement.
 // inPK: this field is a member of the primary key (always NOT NULL in Postgres).
 func buildColumnDecl(f dbschema.FieldDef, inPK bool) (string, error) {
-	if err := validateIdent(string(f.Name)); err != nil {
+	name, err := checkName(positionField, string(f.Name))
+	if err != nil {
 		return "", err
 	}
 	sqlType, err := postgresTypeFor(f)
 	if err != nil {
 		return "", fmt.Errorf("dalgo2postgres: field %q: %w", f.Name, err)
 	}
-	parts := []string{quoteIdent(string(f.Name)), sqlType}
+	parts := []string{name.quoted(), sqlType}
 	if !f.Nullable || inPK {
 		parts = append(parts, "NOT NULL")
 	}
@@ -103,20 +128,24 @@ func buildColumnDecl(f dbschema.FieldDef, inPK bool) (string, error) {
 }
 
 func buildCreateIndexSQL(idx dbschema.IndexDef, opts ddl.Options) (string, error) {
-	if idx.Name == "" {
-		return "", fmt.Errorf("dalgo2postgres: index name cannot be empty")
+	name, err := checkName(positionIndex, idx.Name)
+	if err != nil {
+		return "", err
 	}
-	if idx.Collection == "" {
-		return "", fmt.Errorf("dalgo2postgres: index %q: collection cannot be empty", idx.Name)
+	table, err := checkName(positionCollection, idx.Collection)
+	if err != nil {
+		return "", err
 	}
 	if len(idx.Fields) == 0 {
-		return "", fmt.Errorf("dalgo2postgres: index %q: must have at least one field", idx.Name)
+		return "", fmt.Errorf("dalgo2postgres: index %q: must have at least one field", name)
 	}
-	if err := validateIdent(idx.Name); err != nil {
-		return "", err
-	}
-	if err := validateIdent(idx.Collection); err != nil {
-		return "", err
+	cols := make([]string, len(idx.Fields))
+	for i, n := range idx.Fields {
+		col, err := checkName(positionField, string(n))
+		if err != nil {
+			return "", err
+		}
+		cols[i] = col.quoted()
 	}
 	var sb strings.Builder
 	sb.WriteString("CREATE ")
@@ -127,47 +156,43 @@ func buildCreateIndexSQL(idx dbschema.IndexDef, opts ddl.Options) (string, error
 	if opts.IfNotExists {
 		sb.WriteString("IF NOT EXISTS ")
 	}
-	sb.WriteString(quoteIdent(idx.Name))
+	sb.WriteString(name.quoted())
 	sb.WriteString(" ON ")
-	sb.WriteString(quoteIdent(idx.Collection))
+	sb.WriteString(table.quoted())
 	sb.WriteString(" (")
-	cols := make([]string, len(idx.Fields))
-	for i, n := range idx.Fields {
-		cols[i] = quoteIdent(string(n))
-	}
 	sb.WriteString(strings.Join(cols, ", "))
 	sb.WriteString(")")
 	return sb.String(), nil
 }
 
-func buildDropTableSQL(name string, opts ddl.Options) string {
+func buildDropTableSQL(name checkedName, opts ddl.Options) string {
 	if opts.IfExists {
-		return "DROP TABLE IF EXISTS " + quoteIdent(name)
+		return "DROP TABLE IF EXISTS " + name.quoted()
 	}
-	return "DROP TABLE " + quoteIdent(name)
+	return "DROP TABLE " + name.quoted()
 }
 
-func buildDropIndexSQL(name string, opts ddl.Options) string {
+func buildDropIndexSQL(name checkedName, opts ddl.Options) string {
 	if opts.IfExists {
-		return "DROP INDEX IF EXISTS " + quoteIdent(name)
+		return "DROP INDEX IF EXISTS " + name.quoted()
 	}
-	return "DROP INDEX " + quoteIdent(name)
+	return "DROP INDEX " + name.quoted()
 }
 
-func buildAlterTableAddColumnSQL(table string, f dbschema.FieldDef) (string, error) {
+func buildAlterTableAddColumnSQL(table checkedName, f dbschema.FieldDef) (string, error) {
 	colDecl, err := buildColumnDecl(f, false)
 	if err != nil {
 		return "", err
 	}
-	return "ALTER TABLE " + quoteIdent(table) + " ADD COLUMN " + colDecl, nil
+	return "ALTER TABLE " + table.quoted() + " ADD COLUMN " + colDecl, nil
 }
 
-func buildAlterTableDropColumnSQL(table string, col dal.FieldName) string {
-	return "ALTER TABLE " + quoteIdent(table) + " DROP COLUMN " + quoteIdent(string(col))
+func buildAlterTableDropColumnSQL(table, col checkedName) string {
+	return "ALTER TABLE " + table.quoted() + " DROP COLUMN " + col.quoted()
 }
 
-func buildAlterTableRenameColumnSQL(table string, oldName, newName dal.FieldName) string {
-	return "ALTER TABLE " + quoteIdent(table) +
-		" RENAME COLUMN " + quoteIdent(string(oldName)) +
-		" TO " + quoteIdent(string(newName))
+func buildAlterTableRenameColumnSQL(table, oldName, newName checkedName) string {
+	return "ALTER TABLE " + table.quoted() +
+		" RENAME COLUMN " + oldName.quoted() +
+		" TO " + newName.quoted()
 }

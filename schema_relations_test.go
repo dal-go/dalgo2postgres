@@ -259,16 +259,16 @@ func TestColumnDefaultOf(t *testing.T) {
 func TestMaterializedViewColumnsStatementAnswersTheShapeOfInformationSchema(t *testing.T) {
 	// Eleven columns in the order informationSchemaColumnsSQL answers them; the
 	// last four are the constants of a column with no default, identity or
-	// generation. Schema and name are the only parameters.
+	// generation. Schema and name are the only parameters, sent as text.
 	for _, fragment := range []string{
 		`pg_catalog.format_type(t.oid, NULL)`, `'ARRAY'`, `'USER-DEFINED'`, `NULL::text, 'NO', 'NEVER', NULL::text`,
-		`n.nspname = $1 AND c.relname = $2`, `ORDER BY a.attnum`, `NOT a.attisdropped`,
+		`n.nspname = $1::text AND c.relname = $2::text`, `ORDER BY a.attnum`, `NOT a.attisdropped`,
 	} {
 		if !strings.Contains(materializedViewColumnsSQL, fragment) {
 			t.Errorf("materializedViewColumnsSQL does not contain %s", fragment)
 		}
 	}
-	for _, fragment := range []string{`column_default`, `is_identity`, `is_generated`, `generation_expression`, `table_schema = $1 AND table_name = $2`} {
+	for _, fragment := range []string{`column_default`, `is_identity`, `is_generated`, `generation_expression`, `table_schema = $1::text AND table_name = $2::text`} {
 		if !strings.Contains(informationSchemaColumnsSQL, fragment) {
 			t.Errorf("informationSchemaColumnsSQL does not contain %s", fragment)
 		}

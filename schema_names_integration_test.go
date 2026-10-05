@@ -89,6 +89,7 @@ func (f schemaNameFixture) calls(t *testing.T, table, schema string) []schemaNam
 	t.Helper()
 	inConfigured := dal.NewRootCollectionRef(table, "")
 	inLongSchema := dal.NewQualifiedRootCollectionRef(schema, "t", "")
+	inConfiguredSchema := dal.NewRootCollectionRef("t", "")
 	onLongSchema := f.withSchema(t, schema)
 	return []schemaNameCall{
 		{"ListCollections", func(ctx context.Context) answer {
@@ -121,6 +122,14 @@ func (f schemaNameFixture) calls(t *testing.T, table, schema string) []schemaNam
 			}
 			return answer{len(def.Fields), err}
 		}},
+		{"DescribeCollection (configured schema)", func(ctx context.Context) answer {
+			// The reference names no schema: the Database's configured one is read.
+			def, err := onLongSchema.DescribeCollection(ctx, &inConfiguredSchema)
+			if def == nil {
+				return answer{0, err}
+			}
+			return answer{len(def.Fields), err}
+		}},
 		{"ListIndexes", func(ctx context.Context) answer {
 			indexes, err := f.db.ListIndexes(ctx, &inConfigured)
 			return answer{len(indexes), err}
@@ -147,8 +156,12 @@ func (f schemaNameFixture) calls(t *testing.T, table, schema string) []schemaNam
 			}
 			return answer{1 + len(columns), nil}
 		}},
-		{"JoinFields", func(ctx context.Context) answer {
+		{"JoinFields (table)", func(ctx context.Context) answer {
 			fields, err := f.db.JoinFields(ctx, dal.NewQualifiedRootCollectionRef(f.configured, table, ""))
+			return answer{len(fields), err}
+		}},
+		{"JoinFields (schema)", func(ctx context.Context) answer {
+			fields, err := f.db.JoinFields(ctx, dal.NewQualifiedRootCollectionRef(schema, "t", ""))
 			return answer{len(fields), err}
 		}},
 	}
@@ -171,7 +184,7 @@ func TestSchemaReaderIntegration_NameOf64BytesAgainstAnObjectOf63(t *testing.T) 
 	for _, c := range f.calls(t, f.table+"x", f.longSchema+"x") {
 		got := c.call(ctx)
 		t.Logf("%s with 64 bytes: %d items, err %v", c.entry, got.items, got.err)
-		if c.entry == "JoinFields" {
+		if strings.HasPrefix(c.entry, "JoinFields") {
 			// dalgo2sql refuses it in its own words, before the catalog is read: it is
 			// not the schema reader's rule, and is held here as it is observed.
 			if got.items != 0 || got.err == nil || !strings.Contains(got.err.Error(), "over the engine limit of 63") {

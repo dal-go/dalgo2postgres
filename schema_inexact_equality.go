@@ -39,7 +39,7 @@ const nonDeterministicTextColumnsSQL = `
 	) ON a.attrelid = c.oid
 	  AND a.attnum > 0 AND NOT a.attisdropped
 	  AND (t.typname = 'citext' OR co.collisdeterministic = false)
-	WHERE n.nspname = $1 AND c.relname = $2
+	WHERE n.nspname = $1::text AND c.relname = $2::text
 	  AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
 	ORDER BY a.attnum`
 
@@ -65,7 +65,7 @@ const nonDeterministicTextColumnsSQL = `
 func (d *Database) NonDeterministicTextColumns(ctx context.Context, ref *dal.CollectionRef) ([]string, error) {
 	schema, name, err := d.lookupNames(ref)
 	if err != nil {
-		return nil, err
+		return nil, leaveAdapter(err)
 	}
 	return guarded(nonDeterministicTextColumns(ctx, d.sqlDB, schema, name, collectionLabel(ref.Schema(), name)))
 }

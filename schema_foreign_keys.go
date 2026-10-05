@@ -29,7 +29,7 @@ func readForeignKeys(ctx context.Context, db *sql.DB, schema, table string) ([]d
 		  ON source_column.attrelid = source.oid AND source_column.attnum = source_key.attnum
 		JOIN pg_catalog.pg_attribute AS target_column
 		  ON target_column.attrelid = target.oid AND target_column.attnum = target_key.attnum
-		WHERE c.contype = 'f' AND source_ns.nspname = $1 AND source.relname = $2
+		WHERE c.contype = 'f' AND source_ns.nspname = $1::text AND source.relname = $2::text
 		ORDER BY c.oid, source_key.position`, schema, table)
 	if err != nil {
 		return nil, fmt.Errorf("dalgo2postgres: foreign keys for %q: %w", table, err)
