@@ -40,7 +40,7 @@ func (d *Database) ListCollections(ctx context.Context, parent *dalrecord.Key) (
 func (d *Database) DescribeCollection(ctx context.Context, ref *dal.CollectionRef) (*dbschema.CollectionDef, error) {
 	schema, name, err := d.lookupNames(ref)
 	if err != nil {
-		return nil, err
+		return nil, leaveAdapter(err)
 	}
 	return guarded(describeCollectionImpl(ctx, d.sqlDB, schema, name, collectionLabel(ref.Schema(), name)))
 }
@@ -50,7 +50,7 @@ func (d *Database) DescribeCollection(ctx context.Context, ref *dal.CollectionRe
 func (d *Database) ListIndexes(ctx context.Context, ref *dal.CollectionRef) ([]dbschema.IndexDef, error) {
 	schema, name, err := d.lookupNames(ref)
 	if err != nil {
-		return nil, err
+		return nil, leaveAdapter(err)
 	}
 	return guarded(listIndexesImpl(ctx, d.sqlDB, schema, name, collectionLabel(ref.Schema(), name)))
 }
@@ -186,8 +186,8 @@ func listPrimaryKeyColumns(ctx context.Context, db *sql.DB, schema, table string
 		  AND tc.table_schema    = kcu.table_schema
 		  AND tc.table_name      = kcu.table_name
 		 WHERE tc.constraint_type = 'PRIMARY KEY'
-		   AND tc.table_schema    = $1
-		   AND tc.table_name      = $2
+		   AND tc.table_schema    = $1::text
+		   AND tc.table_name      = $2::text
 		 ORDER BY kcu.ordinal_position`,
 		schema, table,
 	)
@@ -216,8 +216,8 @@ func listIndexesImpl(ctx context.Context, db *sql.DB, schema, name string, label
 	rows, err := db.QueryContext(ctx,
 		`SELECT i.indexname, i.indexdef
 		 FROM pg_catalog.pg_indexes i
-		 WHERE i.schemaname = $1
-		   AND i.tablename  = $2
+		 WHERE i.schemaname = $1::text
+		   AND i.tablename  = $2::text
 		   AND NOT EXISTS (
 		       SELECT 1 FROM pg_catalog.pg_constraint c
 		       JOIN pg_catalog.pg_class t ON t.oid = c.conrelid

@@ -6,7 +6,7 @@ PostgreSQL-specific DALgo driver. Wraps `github.com/dal-go/dalgo2sql` to provide
   bound and every name quoted, with filtering, ordering, grouping, aggregation and joins run
   on the server (see "Structured queries")
 - `dbschema.SchemaReader` — schema introspection via `information_schema`, `pg_catalog` and `pg_indexes`: every non-system schema, views told from tables, column defaults
-- `ddl.Applier` — PostgreSQL-flavored `CREATE TABLE` / `CREATE INDEX` / `DROP TABLE` / `ALTER TABLE`
+- `ddl.SchemaModifier` and `ddl.Applier` — PostgreSQL-flavored `CREATE TABLE` / `CREATE INDEX` / `DROP TABLE` / `ALTER TABLE`
 - `dal.ConcurrencyAware` — advertises `SupportsConcurrentConnections() = true`
   (PostgreSQL supports concurrent connections from multiple goroutines and processes,
   unlike SQLite which serializes writers)
@@ -415,9 +415,10 @@ skipped, missing or not passing.
   collection that names no recordset (it deletes by the column `ID`, so the collection of the key
   alone reaches the server), and a nested key whose collections of 32 and 31 bytes join into a
   name of 64 bytes, each with its control of 63 bytes
-  (`TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath`). `Insert`, `Set`, `Update`,
-  `Exists`, `Get`, `GetMulti` and `Delete` are also run with a collection, a field and a
-  primary key of 64 bytes by a unit test over a handle that fails on any statement
+  (`TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath`). `Insert`, `Set` and `Update`
+  are also run with a collection, a field and a primary key of 64 bytes, and `Exists`, `Get`,
+  `GetMulti` and `Delete` with a collection and a primary key of 64 bytes (they name no field of a
+  map record), by a unit test over a handle that fails on any statement
   (`TestNewDatabase_KeyWritesAndReadsRefuseUnsafeNames`); `Upsert` and the other multi forms are
   held to the limit by the same functions of dalgo2sql and are not run here. A join's
   `ON` condition takes only an equality of two fields, so a value is no position of it.
@@ -466,6 +467,16 @@ collections of the key and of its parents with an underscore, the key's own firs
 (`pets_owners`), and the primary key is looked up in the recordset of that name; the joined
 name is held to 63 bytes as one name, so short collections can be refused together.
 
+### Behaviour change: names in the `ddl` entries
+
+`CreateCollection`, `DropCollection` and `AlterCollection` (with every operation) refuse a name
+that is not a plain identifier (ASCII letters, digits and underscores, not starting with a digit)
+or is longer than 63 bytes, which is all PostgreSQL keeps of an identifier, after the
+lower-casing the package applies. The refusal is an error that matches `dalgo2sql.ErrUnsafeName`,
+the one the key paths return, and it comes before the transaction begins and before any
+statement. It applies to every name a call writes: a table, a column, an index, a primary-key
+name and the fields of an index.
+
 ## Schema reader options
 
 The schema reader (`ListCollections`, `DescribeCollection`, `ListIndexes`,
@@ -496,8 +507,10 @@ db, err := dalgo2postgres.NewDatabase(dsn,
 A schema name or a table name over 63 bytes, which is all PostgreSQL keeps of an
 identifier, is refused by every entry of the schema reader that takes one, with an error that
 matches `dalgo2sql.ErrUnsafeName` (the one a key path returns for the same name) and before any
-statement is sent. The rule is in bytes, as the server's, and applies to the table name as the
-identifier mode resolves it. A name of exactly 63 bytes is read as before.
+statement is sent. The count is of the UTF-8 bytes of the name, and the rule applies to the table
+name as the identifier mode resolves it. A name of exactly 63 bytes is read as before. Every
+statement of the reader sends the schema and the table name as text, so the server compares the
+whole name with the stored one, whatever the encoding of the database.
 
 A collection reference that names its own schema
 (`dal.NewQualifiedRootCollectionRef("sales", "Album", "")`) is read from that
@@ -766,7 +779,7 @@ check.
 ### Identifier case folding
 
 PostgreSQL folds unquoted identifiers to lower case. `dalgo2postgres` quotes
-identifiers in its DDL (so reserved words and otherwise-illegal names stay usable)
+identifiers in its DDL (so reserved words stay usable)
 but **lower-cases them first**, so the case-preserving quoted form agrees with the
 unquoted references that key reads and writes emit (which PostgreSQL also folds to
 lower case). DDL and key reads and writes thus always address the same physical

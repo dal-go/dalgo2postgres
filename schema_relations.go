@@ -35,7 +35,7 @@ const relationKindsSQL = `c.relkind IN ('r', 'p', 'f', 'v', 'm')`
 const listRelationsSQL = `SELECT c.relname::text, c.relkind IN ('v', 'm') AS is_view
 	FROM pg_catalog.pg_class AS c
 	JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
-	WHERE n.nspname = $1
+	WHERE n.nspname = $1::text
 	  AND ` + relationKindsSQL + `
 	  AND NOT pg_catalog.pg_is_other_temp_schema(n.oid)
 	  AND ` + relationVisibleSQL + `
@@ -46,7 +46,7 @@ const listRelationsSQL = `SELECT c.relname::text, c.relkind IN ('v', 'm') AS is_
 const relationKindSQL = `SELECT c.relkind::text
 	FROM pg_catalog.pg_class AS c
 	JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
-	WHERE n.nspname = $1 AND c.relname = $2
+	WHERE n.nspname = $1::text AND c.relname = $2::text
 	  AND ` + relationKindsSQL + `
 	  AND NOT pg_catalog.pg_is_other_temp_schema(n.oid)
 	  AND ` + relationVisibleSQL
@@ -71,7 +71,7 @@ const informationSchemaColumnsSQL = `SELECT column_name, data_type, udt_name,
 	        character_maximum_length, numeric_precision, numeric_scale,
 	        is_nullable, column_default, is_identity, is_generated, generation_expression
 	 FROM information_schema.columns
-	 WHERE table_schema = $1 AND table_name = $2
+	 WHERE table_schema = $1::text AND table_name = $2::text
 	 ORDER BY ordinal_position`
 
 // materializedViewColumnsSQL reads the columns of a materialized view (schema
@@ -96,7 +96,7 @@ const materializedViewColumnsSQL = `SELECT a.attname::text,
 	 JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
 	 JOIN pg_catalog.pg_type AS t ON t.oid = a.atttypid
 	 JOIN pg_catalog.pg_namespace AS tn ON tn.oid = t.typnamespace
-	 WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped
+	 WHERE n.nspname = $1::text AND c.relname = $2::text AND a.attnum > 0 AND NOT a.attisdropped
 	 ORDER BY a.attnum`
 
 // relation is one collection of a schema: its name, and whether PostgreSQL keeps

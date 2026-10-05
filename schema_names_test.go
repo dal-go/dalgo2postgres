@@ -84,6 +84,7 @@ func TestSchemaReader_RefusesANameOver63BytesBeforeAnyStatement(t *testing.T) {
 		{"a schema of 64 bytes named by the entry", "t", long, "", "ListSchema"},
 		{"a table of 32 two-byte characters", twoBytes, "public", "", "(table)"},
 		{"a schema of 32 two-byte characters", "t", twoBytes, "", "(schema)"},
+		{"a configured schema of 64 bytes, by reference", "t", "public", long, "(table)"},
 		{"a configured schema of 64 bytes", "t", "public", long, "ListCollections"},
 		{"a configured schema of 64 bytes, views", "t", "public", long, "ListViews"},
 	} {
