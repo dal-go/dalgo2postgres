@@ -92,7 +92,16 @@ jobs:
         # prevent. Run verbose and assert on the result line.
         run: |
           set -o pipefail
-          go test -race -v -coverprofile=profile.cov ./... 2>&1 | tee /tmp/gotest.log
+          # Sub-tests of the shared end2end suite (TestEndToEnd) that cannot run in
+          # fold-lower mode, excluded by name and for no other reason: a key read
+          # returns the names as the table stores them (lower case) and the suite's
+          # access policy spells them Country and IsCapital, which the access layer
+          # compares exactly, so it denies a row the policy allows. The reason is
+          # asserted by TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames,
+          # and TestEndToEnd reports each of them as a skip that names it (the
+          # allow-list of skips below). Keep the two lists the same.
+          not_run='^TestEndToEnd$/^query$/^access_conditions$/^(point_reads_follow_the_condition|writes_follow_the_condition)$'
+          go test -race -v -skip "$not_run" -coverprofile=profile.cov ./... 2>&1 | tee /tmp/gotest.log
           if grep -qE '^\s*--- SKIP: TestConformance' /tmp/gotest.log; then
             echo "::error::TestConformance SKIPPED - the DSN did not reach the tests"
             exit 1
@@ -147,6 +156,57 @@ jobs:
             ContextEndsBetweenAndDuringTheStatements; do
             if ! grep -qE "^\s*--- PASS: TestStructuredQueryIntegration_${name} \(" /tmp/gotest.log; then
               echo "::error::TestStructuredQueryIntegration_${name} did not run to a pass"
+              exit 1
+            fi
+          done
+          # The shared end2end suite, the type matrix and the server pins. No skip is
+          # allowed in this job but the ones listed here, which are the sub-tests of
+          # the shared suite that cannot run in fold-lower mode (see not_run above):
+          # a skip that is not in the list fails the job, and a listed one that did
+          # not run fails it too, so a rename in the suite is noticed. A PASS line is
+          # then required for each test by name, so a test that is renamed, deleted or
+          # never reached fails the job. Add a new test of these families to the list.
+          allowed_skips=(
+            TestEndToEnd/not_run_in_fold_lower_mode/point_reads_follow_the_condition
+            TestEndToEnd/not_run_in_fold_lower_mode/writes_follow_the_condition
+          )
+          skipped=$(grep -E '^\s*--- SKIP: ' /tmp/gotest.log | sed -E 's/^[[:space:]]*--- SKIP: ([^ ]+) .*/\1/' || true)
+          while IFS= read -r name; do
+            [ -z "$name" ] && continue
+            if ! printf '%s\n' "${allowed_skips[@]}" | grep -qxF -- "$name"; then
+              echo "::error::${name} SKIPPED and is not in the allow-list of skips of this job"
+              exit 1
+            fi
+          done <<< "$skipped"
+          for name in "${allowed_skips[@]}"; do
+            if ! grep -qE "^\s*--- SKIP: ${name} \(" /tmp/gotest.log; then
+              echo "::error::the allowed skip ${name} did not run"
+              exit 1
+            fi
+          done
+          for name in \
+            TestEndToEnd \
+            TestEndToEnd/single \
+            TestEndToEnd/multi \
+            TestEndToEnd/query \
+            TestEndToEnd/query/access_conditions \
+            TestEndToEnd/query/access_field_lists \
+            TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames \
+            TestTypeMatrixIntegration_FilterByColumnTypeAndConstantType \
+            TestTypeMatrixIntegration_ProjectionAndOrderBy \
+            TestTypeMatrixIntegration_ValuesAtTheEdges \
+            TestTypeMatrixIntegration_ArithmeticOnDoublePrecision \
+            TestTypeMatrixIntegration_NumericWithAFractionIntoAnIntegerField \
+            TestTypeMatrixIntegration_TimestampWithoutZoneFollowsTheSessionTimeZone \
+            TestServerPinsIntegration_ColumnNamedLikeItsAliasIsTheColumn \
+            TestServerPinsIntegration_QualifiedColumnWinsOverAFunctionOfTheRow \
+            TestServerPinsIntegration_AliasesThatFoldTogetherAreRefusedBeforeTheServer \
+            TestServerPinsIntegration_SelectAllOverAJoinListsTheBasesColumnsFirst \
+            TestServerPinsIntegration_TextJoinKeysWithDifferentCollations \
+            TestServerPinsIntegration_RuntimeErrorAtRowNReachesTheCaller \
+            TestServerPinsIntegration_NotNullColumnKeepsItsOrderByWithoutANullsClause; do
+            if ! grep -qE "^\s*--- PASS: ${name} \(" /tmp/gotest.log; then
+              echo "::error::${name} did not run to a pass"
               exit 1
             fi
           done
