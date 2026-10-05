@@ -63,7 +63,7 @@ func keysOf(t *testing.T, f *queryFixture, q dal.Query) (statement string, rows 
 // catalogAnswer runs the catalog statement the last read sent again, with the arguments it
 // was sent, on the untraced handle, writes the statement and the rows the server answers
 // to the output, and returns the names of the columns the catalog marks as the primary key
-// (the last column of its answer).
+// (the ninth column of its answer; the tenth, the column's own collation, is no key).
 func catalogAnswer(t *testing.T, f *queryFixture) (primaryKey []string) {
 	t.Helper()
 	var statement string
@@ -96,14 +96,14 @@ func catalogAnswer(t *testing.T, f *queryFixture) (primaryKey []string) {
 			t.Fatalf("Scan: %v", err)
 		}
 		lines = append(lines, fmt.Sprintf("%v", values))
-		if len(values) == 9 && values[8] == true {
+		if len(values) == 10 && values[8] == true {
 			primaryKey = append(primaryKey, fmt.Sprint(values[1]))
 		}
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("rows: %v", err)
 	}
-	t.Logf("catalog statement: %s\n    arguments: %s\n    columns: %v\n    rows (name, attname, data_type, category, type_oid, type_elem, attnotnull, nondeterministic, pk):\n        %s\n    primary key columns: %v",
+	t.Logf("catalog statement: %s\n    arguments: %s\n    columns: %v\n    rows (name, attname, data_type, category, type_oid, type_elem, attnotnull, nondeterministic, pk, collation):\n        %s\n    primary key columns: %v",
 		statement, argsText(args), columns, strings.Join(lines, "\n        "), primaryKey)
 	return primaryKey
 }

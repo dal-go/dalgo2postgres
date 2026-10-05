@@ -240,23 +240,19 @@ var matrixKinds = [kindCount]struct {
 	kindNilCompared:  {"nil with >", dal.GreaterThen, ">", "$1", "<nil>"},
 }
 
-// knownFloatMarker says where the dialect's way of binding a float constant is asserted for
-// a real column, which dal-go/dalgo2sql is changing (task SQL-W4, item 5: the comparison
-// is then made in the column's type, and the marker the statement writes changes with it).
-// A failing statement of such a cell says so.
-const knownFloatMarker = "the marker of a float constant against the f4 (real) column in matrixKinds and in TestTypeMatrixIntegration_EveryIntegerAndFloatType"
-
-// floatAgainstReal is the hint a statement that is not the one expected gets when the cell
-// is a float constant against the real column: the defect of SQL-W4 item 5 may be fixed.
-func floatAgainstReal(column string, constant any) string {
-	if column != "f4" {
-		return ""
+// markerFor is what the statement writes for the constant of the given kind against the
+// column: the rule of the kind (matrixKinds), except that a float of either size compared
+// with a real column is bound as $1::real from its decimal text, so that the comparison runs
+// in the column's own type (dalgo2sql v0.26.5). Every other column, including double
+// precision and numeric, keeps the numeric binding.
+func markerFor(column string, kind int) string {
+	if column == "f4" {
+		switch kind {
+		case kindFloat32, kindFloat64, kindWholeFloat64:
+			return "$1::real"
+		}
 	}
-	switch constant.(type) {
-	case float32, float64:
-		return "; if dalgo2sql now compares a float constant with a real column in the column's type (task SQL-W4, item 5, a known defect pinned in ValuesAtTheEdges), update " + knownFloatMarker
-	}
-	return ""
+	return matrixKinds[kind].marker
 }
 
 // matrixColumn is one column of tm, the constants that stand for its second row in the
@@ -450,12 +446,13 @@ func TestTypeMatrixIntegration_FilterByColumnTypeAndConstantType(t *testing.T) {
 
 				// The rule: what the statement writes for this kind of constant, and
 				// what the driver is handed.
-				where := fmt.Sprintf(`"%s" %s %s`, col.name, rule.sql, rule.marker)
-				if rule.marker == "" {
+				marker := markerFor(col.name, kind)
+				where := fmt.Sprintf(`"%s" %s %s`, col.name, rule.sql, marker)
+				if marker == "" {
 					where = fmt.Sprintf(`"%s" %s`, col.name, rule.sql)
 				}
 				if want := fmt.Sprintf(`SELECT "id" FROM "tm" WHERE %s ORDER BY "id" ASC`, where); o.statement != want {
-					t.Errorf("%s: statement = %s, want %s%s", label, o.statement, want, floatAgainstReal(col.name, col.constant(kind)))
+					t.Errorf("%s: statement = %s, want %s", label, o.statement, want)
 				}
 				switch {
 				case rule.argType == "" && len(o.args) != 0:
@@ -492,7 +489,7 @@ func TestTypeMatrixIntegration_FilterByColumnTypeAndConstantType(t *testing.T) {
 			if len(refusals) == 0 {
 				refusals = append(refusals, "no refusal")
 			}
-			t.Logf("rule: a %s is written as %s and handed to the driver as %s. Over %d column types: rows matched %d times, nothing matched %d times, refused by the server %d times (%s)",
+			t.Logf("rule: a %s is written as %s and handed to the driver as %s (against a real column a float is written as $1::real). Over %d column types: rows matched %d times, nothing matched %d times, refused by the server %d times (%s)",
 				rule.label, text, handed, len(matrixColumns), tallies[kind].matched, tallies[kind].empty, total, strings.Join(refusals, ", "))
 		}
 	})
@@ -525,14 +522,14 @@ func TestTypeMatrixIntegration_EveryIntegerAndFloatType(t *testing.T) {
 		{"i4", int32(2), "$1::bigint", "int64"},
 		{"num", float32(2), "$1::numeric", "string"},
 		{"num", float64(2), "$1::numeric", "string"},
-		{"f4", float32(2), "$1::numeric", "string"},
+		{"f4", float32(2), "$1::real", "string"},
 		{"f8", float64(2), "$1::numeric", "string"},
 	} {
 		label := fmt.Sprintf("%s %T(%v)", tc.column, tc.constant, tc.constant)
 		o := observe(t, f, filterQuery("tm", tc.column, dal.Equal, tc.constant))
 		check(t, label, o, rowsOf(2))
 		if want := fmt.Sprintf(`SELECT "id" FROM "tm" WHERE "%s" = %s ORDER BY "id" ASC`, tc.column, tc.marker); o.statement != want {
-			t.Errorf("%s: statement = %s, want %s%s", label, o.statement, want, floatAgainstReal(tc.column, tc.constant))
+			t.Errorf("%s: statement = %s, want %s", label, o.statement, want)
 		}
 		// The value: a signed integer is handed over as an int64 holding 2, anything else as
 		// the text "2".
@@ -598,6 +595,12 @@ func TestTypeMatrixIntegration_ProjectionAndOrderBy(t *testing.T) {
 			}
 			t.Logf("projection of %s %s\n    statement: %s\n    arguments: %s\n    records reader: %s",
 				col.name, col.sqlType, o.statement, argsText(o.args), valuesText(got))
+			if want := `SELECT "` + col.name + `", "id" AS "__dalgo_record_id" FROM "tm" WHERE "id" < $1::bigint ORDER BY "id" ASC`; o.statement != want {
+				t.Errorf("projection of %s: statement = %s, want %s", col.name, o.statement, want)
+			}
+			if len(o.args) != 1 || !sameArgument(o.args[0], int64(4)) {
+				t.Errorf("projection of %s: arguments = %s, want int64(4)", col.name, argsText(o.args))
+			}
 			if o.err != nil || len(got) != 3 {
 				t.Fatalf("projection: rows = %v, err = %v; want three rows", got, o.err)
 			}
@@ -630,21 +633,14 @@ func TestTypeMatrixIntegration_ProjectionAndOrderBy(t *testing.T) {
 			if len(viaRecordset) != 3 {
 				t.Fatalf("recordset reader returned %d rows, want 3", len(viaRecordset))
 			}
-			// KNOWN DEFECT of the recordset reader, not a rule: a typed column of a recordset
-			// holds no NULL, so the reader puts the zero value of the column's type where the
-			// database has NULL (dalgo2sql reader_recordset.go, DefaultValue), and a caller of
-			// the recordset reader cannot tell a NULL from 0, false, "" or the zero time. The
-			// records reader above returns nil for the same cell, and that is asserted. The fix
-			// is the work of dal-go/dalgo2sql (task SQL-W4) and no release has it yet; this
-			// pin FAILS when the reader returns nil, and the line to assert instead is then
-			// "viaRecordset[2] == nil", as for the records reader.
-			zero := reflect.Zero(reflect.TypeOf(col.values[0])).Interface()
-			t.Logf("    KNOWN DEFECT of the recordset reader (dal-go/dalgo2sql, task SQL-W4 is fixing it; not a rule): the NULL row reads as %v, the zero value of the type; the records reader above returns nil for it", valuesText([]any{zero}))
-			if viaRecordset[2] == nil {
-				t.Errorf("recordset projection of %s = %s: the NULL row is now nil, so the defect is fixed in dalgo2sql: assert viaRecordset[2] == nil here, as for the records reader, and delete this pin and the README's known limit", col.name, valuesText(viaRecordset))
-			} else if !sameValue(viaRecordset[0], col.values[0]) || !sameValue(viaRecordset[1], col.values[1]) || !sameValue(viaRecordset[2], zero) {
-				t.Errorf("recordset projection of %s = %s, want %s: the values with the type's zero value, %v, where the row is NULL (the known defect)",
-					col.name, valuesText(viaRecordset), valuesText([]any{col.values[0], col.values[1], zero}), zero)
+			// The recordset reader marks a NULL cell as nil, as the records reader does (dalgo2sql
+			// v0.26.5); up to v0.26.4 it put the zero value of the column's type there, which a
+			// caller could not tell from a stored 0, false, "" or the zero time.
+			if viaRecordset[2] != nil {
+				t.Errorf("recordset projection of %s = %s, want the NULL row to be nil, as for the records reader", col.name, valuesText(viaRecordset))
+			}
+			if !sameValue(viaRecordset[0], col.values[0]) || !sameValue(viaRecordset[1], col.values[1]) {
+				t.Errorf("recordset projection of %s = %s, want the values %s and %s", col.name, valuesText(viaRecordset), valuesText([]any{col.values[0]}), valuesText([]any{col.values[1]}))
 			}
 
 			ascending, descending := []int{3, 1, 2}, []int{2, 1, 3}
@@ -714,37 +710,61 @@ type edgeRow struct {
 	F8     float64
 }
 
+// edgeCell is one filter of tm_edge: the column, the operator and the constant, what the
+// statement must write for the constant, the argument the driver must be handed for it, and
+// what the server must answer.
+type edgeCell struct {
+	label    string
+	column   string
+	operator dal.Operator
+	constant any
+	marker   string // as the statement writes the constant after the operator
+	argument any    // as the driver is handed it
+	want     cellOutcome
+}
+
+// operatorText is how the statement writes the operators the edge cells use.
+var operatorText = map[dal.Operator]string{dal.Equal: "=", dal.GreaterThen: ">"}
+
+// checkEdgeCells runs each cell and asserts the statement, the argument and the answer, and
+// records all three in the output of the run.
+func checkEdgeCells(t *testing.T, f *queryFixture, cells []edgeCell) {
+	t.Helper()
+	for _, c := range cells {
+		o := observe(t, f, filterQuery("tm_edge", c.column, c.operator, c.constant))
+		check(t, c.label, o, c.want)
+		if want := fmt.Sprintf(`SELECT "id" FROM "tm_edge" WHERE "%s" %s %s ORDER BY "id" ASC`, c.column, operatorText[c.operator], c.marker); o.statement != want {
+			t.Errorf("%s: statement = %s, want %s", c.label, o.statement, want)
+		}
+		if len(o.args) != 1 || !sameArgument(o.args[0], c.argument) {
+			t.Errorf("%s: arguments = %s, want %s", c.label, argsText(o.args), valuesText([]any{c.argument}))
+		}
+	}
+}
+
 // Values at the edge of what a type holds. A bigint above 2^53 is matched and read back
 // exactly, by an int64, a uint64 and a string, and is not matched by the float64 that is
 // its nearest neighbour; 'Infinity'::numeric (the server is 17) is matched by a float
-// infinity and read back as one; a float32 constant against a real column is compared as
-// a number, so what a caller sees is pinned below.
+// infinity and read back as one. A float constant against a real column is bound as a real,
+// from its decimal text, so the comparison runs in the column's own type: 0.1 finds the
+// row that stores 0.1, which a numeric 0.1 did not (dalgo2sql v0.26.5). Every cell asserts
+// the statement and the argument as well as the answer.
 func TestTypeMatrixIntegration_ValuesAtTheEdges(t *testing.T) {
 	f := openTypeFixture(t, "test_tm_edge", "UTC", edgeDDL...)
-	filter := func(column string, operator dal.Operator, constant any) observation {
-		return observe(t, f, filterQuery("tm_edge", column, operator, constant))
-	}
 	t.Run("a bigint above 2^53 is matched exactly", func(t *testing.T) {
 		const above = int64(9007199254740993) // 2^53 + 1
-		for _, tc := range []struct {
-			label    string
-			operator dal.Operator
-			constant any
-			want     cellOutcome
-		}{
-			{"int64 2^53+1", dal.Equal, above, rowsOf(1)},
-			{"int64 2^53, its neighbour", dal.Equal, above - 1, rowsOf()},
-			{"uint64 2^53+1, bound as numeric text", dal.Equal, uint64(above), rowsOf(1)},
-			{"float64 2^53+1, which is 2^53: the nearest float64", dal.Equal, float64(above), rowsOf()},
-			{"string 9007199254740993", dal.Equal, "9007199254740993", rowsOf(1)},
-			{"int64 max", dal.Equal, int64(math.MaxInt64), rowsOf(2)},
-			{"uint64 max, which no bigint holds, is a miss and not an error", dal.Equal, uint64(math.MaxUint64), rowsOf()},
-			{"int64 2^53 as a lower bound", dal.GreaterThen, above - 1, rowsOf(1, 2)},
-		} {
-			check(t, "i8 bigint "+tc.label, filter("i8", tc.operator, tc.constant), tc.want)
-		}
-		check(t, "numbig numeric(20,0) uint64 2^53+1", filter("numbig", dal.Equal, uint64(above)), rowsOf(1))
-		check(t, "numbig numeric(20,0) float64 2^53+1, which is 2^53", filter("numbig", dal.Equal, float64(above)), rowsOf())
+		checkEdgeCells(t, f, []edgeCell{
+			{"i8 bigint int64 2^53+1", "i8", dal.Equal, above, "$1::bigint", above, rowsOf(1)},
+			{"i8 bigint int64 2^53, its neighbour", "i8", dal.Equal, above - 1, "$1::bigint", above - 1, rowsOf()},
+			{"i8 bigint uint64 2^53+1, bound as numeric text", "i8", dal.Equal, uint64(above), "$1::numeric", "9007199254740993", rowsOf(1)},
+			{"i8 bigint float64 2^53+1, which is 2^53: the nearest float64", "i8", dal.Equal, float64(above), "$1::numeric", "9007199254740992", rowsOf()},
+			{"i8 bigint string 9007199254740993", "i8", dal.Equal, "9007199254740993", "$1", "9007199254740993", rowsOf(1)},
+			{"i8 bigint int64 max", "i8", dal.Equal, int64(math.MaxInt64), "$1::bigint", int64(math.MaxInt64), rowsOf(2)},
+			{"i8 bigint uint64 max, which no bigint holds, is a miss and not an error", "i8", dal.Equal, uint64(math.MaxUint64), "$1::numeric", "18446744073709551615", rowsOf()},
+			{"i8 bigint int64 2^53 as a lower bound", "i8", dal.GreaterThen, above - 1, "$1::bigint", above - 1, rowsOf(1, 2)},
+			{"numbig numeric(20,0) uint64 2^53+1", "numbig", dal.Equal, uint64(above), "$1::numeric", "9007199254740993", rowsOf(1)},
+			{"numbig numeric(20,0) float64 2^53+1, which is 2^53", "numbig", dal.Equal, float64(above), "$1::numeric", "9007199254740992", rowsOf()},
+		})
 	})
 	t.Run("a bigint above 2^53 is read back exactly into an integer field", func(t *testing.T) {
 		q := dal.From(dal.NewRootCollectionRef("tm_edge", "")).NewQuery().Where(dal.WhereField("id", dal.Equal, 1)).
@@ -782,21 +802,14 @@ func TestTypeMatrixIntegration_ValuesAtTheEdges(t *testing.T) {
 		}
 	})
 	t.Run("'Infinity'::numeric is matched by a float infinity and read back as one", func(t *testing.T) {
-		for _, tc := range []struct {
-			label    string
-			column   string
-			constant any
-			want     cellOutcome
-		}{
-			{"num numeric float64 +Inf", "num", math.Inf(1), rowsOf(3)},
-			{"num numeric float64 -Inf", "num", math.Inf(-1), rowsOf(4)},
-			{"num numeric float64 NaN, which numeric equals to itself", "num", math.NaN(), rowsOf(5)},
-			{"num numeric float32 +Inf", "num", float32(math.Inf(1)), rowsOf(3)},
-			{"i4 integer float64 +Inf, a miss and not an error", "i4", math.Inf(1), rowsOf()},
-			{"f8 double precision float64 +Inf, a miss: no row holds it", "f8", math.Inf(1), rowsOf()},
-		} {
-			check(t, tc.label, filter(tc.column, dal.Equal, tc.constant), tc.want)
-		}
+		checkEdgeCells(t, f, []edgeCell{
+			{"num numeric float64 +Inf", "num", dal.Equal, math.Inf(1), "$1::numeric", "Infinity", rowsOf(3)},
+			{"num numeric float64 -Inf", "num", dal.Equal, math.Inf(-1), "$1::numeric", "-Infinity", rowsOf(4)},
+			{"num numeric float64 NaN, which numeric equals to itself", "num", dal.Equal, math.NaN(), "$1::numeric", "NaN", rowsOf(5)},
+			{"num numeric float32 +Inf", "num", dal.Equal, float32(math.Inf(1)), "$1::numeric", "Infinity", rowsOf(3)},
+			{"i4 integer float64 +Inf, a miss and not an error", "i4", dal.Equal, math.Inf(1), "$1::numeric", "Infinity", rowsOf()},
+			{"f8 double precision float64 +Inf, a miss: no row holds it", "f8", dal.Equal, math.Inf(1), "$1::numeric", "Infinity", rowsOf()},
+		})
 		o := observe(t, f, dal.From(dal.NewRootCollectionRef("tm_edge", "")).NewQuery().OrderBy(dal.AscendingField("id")).
 			SelectColumns(dal.Column{Expression: field("num")}))
 		var got []any
@@ -811,50 +824,26 @@ func TestTypeMatrixIntegration_ValuesAtTheEdges(t *testing.T) {
 			t.Errorf("num = %s, want 1.5, 2, +Inf, -Inf, NaN as float64", valuesText(got))
 		}
 	})
-	t.Run("a float32 constant against a real column", func(t *testing.T) {
-		// A float is bound as numeric from the shortest decimal text of its own size, so
-		// float32(0.1) is the numeric 0.1. Against double precision that is the number
-		// 0.1 compared with 0.1, and matches. Against real the server compares as double
-		// precision too, and the real 0.1 widens to 0.10000000149011612, so no decimal
-		// 0.1 equals it: the filter is a miss on a row that holds the value written. The
-		// string "0.1", which the server reads as a real, matches; so does the float64 the
-		// reader returned for the row, because it is the widened real exactly.
-		//
-		// The two misses are a KNOWN DEFECT of dal-go/dalgo2sql, not a rule (task SQL-W4,
-		// item 5: compare a float constant with a real column in the column's type; no
-		// release has it yet). Each FAILS when that is fixed and says what to assert
-		// instead: rows [1], and the marker the dialect then writes (see knownFloatMarker,
-		// which the f4 cells of the matrix and of EveryIntegerAndFloatType cite).
+	t.Run("a float constant against a real column is compared as a real", func(t *testing.T) {
+		// The real 0.1 is the nearest float4, 0.10000000149011612 as a float64. A float is
+		// bound as numeric against any column but a real, and a numeric 0.1 is not that
+		// number, so against a real the equality used to find nothing. Against a real column
+		// the dialect now writes $1::real from the float's own shortest decimal text, so the
+		// server reads 0.1 as a real and the row is found, and so is the float64 the reader
+		// returned for the row (the widened real, which rounds back to the same float4). The
+		// double precision column is the control: it keeps the numeric binding and matches
+		// 0.1 as it did.
 		const widened = float64(float32(0.1))
-		for _, tc := range []struct {
-			label    string
-			column   string
-			constant any
-			want     cellOutcome
-			defect   bool // the answer is wrong, and the row is found once the defect is fixed
-		}{
-			{"f4 real float32 1.5, exact in binary", "f4", float32(1.5), rowsOf(2), false},
-			{"f4 real float32 0.1", "f4", float32(0.1), rowsOf(), true},
-			{"f4 real float64 0.1", "f4", 0.1, rowsOf(), true},
-			{"f4 real string 0.1", "f4", "0.1", rowsOf(1), false},
-			{"f4 real float64 as the reader returns it", "f4", widened, rowsOf(1), false},
-			{"f8 double precision float32 0.1", "f8", float32(0.1), rowsOf(1), false},
-			{"f8 double precision float64 0.1", "f8", 0.1, rowsOf(1), false},
-		} {
-			o := filter(tc.column, dal.Equal, tc.constant)
-			if !tc.defect {
-				check(t, tc.label, o, tc.want)
-				continue
-			}
-			t.Logf("KNOWN DEFECT of dal-go/dalgo2sql (task SQL-W4, item 5; not a rule): %s", tc.label)
-			t.Logf("%s (a miss: the row holds 0.1)\n    statement: %s\n    arguments: %s\n    result:    %s", tc.label, o.statement, argsText(o.args), o.result())
-			if !tc.want.matches(o) && !rowsOf(1).matches(o) {
-				t.Errorf("%s: got %s, want %s (the known defect)", tc.label, o.result(), tc.want)
-			}
-			if rowsOf(1).matches(o) {
-				t.Errorf("%s: the row is now found, so dalgo2sql compares a float constant with a real column in the column's type (SQL-W4 item 5 is fixed): assert rows [1] here, with the statement %s, update %s in the matrix and delete this pin and the README's known limit", tc.label, o.statement, knownFloatMarker)
-			}
-		}
+		checkEdgeCells(t, f, []edgeCell{
+			{"f4 real float32 1.5, exact in binary", "f4", dal.Equal, float32(1.5), "$1::real", "1.5", rowsOf(2)},
+			{"f4 real float32 0.1", "f4", dal.Equal, float32(0.1), "$1::real", "0.1", rowsOf(1)},
+			{"f4 real float64 0.1", "f4", dal.Equal, 0.1, "$1::real", "0.1", rowsOf(1)},
+			{"f4 real string 0.1", "f4", dal.Equal, "0.1", "$1", "0.1", rowsOf(1)},
+			{"f4 real float64 as the reader returns it", "f4", dal.Equal, widened, "$1::real", "0.10000000149011612", rowsOf(1)},
+			{"f4 real float64 as a lower bound", "f4", dal.GreaterThen, 0.1, "$1::real", "0.1", rowsOf(2)},
+			{"f8 double precision float32 0.1", "f8", dal.Equal, float32(0.1), "$1::numeric", "0.1", rowsOf(1)},
+			{"f8 double precision float64 0.1", "f8", dal.Equal, 0.1, "$1::numeric", "0.1", rowsOf(1)},
+		})
 		o := observe(t, f, dal.From(dal.NewRootCollectionRef("tm_edge", "")).NewQuery().Where(dal.WhereField("id", dal.Equal, 1)).
 			SelectColumns(dal.Column{Expression: field("f4")}, dal.Column{Expression: field("f8")}))
 		if o.err != nil || len(o.rows) != 1 {
@@ -882,20 +871,34 @@ func TestTypeMatrixIntegration_ArithmeticOnDoublePrecision(t *testing.T) {
 	}
 	t.Logf("control, no cast: SELECT 2147483647::int4 * 2 is %v", err)
 
+	// Each case lists the expression as the statement writes it, and the constants of the
+	// expression as the driver is handed them; the id the row is picked by follows them, in the
+	// order of the placeholders. An operand of +, - and * is cast and wrapped, the operands of
+	// / are cast inside a NULLIF so that a zero divisor is NULL.
 	for _, tc := range []struct {
 		label string
 		id    int
 		expr  dal.Expression
 		want  float64
+		sql   string // the expression as the statement writes it
+		args  []any  // the constants of the expression, as the driver is handed them
 	}{
-		{"i4 * 2 past int4", 1, dal.Binary(field("i4"), dal.Multiply, dal.NewConstant(2)), float64(math.MaxInt32) * 2},
-		{"i4 * i4 past int4", 1, dal.Binary(field("i4"), dal.Multiply, field("i4")), float64(math.MaxInt32) * float64(math.MaxInt32)},
-		{"i2 * i2 past int2", 1, dal.Binary(field("i2"), dal.Multiply, field("i2")), float64(math.MaxInt16) * float64(math.MaxInt16)},
-		{"i4 + i4 past int4", 1, dal.Binary(field("i4"), dal.Add, field("i4")), float64(math.MaxInt32) * 2},
-		{"i4 - 1 below int4's minimum", 2, dal.Binary(field("i4"), dal.Subtract, dal.NewConstant(1)), float64(math.MinInt32) - 1},
-		{"i8 * 2 past int8", 2, dal.Binary(field("i8"), dal.Multiply, dal.NewConstant(2)), float64(math.MaxInt64) * 2},
-		{"i8 * 1 above 2^53: the last digit is lost", 1, dal.Binary(field("i8"), dal.Multiply, dal.NewConstant(1)), 9007199254740992},
-		{"i4 / 2 is not an integer division", 1, dal.Binary(field("i4"), dal.Divide, dal.NewConstant(2)), float64(math.MaxInt32) / 2},
+		{"i4 * 2 past int4", 1, dal.Binary(field("i4"), dal.Multiply, dal.NewConstant(2)), float64(math.MaxInt32) * 2,
+			`((("i4")::double precision) * (($1::bigint)::double precision))`, []any{int64(2)}},
+		{"i4 * i4 past int4", 1, dal.Binary(field("i4"), dal.Multiply, field("i4")), float64(math.MaxInt32) * float64(math.MaxInt32),
+			`((("i4")::double precision) * (("i4")::double precision))`, nil},
+		{"i2 * i2 past int2", 1, dal.Binary(field("i2"), dal.Multiply, field("i2")), float64(math.MaxInt16) * float64(math.MaxInt16),
+			`((("i2")::double precision) * (("i2")::double precision))`, nil},
+		{"i4 + i4 past int4", 1, dal.Binary(field("i4"), dal.Add, field("i4")), float64(math.MaxInt32) * 2,
+			`((("i4")::double precision) + (("i4")::double precision))`, nil},
+		{"i4 - 1 below int4's minimum", 2, dal.Binary(field("i4"), dal.Subtract, dal.NewConstant(1)), float64(math.MinInt32) - 1,
+			`((("i4")::double precision) - (($1::bigint)::double precision))`, []any{int64(1)}},
+		{"i8 * 2 past int8", 2, dal.Binary(field("i8"), dal.Multiply, dal.NewConstant(2)), float64(math.MaxInt64) * 2,
+			`((("i8")::double precision) * (($1::bigint)::double precision))`, []any{int64(2)}},
+		{"i8 * 1 above 2^53: the last digit is lost", 1, dal.Binary(field("i8"), dal.Multiply, dal.NewConstant(1)), 9007199254740992,
+			`((("i8")::double precision) * (($1::bigint)::double precision))`, []any{int64(1)}},
+		{"i4 / 2 is not an integer division", 1, dal.Binary(field("i4"), dal.Divide, dal.NewConstant(2)), float64(math.MaxInt32) / 2,
+			`(("i4")::double precision / NULLIF(($1::bigint)::double precision, 0))`, []any{int64(2)}},
 	} {
 		q := dal.From(dal.NewRootCollectionRef("tm_edge", "")).NewQuery().Where(dal.WhereField("id", dal.Equal, tc.id)).
 			SelectColumns(dal.Column{Expression: tc.expr, Alias: "result"})
@@ -908,8 +911,13 @@ func TestTypeMatrixIntegration_ArithmeticOnDoublePrecision(t *testing.T) {
 		if got, ok := o.rows[0]["result"].(float64); !ok || got != tc.want {
 			t.Errorf("%s: result = %T(%v), want float64(%v)", tc.label, o.rows[0]["result"], o.rows[0]["result"], tc.want)
 		}
-		if !strings.Contains(o.statement, "::double precision") {
-			t.Errorf("%s: statement = %s, want the operands cast to double precision", tc.label, o.statement)
+		wantArgs := append(append([]any(nil), tc.args...), int64(tc.id))
+		wantStatement := fmt.Sprintf(`SELECT %s AS "result", "id" AS "__dalgo_record_id" FROM "tm_edge" WHERE "id" = $%d::bigint`, tc.sql, len(wantArgs))
+		if o.statement != wantStatement {
+			t.Errorf("%s: statement = %s, want %s (the operands cast to double precision)", tc.label, o.statement, wantStatement)
+		}
+		if !reflect.DeepEqual(o.args, wantArgs) {
+			t.Errorf("%s: arguments = %s, want %s", tc.label, argsText(o.args), valuesText(wantArgs))
 		}
 	}
 }
@@ -983,6 +991,13 @@ func TestTypeMatrixIntegration_TimestampWithoutZoneFollowsTheSessionTimeZone(t *
 		{"d date, the instant midnight UTC, which is 09:00 in Tokyo", "d", time.Date(2021, 6, 15, 0, 0, 0, 0, time.UTC), rowsOf()},
 		{"d date, the instant 15:00 UTC the day before, which is midnight in Tokyo", "d", time.Date(2021, 6, 14, 15, 0, 0, 0, time.UTC), rowsOf(1)},
 	} {
-		check(t, tc.label, observe(t, f, filterQuery("tm_zone", tc.column, dal.Equal, tc.constant)), tc.want)
+		o := observe(t, f, filterQuery("tm_zone", tc.column, dal.Equal, tc.constant))
+		check(t, tc.label, o, tc.want)
+		if want := fmt.Sprintf(`SELECT "id" FROM "tm_zone" WHERE "%s" = $1::timestamptz ORDER BY "id" ASC`, tc.column); o.statement != want {
+			t.Errorf("%s: statement = %s, want %s", tc.label, o.statement, want)
+		}
+		if len(o.args) != 1 || !sameArgument(o.args[0], tc.constant) {
+			t.Errorf("%s: arguments = %s, want the instant %v as a time.Time", tc.label, argsText(o.args), tc.constant)
+		}
 	}
 }

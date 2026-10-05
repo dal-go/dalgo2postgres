@@ -73,10 +73,12 @@ func openMockedDatabase(t *testing.T, sqlDB *sql.DB, opts dalgo2sql.DbOptions, o
 	return db
 }
 
-// catalogColumns are the columns of the catalog lookup's answer. The last, pk, is the
-// catalog's own primary key flag (dalgo2sql v0.26.3): the mocked sources declare none, so
-// every row says false and the keys come from the options a test passes.
-var catalogColumns = []string{"name", "attname", "data_type", "category", "type_oid", "type_elem", "attnotnull", "nondeterministic", "pk"}
+// catalogColumns are the columns of the catalog lookup's answer. pk is the catalog's own
+// primary key flag: the mocked sources declare none, so every row says false and the keys
+// come from the options a test passes. The last, collation, is the OID of the column's
+// collation when it is not the database's default and 0 otherwise (dalgo2sql v0.26.4, the
+// join check of two text keys): the mocked columns all use the default.
+var catalogColumns = []string{"name", "attname", "data_type", "category", "type_oid", "type_elem", "attnotnull", "nondeterministic", "pk", "collation"}
 
 // catalogColumn is one column of a source in a mocked catalog answer.
 type catalogColumn struct {
@@ -96,7 +98,7 @@ var (
 func catalogRows(relation string, columns ...catalogColumn) *sqlmock.Rows {
 	rows := sqlmock.NewRows(catalogColumns)
 	for _, c := range columns {
-		rows.AddRow(relation, c.name, c.dataType, c.category, c.oid, int64(0), c.notNull, false, false)
+		rows.AddRow(relation, c.name, c.dataType, c.category, c.oid, int64(0), c.notNull, false, false, int64(0))
 	}
 	return rows
 }
@@ -721,7 +723,7 @@ func TestNewDatabase_ForwardsTheJoinAnswers(t *testing.T) {
 	joinCatalog := func() *sqlmock.Rows {
 		rows := catalogRows(`"album"`, intColumn("albumid", true), textColumn("title"), intColumn("artistid", true))
 		for _, c := range []catalogColumn{intColumn("artistid", true), textColumn("name")} {
-			rows.AddRow(`"artist"`, c.name, c.dataType, c.category, c.oid, int64(0), c.notNull, false, false)
+			rows.AddRow(`"artist"`, c.name, c.dataType, c.category, c.oid, int64(0), c.notNull, false, false, int64(0))
 		}
 		return rows
 	}
@@ -898,8 +900,8 @@ func TestNewDatabase_RecordsCarryTheirKey(t *testing.T) {
 	t.Run("the catalog's primary key keys the records when nothing else names one", func(t *testing.T) {
 		pk := textColumn("id")
 		catalog := sqlmock.NewRows(catalogColumns).
-			AddRow(`"widgets"`, "id", pk.dataType, pk.category, pk.oid, int64(0), false, false, true).
-			AddRow(`"widgets"`, "name", "text", "S", int64(25), int64(0), false, false, false)
+			AddRow(`"widgets"`, "id", pk.dataType, pk.category, pk.oid, int64(0), false, false, true, int64(0)).
+			AddRow(`"widgets"`, "name", "text", "S", int64(25), int64(0), false, false, false, int64(0))
 		sqlDB, mock := newStructuredMock(t)
 		db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
 		mock.ExpectQuery(catalogStatement).WithArgs(`"widgets"`).WillReturnRows(catalog)

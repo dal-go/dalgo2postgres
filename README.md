@@ -62,7 +62,8 @@ and every name is double-quoted. An injection string is compared as text.
 ### What runs on the server
 
 - **Filters**: constants of each Go type (a whole number is `$n::bigint`, an unsigned
-  integer or a float `$n::numeric`, a bool `$n::boolean`, a `time.Time` `$n::timestamptz`,
+  integer or a float `$n::numeric`, except a float against a `real` column, which is
+  `$n::real`; a bool `$n::boolean`, a `time.Time` `$n::timestamptz`,
   bytes `$n::bytea`, a string is untyped so the server reads it as a date, a UUID or an
   enum where the column says so); `== nil`, `isNull` and `isNotNull`; `IN` and `NOT IN`,
   an empty list included. A constant that does not match its column (a number against
@@ -92,7 +93,10 @@ result.
 - **A query with a subquery** (`EXISTS`, a scalar subquery, a derived source): DALgo reads
   each source with plain statements and combines them itself.
 - **A join the database declines**: the `ON` types differ (text with an integer, a boolean
-  with an integer). dalgo2sql also declines a key whose type has no usable equality
+  with an integer), or two text keys have different collations of their own, neither the
+  database's default (the server cannot choose between them and refuses the comparison,
+  `42P22`, so DALgo compares the texts itself). dalgo2sql also declines a key whose type has
+  no usable equality
   (`json`, `xml`, geometric types, `oid`, the `reg*` types), and a query its compiler cannot
   write; this repository's tests do not exercise those two.
 - **`FIRST` and `LAST`** are refused with an error, not run anywhere: PostgreSQL promises
@@ -134,6 +138,10 @@ connection's `search_path` resolves. `WithSchema` affects only the schema reader
 
 ### Results and errors
 
+- A NULL is `nil` in the rows of both readers, the records reader and the recordset reader
+  (`ExecuteQueryToRecordsetReader`, the path DataTug reads), so a caller can tell it from a
+  stored `0`, `false`, `""` or zero time. (Up to dalgo2sql v0.26.4 the recordset reader put
+  the zero value of the column's type there.)
 - A `NUMERIC` column is read as `float64` (pgx delivers it as text), `NaN` included. A
   `float64` holds about 15 significant digits exactly, so a longer `NUMERIC` is
   rounded. Dates and times are `time.Time`.
@@ -185,7 +193,7 @@ statement, the argument and the answer of each pair (`go test -v`).
 |---|---|---|
 | signed integer (`int`, `int8` ... `int64`) | `$n::bigint` | `int64` |
 | unsigned integer (`uint` ... `uint64`) | `$n::numeric` | its decimal text |
-| `float32`, `float64` (a whole number too) | `$n::numeric` | its shortest decimal text |
+| `float32`, `float64` (a whole number too) | `$n::numeric`; against a `real` column `$n::real` | its shortest decimal text |
 | `string` | `$n`, untyped | the string |
 | `bool` | `$n::boolean` | `bool` |
 | `time.Time` | `$n::timestamptz` | `time.Time` |
@@ -224,9 +232,15 @@ What the server answers, as observed:
   read adds on the primary key too (see the known limits). A table whose order a caller
   compares with Go's declares its text `COLLATE "C"`. NULLs sort first ascending and last descending;
   a `NOT NULL` column has no `NULLS` clause, except on the nullable side of a `LEFT JOIN`.
+- **A float against a `real` column** is compared as a real. A `real` that holds `0.1` is
+  `0.10000000149011612` when widened, and a `numeric` `0.1` is not that number, so a numeric
+  binding finds nothing; the dialect writes `$n::real` from the float's own decimal text, and
+  `float32(0.1)`, `0.1`, the string `"0.1"` and the `float64` the reader returned for the row
+  all find it. Against `double precision` and `numeric` the binding stays `numeric`.
 - **Joins**: a text column with a collation of its own against one with the database's
-  default joins, in the collation of the first. (Two columns with different collations of
-  their own do not: see the known limits.)
+  default joins on the server, in the collation of the first. Two columns with different
+  collations of their own do not join on the server (`42P22`: the server cannot choose
+  between them); the compiler declines such a join, and DALgo's engine answers it.
 - **A select-all over a join** is one `SELECT *`, and the server lists the base source's
   columns first, then each joined source's, in `FROM` order.
 - **A column named like its source's alias** (`SELECT "x" FROM "t" AS "x"`) is the column; a
@@ -237,26 +251,10 @@ What the server answers, as observed:
   `IdentifierFoldLower`; in `IdentifierExact` they are two columns.
 
 Known limits. Each is pinned by a test that prints the statement and the server's answer.
-The first four are **defects or limits of dal-go/dalgo2sql** (the owner of the fix is named);
-their tests FAIL when the fix is released and say what to assert instead, so the line here is
-then deleted. They are observations, not rules to rely on.
+The first is a **defect or limit of dal-go/dalgo2sql** that is reported to it, and no fix is
+under way yet; its test FAILS when the fix is released and says what to assert instead, so
+the line here is then deleted. It is an observation, not a rule to rely on.
 
-- **The recordset reader returns the zero value for a NULL** (a defect, being fixed in
-  dal-go/dalgo2sql, task SQL-W4 item 1). `ExecuteQueryToRecordsetReader`, the path DataTug
-  reads, holds no NULL: a typed column returns the zero value of its type (`0`, `false`, `""`,
-  the zero time) for a NULL, so a caller cannot tell the two apart. The records reader returns
-  `nil` for the same cell, and a test asserts that beside the pin.
-- **Two text join keys with different collations of their own** (`"C"` against `"POSIX"`;
-  a defect, task SQL-W4 item 4, which will decline such a join to DALgo's engine). The compiler
-  accepts the pair (both are text) and plans the join on the server, which refuses it with
-  `42P22` (could not determine which collation to use). A pair in which only one column has a
-  collation of its own is fine.
-- **A float constant against a `real` column** (a defect, task SQL-W4 item 5, which will
-  compare in the column's type). The constant is bound as `numeric` and the server compares as
-  `double precision`: a `real` that holds `0.1` is `0.10000000149011612` when widened, so
-  `float32(0.1)` and `0.1` find nothing, while the string `"0.1"` (read by the server as a
-  `real`) and the `float64` the reader returned for the row do. Against `double precision` both
-  find it. Until the fix, filter a `real` column by a string, or by a range.
 - **A recordset registered under a name with capitals** (`Ck_Mixed`) is found only by a query
   that spells the source exactly so; dalgo2sql folds the name the query spells, never the
   registered names. For `ck_mixed` or `CK_MIXED` the recordset is ignored with no error and the

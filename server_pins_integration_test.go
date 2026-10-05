@@ -221,16 +221,14 @@ func TestServerPinsIntegration_SelectAllOverAJoinListsTheBasesColumnsFirst(t *te
 }
 
 // Two text join keys whose columns carry different collations, neither the database's
-// default, are accepted by the compiler, which compares the type's category (text with
-// text), and planned onto the server. The server cannot compare them: it cannot decide
-// which collation the comparison uses and refuses the statement with 42P22. A pair in
-// which only one column has a collation of its own is compared in that one, and answers.
-//
-// KNOWN DEFECT of dal-go/dalgo2sql, not a rule (task SQL-W4, item 4, which declines such a
-// join to DALgo's own engine; no release has it yet). The refusal is an honest one, but
-// the join is planned on the server and then fails, where DALgo's engine would answer.
-// The first case below FAILS when that is fixed, and says what to assert instead: a plan
-// that is not native, and rows [1] for the same query.
+// default, cannot be compared by the server: it cannot decide which collation the
+// comparison uses and refuses the statement with 42P22. The catalog tells the compiler each
+// column's collation (dalgo2sql v0.26.5), so such a join is declined to DALgo's own engine,
+// which compares the two texts itself and answers; a pair in which only one column has a
+// collation of its own is compared by the server in that one, and answers. (Up to v0.26.4
+// the compiler planned the first pair on the server, which refused it.) The control below
+// states the server's refusal of the statement the compiler no longer sends, so the reason
+// for the plan is a fact about the server and not only about the compiler.
 func TestServerPinsIntegration_TextJoinKeysWithDifferentCollations(t *testing.T) {
 	f := openQueryFixture(t, "test_pin_collation", IdentifierFoldLower, []string{
 		`CREATE TABLE c_c (id integer PRIMARY KEY, k text COLLATE "C")`,
@@ -251,23 +249,29 @@ func TestServerPinsIntegration_TextJoinKeysWithDifferentCollations(t *testing.T)
 			NewQuery().
 			SelectColumns(dal.Column{Expression: dal.NewFieldRef("l", "id"), Alias: "id"})
 	}
-	t.Run(`KNOWN DEFECT: collation "C" against "POSIX": planned on the server, which cannot choose one`, func(t *testing.T) {
+	t.Run(`control: the server refuses collation "C" against "POSIX" with 42P22`, func(t *testing.T) {
+		var id int
+		err := f.admin.QueryRowContext(context.Background(),
+			`SELECT l.id FROM c_c AS l INNER JOIN c_p AS r ON l.k = r.k`).Scan(&id)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "42P22" {
+			t.Errorf("error = %v, want the server's 42P22 (indeterminate collation)", err)
+		}
+	})
+	t.Run(`collation "C" against "POSIX": declined to DALgo's engine, which answers`, func(t *testing.T) {
 		q := join("c_c", "c_p")
 		plan, err := dal.PlanJoin(context.Background(), q, joiner)
 		t.Logf("plan: %+v, %v", plan, err)
-		t.Logf("KNOWN DEFECT of dal-go/dalgo2sql (task SQL-W4, item 4; not a rule): the compiler plans on the server a join of two text columns with different collations, and the server refuses it with 42P22")
-		o := observe(t, f, q)
-		t.Logf("statement: %s\n    arguments: %s\n    result:    %s", o.statement, argsText(o.args), o.result())
-		const fixed = "dalgo2sql now declines such a join to DALgo's engine (SQL-W4 item 4 is fixed): assert here a plan whose strategy is not dal.JoinNative and rows [1] for the same query, and delete this pin and the README's known limit"
-		if err == nil && plan.Strategy != dal.JoinNative {
-			t.Errorf("plan = %+v: %s", plan, fixed)
-		} else if err != nil || plan.Strategy != dal.JoinNative {
-			t.Errorf("plan = %+v, err = %v; want the join planned on the server (the compiler accepts the pair by category)", plan, err)
+		if err != nil || plan.Strategy == dal.JoinNative {
+			t.Errorf("plan = %+v, err = %v; want a plan that is not native: the server cannot compare the two", plan, err)
 		}
-		if o.code == "" {
-			t.Errorf("result = %s: %s", o.result(), fixed)
-		} else if o.code != "42P22" {
-			t.Errorf("result = %s, want the server's refusal 42P22 (indeterminate collation)", o.result())
+		o := observe(t, f, q)
+		t.Logf("statements: %v\n    result: %s", statementsSent(f), o.result())
+		check(t, `collation "C" against "POSIX", in DALgo's engine`, o, rowsOf(1))
+		for _, statement := range statementsSent(f) {
+			if strings.Contains(statement, " JOIN ") {
+				t.Errorf("a statement joins on the server: %s", statement)
+			}
 		}
 	})
 	t.Run(`collation "C" against the default: the column with a collation of its own decides`, func(t *testing.T) {
