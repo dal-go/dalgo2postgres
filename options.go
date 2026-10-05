@@ -64,7 +64,9 @@ type Option func(*Database)
 
 // WithSchema makes the schema reader inspect the named PostgreSQL schema
 // instead of [DefaultSchema]. An empty name keeps the default. The name is
-// always sent to the server as a bound parameter, never inside SQL text.
+// always sent to the server as a bound parameter, never inside SQL text. A name
+// over 63 bytes is refused by each entry of the reader with an error that matches
+// dalgo2sql.ErrUnsafeName.
 //
 // A collection reference that names its own schema
 // ([dal.NewQualifiedRootCollectionRef]) is read from that schema instead.

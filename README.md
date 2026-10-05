@@ -415,8 +415,11 @@ skipped, missing or not passing.
   collection that names no recordset (it deletes by the column `ID`, so the collection of the key
   alone reaches the server), and a nested key whose collections of 32 and 31 bytes join into a
   name of 64 bytes, each with its control of 63 bytes
-  (`TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath`). `Set`, `Update` and the
-  multi forms are held to it by the same functions of dalgo2sql, and are not run here. A join's
+  (`TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath`). `Insert`, `Set`, `Update`,
+  `Exists`, `Get`, `GetMulti` and `Delete` are also run with a collection, a field and a
+  primary key of 64 bytes by a unit test over a handle that fails on any statement
+  (`TestNewDatabase_KeyWritesAndReadsRefuseUnsafeNames`); `Upsert` and the other multi forms are
+  held to the limit by the same functions of dalgo2sql and are not run here. A join's
   `ON` condition takes only an equality of two fields, so a value is no position of it.
 - **PostgreSQL 18.** A column with a `NOT VALID` not-null constraint and NULL rows under
   `ORDER BY` with `LIMIT`: the catalog calls the column NOT NULL while its constraint vouches for
@@ -489,6 +492,12 @@ db, err := dalgo2postgres.NewDatabase(dsn,
   modes"), so the reader and the queries never disagree about a name.
 - A nil option is ignored; an unknown `IdentifierMode` makes the constructor
   return an error before it connects.
+
+A schema name or a table name over 63 bytes, which is all PostgreSQL keeps of an
+identifier, is refused by every entry of the schema reader that takes one, with an error that
+matches `dalgo2sql.ErrUnsafeName` (the one a key path returns for the same name) and before any
+statement is sent. The rule is in bytes, as the server's, and applies to the table name as the
+identifier mode resolves it. A name of exactly 63 bytes is read as before.
 
 A collection reference that names its own schema
 (`dal.NewQualifiedRootCollectionRef("sales", "Album", "")`) is read from that

@@ -23,6 +23,10 @@ func (d *Database) ListConstraints(ctx context.Context, ref *dal.CollectionRef) 
 
 // listConstraints is the reader behind [Database.ListConstraints].
 func (d *Database) listConstraints(ctx context.Context, ref *dal.CollectionRef) ([]dbschema.ConstraintDef, error) {
+	schema, name, err := d.lookupNames(ref)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := d.sqlDB.QueryContext(ctx,
 		`SELECT constraint_name, constraint_type
 		 FROM information_schema.table_constraints
@@ -30,7 +34,7 @@ func (d *Database) listConstraints(ctx context.Context, ref *dal.CollectionRef) 
 		   AND table_name   = $2
 		   AND constraint_type IN ('PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY')
 		 ORDER BY constraint_type, constraint_name`,
-		d.schemaFor(ref), d.resolveName(ref.Name()),
+		schema, name,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dalgo2postgres: ListConstraints %s: %w", collectionLabel(ref.Schema(), ref.Name()), err)
@@ -72,6 +76,10 @@ func (d *Database) ListReferrers(ctx context.Context, ref *dal.CollectionRef) ([
 
 // listReferrers is the reader behind [Database.ListReferrers].
 func (d *Database) listReferrers(ctx context.Context, ref *dal.CollectionRef) ([]dbschema.Referrer, error) {
+	schema, name, err := d.lookupNames(ref)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := d.sqlDB.QueryContext(ctx,
 		`SELECT c.oid, source.relname AS referrer_table, source_column.attname AS referrer_col
 		 FROM pg_catalog.pg_constraint AS c
@@ -87,7 +95,7 @@ func (d *Database) listReferrers(ctx context.Context, ref *dal.CollectionRef) ([
 		   AND target_ns.nspname = $1
 		   AND target.relname    = $2
 		 ORDER BY source.relname, c.conname, c.oid, source_key.position`,
-		d.schemaFor(ref), d.resolveName(ref.Name()),
+		schema, name,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dalgo2postgres: ListReferrers %s: %w", collectionLabel(ref.Schema(), ref.Name()), err)

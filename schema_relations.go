@@ -207,6 +207,9 @@ func (d *Database) ListSchemaViews(ctx context.Context, schema string) ([]dal.Co
 // readRefs reads the collections (or only the views) of readSchema, each by a reference that
 // names refSchema, or none when refSchema is empty (see [relationRefs]).
 func (d *Database) readRefs(ctx context.Context, readSchema, refSchema string, viewsOnly bool, op string) ([]dal.CollectionRef, error) {
+	if err := checkIdentifierLength(positionSchema, readSchema); err != nil {
+		return nil, err
+	}
 	relations, err := listRelations(ctx, d.sqlDB, readSchema, op)
 	if err != nil {
 		return nil, err

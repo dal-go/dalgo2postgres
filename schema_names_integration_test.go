@@ -2,10 +2,12 @@ package dalgo2postgres
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/dal-go/dalgo/dal"
+	"github.com/dal-go/dalgo2sql"
 )
 
 // Runs against a real PostgreSQL server and skips unless DALGO2POSTGRES_TEST_DSN
@@ -14,7 +16,7 @@ import (
 // PostgreSQL keeps 63 bytes of an identifier. This test calls every entry of the
 // schema reader that takes a schema or a table name from the caller, with the
 // name of an object that exists (63 bytes) and with the same name plus one byte
-// (64 bytes), and records what each answers. The entries are ListCollections and
+// (64 bytes). The entries are ListCollections and
 // ListViews (the configured schema), ListSchemaCollections and ListSchemaViews
 // (a schema name), DescribeCollection, ListIndexes, ListConstraints,
 // ListReferrers and NonDeterministicTextColumns (a table name and, when the
@@ -146,7 +148,7 @@ func (f schemaNameFixture) calls(t *testing.T, table, schema string) []schemaNam
 			return answer{1 + len(columns), nil}
 		}},
 		{"JoinFields", func(ctx context.Context) answer {
-			fields, err := f.db.JoinFields(ctx, inConfigured)
+			fields, err := f.db.JoinFields(ctx, dal.NewQualifiedRootCollectionRef(f.configured, table, ""))
 			return answer{len(fields), err}
 		}},
 	}
@@ -156,29 +158,48 @@ func TestSchemaReaderIntegration_NameOf64BytesAgainstAnObjectOf63(t *testing.T) 
 	f := newSchemaNameFixture(t)
 	ctx := context.Background()
 
-	// The control: with the names of the objects, each entry finds them. The
-	// calls that name a table and a schema are made with the exact names, so a
-	// failure here is a fault of the fixture, not of the behaviour under test.
+	// The control: with the names of the objects, each entry finds them. A failure
+	// here is a fault of the fixture, not of the behaviour under test.
 	for _, c := range f.calls(t, f.table, f.longSchema) {
-		got := c.call(ctx)
-		if c.entry == "JoinFields" {
-			t.Logf("%s with 63 bytes: %d items, err %v", c.entry, got.items, got.err)
-			continue
-		}
-		if got.err != nil || got.items == 0 {
+		if got := c.call(ctx); got.err != nil || got.items == 0 {
 			t.Errorf("%s with a name of 63 bytes: %d items, err %v; want its answer", c.entry, got.items, got.err)
 		}
 	}
 
-	// A name of 64 bytes: the 63 bytes of the existing object and one more.
+	// A name of 64 bytes, the 63 bytes of an object that exists and one more, is
+	// refused by every entry with the error of the key paths.
 	for _, c := range f.calls(t, f.table+"x", f.longSchema+"x") {
 		got := c.call(ctx)
 		t.Logf("%s with 64 bytes: %d items, err %v", c.entry, got.items, got.err)
 		if c.entry == "JoinFields" {
+			// dalgo2sql refuses it in its own words, before the catalog is read: it is
+			// not the schema reader's rule, and is held here as it is observed.
+			if got.items != 0 || got.err == nil || !strings.Contains(got.err.Error(), "over the engine limit of 63") {
+				t.Errorf("JoinFields with a name of 64 bytes: %d items, err %v; want dalgo2sql's refusal", got.items, got.err)
+			}
 			continue
 		}
-		if got.err != nil || got.items == 0 {
-			t.Errorf("%s with a name of 64 bytes: %d items, err %v; this test pins the answer as observed on the server", c.entry, got.items, got.err)
+		if got.items != 0 || !errors.Is(got.err, dalgo2sql.ErrUnsafeName) || !strings.Contains(got.err.Error(), "it keeps 63 bytes") {
+			t.Errorf("%s with a name of 64 bytes: %d items, err %v; want a refusal that matches dalgo2sql.ErrUnsafeName and says the server keeps 63 bytes", c.entry, got.items, got.err)
 		}
+	}
+
+	// The rule is in bytes, as the server's: a table of 31 two-byte characters (62
+	// bytes) is found by its name and refused by one of 32 two-byte characters (64
+	// bytes).
+	twoByte := strings.Repeat("é", 31)
+	execAll(t, f.db, `CREATE TABLE `+exactIdent(f.configured)+`.`+exactIdent(twoByte)+` (id integer PRIMARY KEY)`)
+	found := dal.NewRootCollectionRef(twoByte, "")
+	if def, err := f.db.DescribeCollection(ctx, &found); err != nil || len(def.Fields) != 1 {
+		t.Fatalf("DescribeCollection of 62 bytes in 31 characters = %v, %v; want its one column", def, err)
+	}
+	refused := dal.NewRootCollectionRef(twoByte+"é", "")
+	if def, err := f.db.DescribeCollection(ctx, &refused); def != nil || !errors.Is(err, dalgo2sql.ErrUnsafeName) {
+		t.Errorf("DescribeCollection of 64 bytes in 32 characters = %v, %v; want a refusal that matches dalgo2sql.ErrUnsafeName", def, err)
+	}
+
+	// Nothing was changed by the refusals: the objects are still there.
+	if refs, err := f.db.ListCollections(ctx, nil); err != nil || len(refs) != 4 {
+		t.Errorf("ListCollections afterwards = %v, %v; want the table, its view, the referrer and the table of two-byte characters", refs, err)
 	}
 }
