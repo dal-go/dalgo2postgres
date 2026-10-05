@@ -69,8 +69,9 @@ and every name is double-quoted. An injection string is compared as text.
   an empty list included. A constant that does not match its column (a number against
   text) is a server error, not an empty result.
 - **ORDER BY, LIMIT and OFFSET**: NULLs sort first ascending and last descending, as in
-  DALgo, and the `NULLS` clause is left out for a NOT NULL column. `LIMIT` and `OFFSET` are
-  bound.
+  DALgo, and the `NULLS` clause is left out for a NOT NULL column. A column whose not-null
+  constraint is `NOT VALID` (PostgreSQL 18) may hold NULL and is not one: the clause is written
+  for it (dalgo2sql v0.26.7, dal-go/dalgo2sql#220). `LIMIT` and `OFFSET` are bound.
 - **GROUP BY and HAVING with `COUNT`, `SUM`, `AVG`, `MIN` and `MAX`**, and `COUNT DISTINCT`
   and `SUM DISTINCT`, as one statement. `SUM` and `AVG` come back as `float64`, as in
   DALgo's own engine. dalgo2sql declares `AVG DISTINCT` too; this repository's tests do not
@@ -96,16 +97,17 @@ result.
   outer table: 1 + 7 statements for 7 outer rows, and the server cannot shorten it. Where the
   tables are large, a correlated subquery costs what they hold (the statement count of each
   fixture case is asserted: `TestFixturesIntegration_SubqueriesRunInDALgoOverLeafReads`).
-  Issue for dal-go/dalgo (a correlated subquery read with the outer value as a filter): not
-  yet filed. A query with a **derived source** is not answered at all: it is refused (see the
-  known limits).
+  This is a known limit of dal-go/dalgo's engine, described here: a correlated subquery could be
+  read with the outer value as a filter. A query with a **derived source** is not answered at
+  all: it is refused (see the known limits).
 - **A join the database declines**: the `ON` types differ (text with an integer, a boolean
   with an integer), or two text keys have different collations of their own, neither the
   database's default (the server cannot choose between them and refuses the comparison,
   `42P22`, so DALgo compares the texts itself). dalgo2sql also declines a key whose type has
-  no usable equality
-  (`json`, `xml`, geometric types, `oid`, the `reg*` types), and a query its compiler cannot
-  write; this repository's tests do not exercise those two.
+  no usable equality (`json`, `xml`, geometric types, `oid`, the `reg*` types), which this
+  repository's tests do not exercise, and a query its compiler cannot write, which they do: the
+  join fixture `chinook-wildcard` (listed in `testdata/postgres-divergences.json`) is declined
+  to DALgo's engine, which answers it with three plain reads.
 - **`FIRST` and `LAST`** are refused with an error, not run anywhere: PostgreSQL promises
   no row order for them, and this database declares no stable row order.
 
@@ -248,7 +250,8 @@ What the server answers, as observed:
   `en_US.utf8`, `São Paulo` sorts before `Shanghai`. This holds for the `ORDER BY` a keys-only
   read adds on the primary key too (see the known limits). A table whose order a caller
   compares with Go's declares its text `COLLATE "C"`. NULLs sort first ascending and last descending;
-  a `NOT NULL` column has no `NULLS` clause, except on the nullable side of a `LEFT JOIN`.
+  a `NOT NULL` column has no `NULLS` clause, except on the nullable side of a `LEFT JOIN`; a
+  column whose not-null constraint is `NOT VALID` (PostgreSQL 18) counts as nullable and has it.
 - **A float against a `real` column** is compared as a real. A `real` that holds `0.1` is
   `0.10000000149011612` when widened, and a `numeric` `0.1` is not that number, so a numeric
   binding finds nothing; the dialect writes `$n::real` from the float's own decimal text, and
@@ -271,58 +274,39 @@ What the server answers, as observed:
   `IdentifierFoldLower`; in `IdentifierExact` they are two columns.
 
 Known limits. Each is pinned by a test that prints the statement and the server's answer.
-The ones that follow are **defects or limits of dal-go/dalgo2sql**. Each names its issue or
-pull request, or says "not yet filed" while it has none. Each test FAILS when the fix is
-released and says what to assert instead, so the line here is then deleted. They are
-observations, not rules to rely on.
+The ones that follow are **known limits of dal-go/dalgo2sql**, each described here. Each test
+FAILS when its limit is lifted and says what to assert instead, so the line here is then deleted.
+They are observations, not rules to rely on.
 
-- **A column with a `NOT VALID` not-null constraint** (PostgreSQL 18; `ALTER TABLE ... ADD
-  CONSTRAINT ... NOT NULL col NOT VALID`) that holds NULL rows is **sorted wrongly**, which is a
-  wrong result and not a refusal. The catalog calls the column NOT NULL, the compiler writes
-  no `NULLS` clause for it, and the server's default puts the NULLs last ascending and first
-  descending, the opposite of DALgo's rule: `ORDER BY v LIMIT 3` over the values 3, NULL, 1, NULL,
-  2 returns 1, 2, 3 where DALgo's rule gives the two NULL rows first
-  (`TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimit` pins the
-  catalog's two facts, the statement and the rows). Do not rely on the order of such a column,
-  or of a `LIMIT` or `OFFSET` page over it, until it is fixed, or validate the constraint.
-  Issue or pull request: not yet filed.
-- **A name of 64 to 255 bytes in a key path is cut to 63 bytes by the server**, which is a wrong
-  result and not a refusal. A key path accepts a plain name of up to 255 bytes and writes it
-  unquoted (see "Key reads and writes"); PostgreSQL keeps 63 bytes of an identifier and
-  silently cuts the rest, so a key whose collection is 64 bytes long reads, writes and deletes in
-  the table named by its first 63 bytes, and a field of 64 bytes is the column named by its
-  first 63. With a table and a column of 63 `n` bytes and a recordset declared under a name of 64
-  `n` bytes, `Exists` and `Get` find the row of the table of 63, `Insert` writes into it, `Delete`
-  deletes from it, and an `Insert` whose field is 64 bytes long writes into the column of 63
-  (`TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath` pins each statement and each
-  row, in both identifier modes). The structured path refuses the same name before any
-  statement (the dialect holds a name to 63 bytes). `Set` and `Update` name their table and
-  columns through the same functions of dalgo2sql, so they are read to behave the same way;
-  they are not run. Keep the names of collections and fields in a key path to 63 bytes.
-  Issue or pull request: not yet filed.
+Two wrong results of dal-go/dalgo2sql that these tests once pinned are **fixed** by
+dal-go/dalgo2sql#220 (v0.26.7), and are not limits any more: the order of a column with a `NOT
+VALID` not-null constraint under `ORDER BY` with `LIMIT` (PostgreSQL 18), and a name of 64 to 255
+bytes in a key path, which PostgreSQL cut to 63 bytes so that the statement reached another table
+or column. The tests now assert the fixed behaviour on both servers (see "What the integration tests
+prove about queries").
+
 - **A derived source** (a query in `FROM` or in a join, DTQL's `from: {query: ...}`) is refused:
   DALgo's engine asks the adapter for the columns of each source, and dalgo2sql answers for a
   table and refuses for a derived source with `not supported: source dal.QuerySource`. Four
   cases of the subquery fixtures are listed in `testdata/postgres-divergences.json` for it, the
-  simplest one (`FROM (query) AS recent`, no join) included. Issue: not yet filed.
+  simplest one (`FROM (query) AS recent`, no join) included.
 - **A wildcard between two explicit columns of a join** is not compiled for the server (the
   compiler refuses a wildcard that does not come first), so the join is declined to DALgo's
   engine, which reads each table with one statement and joins in memory, within its bounds. The
-  fixture `chinook-wildcard` is listed in the divergence file for it. Issue: not yet filed.
+  fixture `chinook-wildcard` is listed in the divergence file for it.
 
 - **A recordset registered under a name with capitals** (`Ck_Mixed`) is found only by a query
   that spells the source exactly so; dalgo2sql folds the name the query spells, never the
   registered names. For `ck_mixed` or `CK_MIXED` the recordset is ignored with no error and the
   records are keyed by the catalog's key instead of the declared one. In
   `IdentifierFoldLower` register recordsets under lower case names, and spell the collection of
-  every key the same way (see "How a recordset is found"). Issue: not yet filed.
+  every key the same way (see "How a recordset is found").
 - **A key read does not fold the collection of its key** (`Ck_Decl` for a recordset registered as
   `ck_decl`): the recordset is not found, and `Exists` and `Get` answer an error that matches
   `ErrRecordNotFound` for a row that exists (see "How a recordset is found"). A query finds it.
-  Issue: not yet filed.
 - **A keys-only read selects every column.** A read of keys only is sent as
   `SELECT * FROM "t" ORDER BY "id" ASC` for a table whose key the catalog gives, so the server
-  reads and sends every column of every row to return a key. Issue: not yet filed
+  reads and sends every column of every row to return a key
   (`TestStructuredQueryIntegration_RecordKeysFromTheCatalog` pins the statement).
 
 Limits of this combination that are not defects of one library:
@@ -333,8 +317,9 @@ Limits of this combination that are not defects of one library:
   `sort.Strings` puts it last. The shared suite of dal-go/dalgo asserts the keys-only read of
   its cities in Go's order, so it fails here for a key in the database's collation; its fixture
   here declares `COLLATE "C"` (the control, which equals Go's order) and the divergence is
-  pinned by `TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation`. Issues for
-  dal-go/dalgo (is the order part of the contract?) and dal-go/dalgo2sql: not yet filed.
+  pinned by `TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation`. Whether the
+  order is part of the keys-only contract of dal-go/dalgo is open, so this is described here as a
+  known limit of the combination.
 - In `IdentifierFoldLower`, a **row-level access condition** that spells a field in another
   case than the table stores it (`Country` for `country`) is not satisfied on `Exists` or
   `Update`, which read the row into a map keyed by the stored names: the access layer compares
@@ -393,8 +378,8 @@ skipped, missing or not passing.
   a column of a joined source is read only when the list also holds its name, and `ORDER BY
   i.InvoiceId`, `SELECT i.Total`, a filter, a `GROUP BY` and a `HAVING` on a field of the joined
   `Invoice` are all denied by the listed `Person`'s list, with the code, the slot, the column and
-  no statement. It fails closed and does not leak; it is a limit of dal-go/dalgo (issue: not yet
-  filed), pinned by `TestAccessIntegration_HiddenFieldInAJoinOrAScanOrderIsDeniedWithNoStatement`.
+  no statement. It fails closed and does not leak; it is a known limit of dal-go/dalgo, described
+  here and pinned by `TestAccessIntegration_HiddenFieldInAJoinOrAScanOrderIsDeniedWithNoStatement`.
   The direction in which a leak would be possible is run, not read: a rule that lists the fields
   of a joined source is refused whole by dal-go/dalgo before any query ("field rules on a joined
   source are not supported in this version"), so the hidden field of a joined source is never
@@ -417,16 +402,30 @@ skipped, missing or not passing.
   (`TestProbesIntegration_NothingACallerWritesBecomesSQL`). The key paths, which are another
   emitter of SQL (plain names written unquoted), are probed in the same two modes with the same
   texts as the collection of a key, as its ID, and as the field names and the values of a write
-  (`Exists`, `Get`, `Insert`, `Delete`): a text that is not a plain identifier is refused with
-  `ErrUnsafeName` and no statement, an ID and a value are arguments read back as written, and
-  nothing is left behind. The one text that is a plain identifier of more than 63 bytes is **not**
-  refused: the server cuts it to 63 bytes and the key path reads, writes and deletes in the table
-  or column of that name, which the fixture holds so that the test shows it (a known limit above;
-  `TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath`). A join's `ON` condition
-  takes only an equality of two fields, so a value is no position of it.
+  (`Exists`, `Get`, `Insert`, `Delete`): a text that is not a plain identifier of at most 63
+  bytes is refused with `ErrUnsafeName` and no statement (12 of 12, as a collection, by each of
+  the four, and as a field), an ID and a value are arguments read back as written, and nothing is
+  left behind. The name of 64 bytes is the one that matters: written unquoted, the server would cut
+  it to 63 bytes and the statement would read, write and delete in the table, or write into the
+  column, of that name, which the fixture holds so that the test shows it did not (before
+  dalgo2sql v0.26.7 it did). The refusal is shown to be for the length (the error says the server
+  keeps 63 bytes), the table and the column of 63 bytes are asserted untouched, and the same name
+  one byte shorter is the control: every key path accepts it and reaches the table and the column,
+  with each statement and row asserted. Two more forms are held to the same limit: a `Delete` of a
+  collection that names no recordset (it deletes by the column `ID`, so the collection of the key
+  alone reaches the server), and a nested key whose collections of 32 and 31 bytes join into a
+  name of 64 bytes, each with its control of 63 bytes
+  (`TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath`). `Set`, `Update` and the
+  multi forms are held to it by the same functions of dalgo2sql, and are not run here. A join's
+  `ON` condition takes only an equality of two fields, so a value is no position of it.
 - **PostgreSQL 18.** A column with a `NOT VALID` not-null constraint and NULL rows under
-  `ORDER BY` with `LIMIT` (`TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimit`;
-  on 17 it asserts that the syntax is refused).
+  `ORDER BY` with `LIMIT`: the catalog calls the column NOT NULL while its constraint vouches for
+  no row, and dalgo2sql v0.26.7 reads it as nullable, so the statements carry `NULLS FIRST` and
+  `NULLS LAST` and the rows are DALgo's, ascending (rows 2, 4, 3) and descending (rows 1, 5, 3).
+  The test asserts the catalog's two facts that make the case, both statements and both results,
+  and the control with the clause written by hand
+  (`TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimit`; on 17 it
+  asserts that the syntax is refused).
 
 ### The connection a read holds
 
@@ -453,15 +452,16 @@ ends. In every case the read lets go of its connection, and the pool serves the 
 
 `Get`, `Exists`, `Set`, `Insert`, `Update`, `Delete` and their multi forms take a collection,
 field or primary-key name that is a plain identifier (ASCII letters, digits and underscores,
-not starting with a digit, at most 255 bytes), written as given and unquoted, so PostgreSQL
-folds it to lower case. Any other name is refused with an error that matches
-`dalgo2sql.ErrUnsafeName` before a statement is sent; a table whose name needs quoting cannot
-be addressed by key, whatever the identifier mode. **A name of 64 to 255 bytes is accepted, and
-PostgreSQL cuts it to 63**, so it addresses the table or column named by its first 63 bytes (a
-known limit of dal-go/dalgo2sql, see "Known limits"): keep these names to 63 bytes. A nested
-key addresses one table whose name joins the collections of the key and of its parents with an
-underscore, the key's own first (`pets_owners`), and the primary key is looked up in the
-recordset of that name.
+not starting with a digit, at most 63 bytes, which is all PostgreSQL keeps of an identifier),
+written as given and unquoted, so PostgreSQL folds it to lower case. Any other name is refused
+with an error that matches `dalgo2sql.ErrUnsafeName` before a statement is sent; a table whose
+name needs quoting cannot be addressed by key, whatever the identifier mode. A name of 64 bytes
+or more is refused too (dalgo2sql v0.26.7, dal-go/dalgo2sql#220): an earlier release accepted
+one of up to 255 bytes, and the server cut it to 63, so the statement reached the table or
+column named by its first 63 bytes. A nested key addresses one table whose name joins the
+collections of the key and of its parents with an underscore, the key's own first
+(`pets_owners`), and the primary key is looked up in the recordset of that name; the joined
+name is held to 63 bytes as one name, so short collections can be refused together.
 
 ## Schema reader options
 

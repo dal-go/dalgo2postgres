@@ -440,21 +440,33 @@ func classifyProbe(run adapterRun) string {
 // reads and writes"): ASCII letters, digits and underscores, not starting with a digit.
 var plainName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// isPlainName says whether a key path accepts text as a name: it is a plain identifier of at
-// most 255 bytes. Anything else is refused with dalgo2sql.ErrUnsafeName before a statement.
-func isPlainName(text string) bool { return len(text) <= 255 && plainName.MatchString(text) }
-
 // postgresNameBytes is the longest identifier PostgreSQL keeps. It cuts a longer one to this many
-// bytes (with a notice) and looks that up, so a name of 64 to 255 bytes, which a key path accepts
-// and writes unquoted, addresses the table or column named by its first 63 bytes.
+// bytes (with a notice) and looks that up, so a longer name that was written unquoted would address
+// the table or column named by its first 63 bytes. Under the postgres dialect dalgo2sql (v0.26.7)
+// refuses such a name in every key path, before any statement.
 const postgresNameBytes = 63
 
-// truncatedName is what the server makes of a name of 64 n's: the name of 63 n's. The key-path
-// fixture holds a table and a column of that name, so the pin shows which one is addressed.
-var truncatedName = strings.Repeat("n", postgresNameBytes)
+// isPlainName says whether a key path accepts text as a name under the postgres dialect: a plain
+// identifier of at most 63 bytes. Anything else is refused with dalgo2sql.ErrUnsafeName before a
+// statement.
+func isPlainName(text string) bool {
+	return len(text) <= postgresNameBytes && plainName.MatchString(text)
+}
 
-// serverTruncates says whether text is a name a key path accepts and the server cuts.
-func serverTruncates(text string) bool { return isPlainName(text) && len(text) > postgresNameBytes }
+// reasonOf is what the refusal of a probe must say: that the name is too long when it is a plain
+// identifier (the name of 64 bytes), and nothing in particular for a text that holds a character a
+// plain identifier does not.
+func reasonOf(text string) string {
+	if plainName.MatchString(text) {
+		return tooLong
+	}
+	return ""
+}
+
+// truncatedName is what the server makes of a name of 64 n's: the name of 63 n's. The key-path
+// fixture holds a table and a column of that name, so the test shows that a key path refusing the
+// name of 64 bytes reaches neither, and that the name of 63 bytes reaches both.
+var truncatedName = strings.Repeat("n", postgresNameBytes)
 
 // keyPathMarkers must appear in no statement of a key path at all: it writes its names
 // unquoted, so a name that is not a plain identifier would show as one of these, and a value
@@ -480,47 +492,110 @@ func keyPathProblems(label, text string, statements []tracedStatement, mayWriteT
 	return problems
 }
 
-// The names of the known defect below: the key-path fixture holds a table, with one row, and a
-// column of the 63 bytes the server keeps of a name of 64.
+// The key-path fixture holds, beside the tables of the probes, what a name of 64 bytes would have
+// reached before dalgo2sql v0.26.7 refused it: a table and a column of the 63 bytes the server keeps
+// of that name (the table holds one row), and, for the two forms of a key that name no recordset of
+// the caller, a table of 63 bytes with a column ID and a table whose name is the joined name of a
+// nested key. A refusal that reaches none of them, and a name of 63 bytes that reaches the one of
+// that name, are what the test asserts.
 const (
 	truncatedTableNote = "the table of 63 bytes"
-	writtenThroughName = "written through the name of 64 bytes"
+	writtenThroughName = "written through the name of 63 bytes"
 )
 
-// fixedKeyPathTruncation is what a failing pin says to do: dalgo2sql has stopped sending the name.
-const fixedKeyPathTruncation = "dalgo2sql now refuses a name of more than 63 bytes in a key path before any statement, as its typed dialect does: assert here dalgo2sql.ErrUnsafeName from Exists, Get, Insert and Delete of the collection and from Insert of the field, no statement sent, and the table and the column of 63 bytes untouched; then delete this pin, the known limit in the README and the 'cut by the server' tally"
+var (
+	// undeclaredTable has a column ID and no recordset declared for it: a Delete needs none, so
+	// the collection of the key alone reaches the server.
+	undeclaredTable = strings.Repeat("m", postgresNameBytes)
+	// The name of a nested key is its collections joined with underscores, the key's own collection
+	// first: nestedChild and nestedParent63 join into a name of 63 bytes, nestedChild and
+	// nestedParent64 into one of 64, whose first 63 bytes are the first name. Each collection is
+	// short and the joined name is the table.
+	nestedChild    = strings.Repeat("c", 32)
+	nestedParent63 = strings.Repeat("p", 30)
+	nestedParent64 = strings.Repeat("p", 31)
+	nestedTable63  = nestedChild + "_" + nestedParent63
+	nestedTable64  = nestedChild + "_" + nestedParent64
+)
 
-// pinTruncatedCollection pins a KNOWN DEFECT of dal-go/dalgo2sql, a WRONG RESULT and not a
-// refusal (issue or pull request: not yet filed): a key whose collection is a name of 64 bytes
-// is written into the statement as given and unquoted, the server cuts it to 63 bytes, and the
-// statement reads, writes and deletes in the table of that name. The table of 63 bytes of the
-// fixture shows it: Exists and Get find its row, Insert writes into it, Delete removes from it.
-// The typed compiler refuses the same name before any statement (the first probe test), and the
-// plan for PostgreSQL is that a name over 63 bytes is refused. Each step FAILS when dalgo2sql
-// refuses the name, and says what to assert then.
-func pinTruncatedCollection(t *testing.T, f *queryFixture, text string) {
+// keyPathOp is one key path run against one key: its name and what it does.
+type keyPathOp struct {
+	name string
+	run  func(ctx context.Context, f *queryFixture, key *dalrecord.Key) error
+}
+
+// The four key paths the probes run with a collection. Exists is read as refused unless it
+// answers a clean no: an answer of true is an error of the step, as is any other.
+var (
+	existsKeyPath = keyPathOp{"Exists", func(ctx context.Context, f *queryFixture, key *dalrecord.Key) error {
+		exists, err := f.db.Exists(ctx, key)
+		if err == nil && exists {
+			return errors.New("Exists answered true")
+		}
+		return err
+	}}
+	getKeyPath = keyPathOp{"Get", func(ctx context.Context, f *queryFixture, key *dalrecord.Key) error {
+		return f.db.Get(ctx, dalrecord.NewRecordWithData(key, map[string]any{}))
+	}}
+	insertKeyPath = keyPathOp{"Insert", func(ctx context.Context, f *queryFixture, key *dalrecord.Key) error {
+		return f.db.Insert(ctx, dalrecord.NewRecordWithData(key, map[string]any{"note": "x"}))
+	}}
+	deleteKeyPath = keyPathOp{"Delete", func(ctx context.Context, f *queryFixture, key *dalrecord.Key) error {
+		return f.db.Delete(ctx, key)
+	}}
+	collectionKeyPaths = []keyPathOp{existsKeyPath, getKeyPath, insertKeyPath, deleteKeyPath}
+)
+
+// tooLong is what the refusal of a plain name over 63 bytes says: the error is dalgo2sql's own, and
+// a refusal of a name of 64 bytes for another reason (its characters, a missing recordset) would not
+// say it, so the length is what is shown to be the cause.
+const tooLong = "63 bytes"
+
+// assertRefusedWithNoStatement runs each key path with the key and asserts that it is refused with
+// dalgo2sql.ErrUnsafeName, that the error holds inError (when it is not empty) and that the recorder
+// shows no statement of any kind. text is the name the refusal is about (the collection, or the
+// joined name of a nested key).
+func assertRefusedWithNoStatement(t *testing.T, f *queryFixture, label, text, inError string, key *dalrecord.Key, ops []keyPathOp) {
+	t.Helper()
+	for _, op := range ops {
+		f.trace.reset()
+		err := op.run(context.Background(), f, key)
+		sent := f.trace.sent()
+		for _, problem := range keyPathProblems(label+": "+op.name, text, sent, false) {
+			t.Error(problem)
+		}
+		if !errors.Is(err, dalgo2sql.ErrUnsafeName) || len(sent) != 0 {
+			t.Errorf("%s: %s = %v with %d statements %v; want dalgo2sql.ErrUnsafeName and no statement", label, op.name, err, len(sent), sent)
+		} else if !strings.Contains(err.Error(), inError) {
+			t.Errorf("%s: %s = %v; want an error that says %q", label, op.name, err, inError)
+		}
+	}
+}
+
+// assertNameOf63BytesIsWritten is the control of the refusal of a name of 64 bytes: the same name
+// one byte shorter is accepted by every key path and reaches the table and the column of that
+// name, with the statement and the arguments asserted and the rows read back. It leaves the table
+// of 63 bytes and the key table as it finds them but for the row the steps themselves write and
+// delete.
+func assertNameOf63BytesIsWritten(t *testing.T, f *queryFixture) {
 	t.Helper()
 	ctx := context.Background()
-	label := "the collection of 64 bytes"
-	if text[:postgresNameBytes] != truncatedName {
-		t.Fatalf("%s: the first %d bytes are %q, want the table of the fixture, %q", label, postgresNameBytes, text[:postgresNameBytes], truncatedName)
-	}
-	one := dalrecord.NewKeyWithID(text, "one")
-	two := dalrecord.NewKeyWithID(text, "two")
-	// step runs one operation and says what it sent; it reports true when the name was refused.
-	step := func(what string, run func() error) (sent []tracedStatement, refused bool, err error) {
+	label := "the collection of 63 bytes"
+	one := dalrecord.NewKeyWithID(truncatedName, "one")
+	two := dalrecord.NewKeyWithID(truncatedName, "two")
+	// step runs one operation and asserts that it was not refused and sent exactly one statement.
+	step := func(what string, run func() error) (sent []tracedStatement, err error) {
 		f.trace.reset()
 		err = run()
 		sent = f.trace.sent()
-		for _, problem := range keyPathProblems(label+": "+what, text, sent, true) {
+		for _, problem := range keyPathProblems(label+": "+what, truncatedName, sent, true) {
 			t.Error(problem)
 		}
-		t.Logf("KNOWN DEFECT of dal-go/dalgo2sql (a wrong result, not a refusal): %s of a key whose collection is %d bytes: error = %v; statements %v", what, len(text), err, sent)
-		if errors.Is(err, dalgo2sql.ErrUnsafeName) || len(sent) == 0 {
-			t.Errorf("%s: %s: error = %v with %d statements: %s", label, what, err, len(sent), fixedKeyPathTruncation)
-			return sent, true, err
+		t.Logf("%s of a key whose collection is %d bytes: error = %v; statements %v", what, len(truncatedName), err, sent)
+		if errors.Is(err, dalgo2sql.ErrUnsafeName) {
+			t.Errorf("%s: %s: the name of %d bytes was refused: %v", label, what, len(truncatedName), err)
 		}
-		return sent, false, err
+		return sent, err
 	}
 	// want says whether the statements are exactly the one given, with the arguments given.
 	want := func(what string, sent []tracedStatement, statement string, args ...any) {
@@ -547,72 +622,50 @@ func pinTruncatedCollection(t *testing.T, f *queryFixture, text string) {
 	}
 
 	var exists bool
-	sent, refused, err := step("Exists", func() (err error) { exists, err = f.db.Exists(ctx, one); return })
-	if refused {
-		return
-	}
-	want("Exists", sent, "SELECT 1 FROM "+text+" WHERE code = $1", "one")
+	sent, err := step("Exists", func() (err error) { exists, err = f.db.Exists(ctx, one); return })
+	want("Exists", sent, "SELECT 1 FROM "+truncatedName+" WHERE code = $1", "one")
 	if err != nil || !exists {
-		t.Errorf("%s: Exists = %v, %v; want true: the statement reads the table of %d bytes, which holds the key one", label, exists, err, postgresNameBytes)
+		t.Errorf("%s: Exists = %v, %v; want true: the table of %d bytes holds the key one", label, exists, err, postgresNameBytes)
 	}
 
 	read := dalrecord.NewRecordWithData(one, map[string]any{})
-	sent, refused, err = step("Get", func() error { return f.db.Get(ctx, read) })
-	if refused {
-		return
-	}
-	want("Get", sent, "SELECT * FROM "+text+" WHERE code = $1", "one")
+	sent, err = step("Get", func() error { return f.db.Get(ctx, read) })
+	want("Get", sent, "SELECT * FROM "+truncatedName+" WHERE code = $1", "one")
 	if data, _ := read.Data().(map[string]any); err != nil || data["note"] != truncatedTableNote {
 		t.Errorf("%s: Get: error = %v, note = %v; want the note %q of the row of the table of %d bytes", label, err, data["note"], truncatedTableNote, postgresNameBytes)
 	}
 
-	sent, refused, err = step("Insert", func() error {
+	sent, err = step("Insert", func() error {
 		return f.db.Insert(ctx, dalrecord.NewRecordWithData(two, map[string]any{"note": writtenThroughName}))
 	})
-	if refused {
-		return
-	}
-	want("Insert", sent, "INSERT INTO "+text+"(code, note) VALUES ($1, $2)", "two", writtenThroughName)
+	want("Insert", sent, "INSERT INTO "+truncatedName+"(code, note) VALUES ($1, $2)", "two", writtenThroughName)
 	if got := stored(); err != nil || got["two"] != writtenThroughName {
 		t.Errorf("%s: Insert: error = %v; the table of %d bytes holds %v, want the row two written into it", label, err, postgresNameBytes, got)
 	}
 
-	sent, refused, err = step("Delete", func() error { return f.db.Delete(ctx, one) })
-	if refused {
-		return
-	}
-	want("Delete", sent, "DELETE FROM "+text+" WHERE code = $1", "one")
+	sent, err = step("Delete", func() error { return f.db.Delete(ctx, one) })
+	want("Delete", sent, "DELETE FROM "+truncatedName+" WHERE code = $1", "one")
 	if got := stored(); err != nil || !reflect.DeepEqual(got, map[string]string{"two": writtenThroughName}) {
-		t.Errorf("%s: Delete: error = %v; the table of %d bytes holds %v, want only the row two: the row one was deleted from it", label, err, postgresNameBytes, got)
+		t.Errorf("%s: Delete: error = %v; the table of %d bytes holds %v, want only the row two: the row one was deleted", label, err, postgresNameBytes, got)
 	}
-}
 
-// pinTruncatedField pins the same KNOWN DEFECT of dal-go/dalgo2sql for a field: a field of 64
-// bytes is written as given and unquoted, and the server writes the value into the column of
-// its first 63 bytes. It FAILS when dalgo2sql refuses the name, and says what to assert then.
-func pinTruncatedField(t *testing.T, f *queryFixture, text string) {
-	t.Helper()
-	ctx := context.Background()
-	label := "the field of 64 bytes"
-	key := dalrecord.NewKeyWithID("probe_keys", "fresh")
+	// A field of 63 bytes is the column of that name.
+	label = "the field of 63 bytes"
 	f.trace.reset()
-	err := f.db.Insert(ctx, dalrecord.NewRecordWithData(key, map[string]any{text: "x"}))
-	sent := f.trace.sent()
-	for _, problem := range keyPathProblems(label, text, sent, true) {
+	fresh := dalrecord.NewKeyWithID("probe_keys", "fresh")
+	err = f.db.Insert(ctx, dalrecord.NewRecordWithData(fresh, map[string]any{truncatedName: "x"}))
+	sent = f.trace.sent()
+	for _, problem := range keyPathProblems(label, truncatedName, sent, true) {
 		t.Error(problem)
 	}
-	t.Logf("KNOWN DEFECT of dal-go/dalgo2sql (a wrong result, not a refusal): Insert of a field of %d bytes: error = %v; statements %v", len(text), err, sent)
-	if errors.Is(err, dalgo2sql.ErrUnsafeName) || len(sent) == 0 {
-		t.Errorf("%s: Insert: error = %v with %d statements: %s", label, err, len(sent), fixedKeyPathTruncation)
-		return
-	}
-	statement := "INSERT INTO probe_keys(code, " + text + ") VALUES ($1, $2)"
-	if len(sent) != 1 || sent[0].sql != statement || argsText(valueArguments(sent[0].args)) != argsText([]any{"fresh", "x"}) {
-		t.Errorf("%s: Insert: statements = %v, want exactly %s with arguments %s", label, sent, statement, argsText([]any{"fresh", "x"}))
+	t.Logf("Insert of a field of %d bytes: error = %v; statements %v", len(truncatedName), err, sent)
+	statement := "INSERT INTO probe_keys(code, " + truncatedName + ") VALUES ($1, $2)"
+	if err != nil || len(sent) != 1 || sent[0].sql != statement || argsText(valueArguments(sent[0].args)) != argsText([]any{"fresh", "x"}) {
+		t.Errorf("%s: Insert = %v; statements = %v, want exactly %s with arguments %s", label, err, sent, statement, argsText([]any{"fresh", "x"}))
 	}
 	var value string
-	if scanErr := f.admin.QueryRowContext(ctx, `SELECT `+exactIdent(truncatedName)+` FROM probe_keys WHERE code = 'fresh'`).Scan(&value); err != nil || scanErr != nil || value != "x" {
-		t.Errorf("%s: Insert: error = %v; the column of %d bytes holds %q (error %v), want x written into it", label, err, postgresNameBytes, value, scanErr)
+	if scanErr := f.admin.QueryRowContext(ctx, `SELECT `+exactIdent(truncatedName)+` FROM probe_keys WHERE code = 'fresh'`).Scan(&value); scanErr != nil || value != "x" {
+		t.Errorf("%s: the column of %d bytes holds %q (error %v), want x written into it", label, postgresNameBytes, value, scanErr)
 	}
 	// What the test wrote is taken away, so the key table is as it was.
 	if _, err := f.admin.ExecContext(ctx, `DELETE FROM probe_keys WHERE code = 'fresh'`); err != nil {
@@ -620,19 +673,123 @@ func pinTruncatedField(t *testing.T, f *queryFixture, text string) {
 	}
 }
 
+// assertNothingReachedTheTablesOf63Bytes asserts that what the refusals of a name of 64 bytes
+// must not have touched is as the fixture made it: the table of 63 bytes holds its one row, with
+// its note, and the column of 63 bytes of the key table holds no value.
+func assertNothingReachedTheTablesOf63Bytes(t *testing.T, f *queryFixture) {
+	t.Helper()
+	ctx := context.Background()
+	var codes, notes []string
+	rows, err := f.admin.QueryContext(ctx, `SELECT code, note FROM `+exactIdent(truncatedName)+` ORDER BY code`)
+	if err != nil {
+		t.Fatalf("the table of %d bytes cannot be read: %v", postgresNameBytes, err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var code, note string
+		if err := rows.Scan(&code, &note); err != nil {
+			t.Fatal(err)
+		}
+		codes, notes = append(codes, code), append(notes, note)
+	}
+	if !reflect.DeepEqual(codes, []string{"one"}) || !reflect.DeepEqual(notes, []string{truncatedTableNote}) {
+		t.Errorf("the table of %d bytes holds the keys %v with the notes %v after the refusals, want only the row one with its note %q", postgresNameBytes, codes, notes, truncatedTableNote)
+	}
+	var written int
+	if err := f.admin.QueryRowContext(ctx, `SELECT count(*) FROM probe_keys WHERE `+exactIdent(truncatedName)+` IS NOT NULL`).Scan(&written); err != nil || written != 0 {
+		t.Errorf("the column of %d bytes holds %d values after the refusals (error %v), want none", postgresNameBytes, written, err)
+	}
+}
+
+// assertTheNamesOfNoRecordsetAreHeldToo asserts the two forms of a long name that name no
+// recordset of the caller, each with its control of 63 bytes. A Delete needs no declared
+// recordset: with none it deletes by the column ID, so the collection of the key alone reaches
+// the table of 63 bytes. The table of a nested key is the joined name of its collections, so
+// short collections can join into a name over 63 bytes. Both are refused before any statement,
+// and nothing is deleted.
+func assertTheNamesOfNoRecordsetAreHeldToo(t *testing.T, f *queryFixture) {
+	t.Helper()
+	ctx := context.Background()
+	undeclaredIDs := func() []string {
+		rows, err := f.admin.QueryContext(ctx, `SELECT id FROM `+exactIdent(undeclaredTable)+` ORDER BY id`)
+		if err != nil {
+			t.Fatalf("the table of %d bytes with a column ID cannot be read: %v", postgresNameBytes, err)
+		}
+		defer func() { _ = rows.Close() }()
+		var ids []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				t.Fatal(err)
+			}
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	deleteOnly := []keyPathOp{deleteKeyPath}
+
+	// The collection of 64 bytes, with no recordset declared: refused, and the row is still there.
+	long := strings.Repeat("m", postgresNameBytes+1)
+	assertRefusedWithNoStatement(t, f, "a Delete of the collection of 64 bytes that names no recordset", long, tooLong, dalrecord.NewKeyWithID(long, "one"), deleteOnly)
+	if got := undeclaredIDs(); !reflect.DeepEqual(got, []string{"gone", "one"}) {
+		t.Errorf("the table of %d bytes with a column ID holds %v after the refused Delete, want both its rows", postgresNameBytes, got)
+	}
+	// The control: the collection of 63 bytes, with no recordset declared, deletes by the column ID.
+	f.trace.reset()
+	err := f.db.Delete(ctx, dalrecord.NewKeyWithID(undeclaredTable, "gone"))
+	sent := f.trace.sent()
+	statement := "DELETE FROM " + undeclaredTable + " WHERE ID = $1"
+	if err != nil || len(sent) != 1 || sent[0].sql != statement || argsText(valueArguments(sent[0].args)) != argsText([]any{"gone"}) {
+		t.Errorf("a Delete of the collection of %d bytes that names no recordset: error = %v; statements = %v, want exactly %s with the argument gone", postgresNameBytes, err, sent, statement)
+	}
+	if got := undeclaredIDs(); !reflect.DeepEqual(got, []string{"one"}) {
+		t.Errorf("the table of %d bytes with a column ID holds %v after the control Delete, want only the row one", postgresNameBytes, got)
+	}
+
+	// A nested key whose joined name is 64 bytes, from two collections of 32 and 31, with its
+	// recordset declared: refused by each path, and the table of 63 bytes is untouched.
+	assertRefusedWithNoStatement(t, f, "the nested key whose joined name is 64 bytes", nestedTable64, tooLong,
+		dalrecord.NewKeyWithParentAndID(dalrecord.NewKeyWithID(nestedParent64, "p1"), nestedChild, "one"), collectionKeyPaths)
+	// The control: 32 and 30 join into 63 bytes and reach the table of that name.
+	f.trace.reset()
+	exists, err := f.db.Exists(ctx, dalrecord.NewKeyWithParentAndID(dalrecord.NewKeyWithID(nestedParent63, "p1"), nestedChild, "one"))
+	sent = f.trace.sent()
+	if err != nil || !exists || len(sent) != 1 || !strings.Contains(sent[0].sql, nestedTable63) {
+		t.Errorf("Exists of the nested key whose joined name is 63 bytes = %v, %v; statements = %v, want true from one statement on %s", exists, err, sent, nestedTable63)
+	}
+	var notes []string
+	rows, err := f.admin.QueryContext(ctx, `SELECT note FROM `+exactIdent(nestedTable63)+` ORDER BY code`)
+	if err != nil {
+		t.Fatalf("the table of the nested key cannot be read: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var note string
+		if err := rows.Scan(&note); err != nil {
+			t.Fatal(err)
+		}
+		notes = append(notes, note)
+	}
+	if !reflect.DeepEqual(notes, []string{"nested"}) {
+		t.Errorf("the table of the nested key holds %v after the refusals, want only its row", notes)
+	}
+}
+
 // The key paths (Exists, Get, Insert and Delete) are not the structured compiler: they write
 // plain names unquoted and refuse every other name before a statement (dalgo2sql.ErrUnsafeName),
 // and carry every value as an argument. The same texts as above are written as the collection
-// of a key, as its ID, as the field names of its data and as the values of its data, against a
-// table whose key is declared and a recordset declared under each text. A text that is not a
-// plain identifier is refused with ErrUnsafeName and no statement; an ID and a value are
-// arguments, found again exactly as written. The one text that is a plain identifier and more
-// than 63 bytes (the name of 64 bytes) is not refused: the server cuts it to 63 bytes, so it is
-// the name of a table and a column the fixture holds, and the key paths read, write and delete
-// in them. That is a wrong result of dal-go/dalgo2sql, pinned by pinTruncatedCollection and
-// pinTruncatedField with the statements and the rows. No statement of any of them holds a
-// marker. After all of them the canary, the key table and the table of 63 bytes are as the
-// pins leave them.
+// of a key, as its ID, as the field names and as the values of its data, against a table whose key
+// is declared and a recordset declared under each text. A text that is not a plain identifier of at
+// most 63 bytes (what PostgreSQL keeps of a name; dalgo2sql v0.26.7 holds every key path to it) is
+// refused with ErrUnsafeName and no statement, as the collection of a key by each of the four paths
+// and as a field; an ID and a value are arguments, found again exactly as written. The name of 64
+// bytes is the interesting one: written unquoted the server would cut it to 63 bytes and the
+// statement would read, write and delete in the table and the column of that name, which the
+// fixture holds; the test asserts that the refusal reaches neither, and that the name of 63 bytes,
+// the same name one byte shorter, is accepted and does reach both. Two more forms are held to the
+// same limit: a Delete of a collection that names no recordset (it deletes by the column ID) and a
+// nested key whose short collections join into a name of 64 bytes. No statement of any of them
+// holds a marker.
 func TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath(t *testing.T) {
 	testDSN(t) // a skip shows on this test, not only on its subtests
 	for _, mode := range []struct {
@@ -640,18 +797,24 @@ func TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath(t *testing.T
 		mode IdentifierMode
 	}{{"exact mode", IdentifierExact}, {"fold-lower mode", IdentifierFoldLower}} {
 		t.Run(mode.name, func(t *testing.T) {
+			code := []dal.FieldRef{dal.Field("code")}
 			recordsets := map[string]*dalgo2sql.Recordset{
-				"probe_keys": dalgo2sql.NewRecordset("probe_keys", dalgo2sql.Table, []dal.FieldRef{dal.Field("code")}),
+				"probe_keys": dalgo2sql.NewRecordset("probe_keys", dalgo2sql.Table, code),
 			}
 			for _, probe := range probes {
-				recordsets[probe.text] = dalgo2sql.NewRecordset(probe.text, dalgo2sql.Table, []dal.FieldRef{dal.Field("code")})
+				recordsets[probe.text] = dalgo2sql.NewRecordset(probe.text, dalgo2sql.Table, code)
+			}
+			// The names of 63 bytes the test writes through are declared, and so are the joined names of
+			// the nested keys; the table of the Delete that needs no recordset is not.
+			for _, name := range []string{truncatedName, nestedTable63, nestedTable64} {
+				recordsets[name] = dalgo2sql.NewRecordset(name, dalgo2sql.Table, code)
 			}
 			schema := "test_probes_keys_exact"
 			if mode.mode == IdentifierFoldLower {
 				schema = "test_probes_keys_fold"
 			}
 			// The table and the column of 63 bytes are what the server makes of a name of 64: the
-			// pins of the known defect above show which of them a key path reads and writes.
+			// refusal of that name must reach neither, and the name of 63 bytes reaches both.
 			f := openQueryFixtureWithOptions(t, dalgo2sql.DbOptions{Recordsets: recordsets}, schema, mode.mode, []string{
 				`CREATE TABLE canary (id integer PRIMARY KEY, note text)`,
 				`INSERT INTO canary VALUES (1, 'one'), (2, 'two')`,
@@ -659,6 +822,10 @@ func TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath(t *testing.T
 				`INSERT INTO probe_keys (code, note) VALUES ('one', 'first')`,
 				`CREATE TABLE ` + truncatedName + ` (code text PRIMARY KEY, note text)`,
 				`INSERT INTO ` + truncatedName + ` VALUES ('one', '` + truncatedTableNote + `')`,
+				`CREATE TABLE ` + undeclaredTable + ` (id text PRIMARY KEY, note text)`,
+				`INSERT INTO ` + undeclaredTable + ` VALUES ('one', 'kept'), ('gone', 'deleted by the control')`,
+				`CREATE TABLE ` + nestedTable63 + ` (code text PRIMARY KEY, note text)`,
+				`INSERT INTO ` + nestedTable63 + ` VALUES ('one', 'nested')`,
 			})
 			ctx := context.Background()
 			var server *pgconn.PgError
@@ -671,22 +838,9 @@ func TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath(t *testing.T
 				label := "the collection " + probe.label
 				var sent []tracedStatement
 				switch {
-				case serverTruncates(text):
-					tally["a collection cut to 63 bytes by the server: a known defect"]++
-					pinTruncatedCollection(t, f, text)
 				case !isPlainName(text):
-					collectionKey := dalrecord.NewKeyWithID(text, "one")
-					f.trace.reset()
-					exists, existsErr := f.db.Exists(ctx, collectionKey)
-					getErr := f.db.Get(ctx, dalrecord.NewRecordWithData(collectionKey, map[string]any{}))
-					sent = f.trace.sent()
-					for _, problem := range keyPathProblems(label, text, sent, false) {
-						t.Error(problem)
-					}
 					tally["a collection refused before a statement"]++
-					if !errors.Is(existsErr, dalgo2sql.ErrUnsafeName) || !errors.Is(getErr, dalgo2sql.ErrUnsafeName) || exists || len(sent) != 0 {
-						t.Errorf("%s: Exists = %v, %v; Get = %v; %d statements; want ErrUnsafeName from both and no statement", label, exists, existsErr, getErr, len(sent))
-					}
+					assertRefusedWithNoStatement(t, f, label, text, reasonOf(text), dalrecord.NewKeyWithID(text, "one"), collectionKeyPaths)
 				default:
 					// A plain name of at most 63 bytes is the name of a table the fixture has not made.
 					collectionKey := dalrecord.NewKeyWithID(text, "one")
@@ -758,9 +912,6 @@ func TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath(t *testing.T
 				// The text as the name of a field of the data of a write.
 				label = "the field " + probe.label
 				switch {
-				case serverTruncates(text):
-					tally["a field cut to 63 bytes by the server: a known defect"]++
-					pinTruncatedField(t, f, text)
 				case !isPlainName(text):
 					freshKey := dalrecord.NewKeyWithID("probe_keys", "fresh")
 					f.trace.reset()
@@ -772,6 +923,8 @@ func TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath(t *testing.T
 					tally["a field refused before a statement"]++
 					if !errors.Is(err, dalgo2sql.ErrUnsafeName) || len(sent) != 0 {
 						t.Errorf("%s: Insert = %v with %d statements; want ErrUnsafeName and no statement", label, err, len(sent))
+					} else if !strings.Contains(err.Error(), reasonOf(text)) {
+						t.Errorf("%s: Insert = %v; want an error that says %q", label, err, reasonOf(text))
 					}
 				default:
 					// A plain name of at most 63 bytes is the name of a column the table has not got.
@@ -791,16 +944,21 @@ func TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath(t *testing.T
 			}
 			t.Logf("answers: %v", tally)
 			wantTally := map[string]int{
-				"a collection refused before a statement":                    11,
-				"a collection cut to 63 bytes by the server: a known defect": 1,
-				"a field refused before a statement":                         11,
-				"a field cut to 63 bytes by the server: a known defect":      1,
-				"an ID found again, or not found":                            11,
-				"an ID refused by the server":                                1,
+				"a collection refused before a statement": 12,
+				"a field refused before a statement":      12,
+				"an ID found again, or not found":         11,
+				"an ID refused by the server":             1,
 			}
 			if !reflect.DeepEqual(tally, wantTally) {
 				t.Errorf("answers = %v, want %v", tally, wantTally)
 			}
+
+			// What the refusal of the name of 64 bytes had to keep from the table and the column of 63
+			// bytes is checked before the name of 63 bytes is written through; the forms that name no
+			// recordset and the nested key come last.
+			assertNothingReachedTheTablesOf63Bytes(t, f)
+			assertNameOf63BytesIsWritten(t, f)
+			assertTheNamesOfNoRecordsetAreHeldToo(t, f)
 
 			// Nothing was left behind or taken: the key table holds its one row, and the canary its two.
 			var codes []string

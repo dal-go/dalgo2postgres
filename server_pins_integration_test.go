@@ -3,6 +3,7 @@ package dalgo2postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -466,7 +467,7 @@ func TestServerPinsIntegration_NotNullColumnKeepsItsOrderByWithoutANullsClause(t
 //
 // This is a DIVERGENCE from the shared suite's keys-only contract, not a rule and not a
 // defect of this package, for dal-go/dalgo (does the contract say the order is
-// Go's?) and dal-go/dalgo2sql (which writes the ORDER BY on the key; issues: not yet filed): a real table does not
+// Go's?) and dal-go/dalgo2sql (which writes the ORDER BY on the key; described in the README under Known limits): a real table does not
 // declare COLLATE "C". The test pins what the server does with the statement shown, prints
 // the database's collation, and runs the same rows under COLLATE "C" as the control that
 // equals sort.Strings. If the database's collation orders like C the pin shows nothing, and
@@ -510,7 +511,7 @@ func TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation(t *testi
 				"or a keys-only read is now in Go's order: then assert Go's order here, drop COLLATE \"C\" from the dalgotest_cities table in end2endDDL, and delete the limit in the README", ids, collate)
 		}
 		if want := []string{"São Paulo_São Paulo", "Shanghai_Shanghai", "Sindh_Karachi"}; !reflect.DeepEqual(ids, want) {
-			t.Errorf("keys = %v, want the linguistic order of %s: %v. This differs from sort.Strings, which the shared suite's keys-only contract asserts: a divergence for dal-go/dalgo and dal-go/dalgo2sql (issues: not yet filed). "+
+			t.Errorf("keys = %v, want the linguistic order of %s: %v. This differs from sort.Strings, which the shared suite's keys-only contract asserts: a divergence for dal-go/dalgo and dal-go/dalgo2sql, described in the README under Known limits. "+
 				"If the keys are now in Go's order, a keys-only read no longer follows the database's collation: assert Go's order for kc_default here, "+
 				"drop COLLATE \"C\" from the dalgotest_cities table in end2endDDL (end2end_test.go), and delete the limit in the README", ids, collate, want)
 		}
@@ -530,7 +531,13 @@ func TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation(t *testi
 // column, so that an index can serve the order, and relies on the server's default (NULLs last
 // ascending, first descending), which is the opposite of DALgo's rule (NULLs first ascending
 // and last descending). With ORDER BY and LIMIT the NULL rows that DALgo puts first would then be
-// cut off: the first rows are not the ones DALgo returns.
+// cut off: the first rows would not be the ones DALgo returns.
+//
+// dalgo2sql v0.26.7 reads the not-null fact as true only when no constraint that is not
+// validated covers the column, so such a column is nullable for ordering: the compiler writes the
+// NULLS clause and the rows are DALgo's, ascending and descending, with LIMIT. The test asserts
+// both statements and both results, the catalog's two facts that make the case (so that the test
+// cannot pass for a column that is not one), and the control with the clause written by hand.
 //
 // On PostgreSQL 17 the syntax does not exist, and the control asserts that it is refused (a
 // syntax error), so the test runs and passes on both legs of the job and says which it is.
@@ -602,38 +609,26 @@ func TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimi
 		}
 	}
 
-	// KNOWN DEFECT of dal-go/dalgo2sql (a WRONG RESULT, not a rule; issue or pull request:
-	// not yet filed, replace this line with its number): the
-	// catalog says the column is NOT NULL, the compiler leaves out the NULLS clause for it, and
-	// the server's default puts the NULL rows last ascending and first descending, the opposite
-	// of DALgo's rule. With LIMIT 3 the two NULL rows are cut off ascending, and they are the
-	// whole first page descending. The compiler should write the NULLS clause when the
-	// column's constraint is not validated (pg_constraint.convalidated is false), or never leave
-	// it out. Each case below FAILS when that is fixed and says what to assert instead.
-	const fixed = "dalgo2sql now orders a column with a NOT VALID not-null constraint as DALgo does: assert here the documented rows (ascending [2 4 3], descending [1 5 3]) and the statement with NULLS FIRST / NULLS LAST, and delete this pin and the README's known limit"
+	// The compiler writes the NULLS clause for the column, because the catalog's not-null fact is
+	// false for a column whose constraint is not validated, and the rows are DALgo's: the two NULL
+	// rows (2 and 4) come first ascending, so LIMIT 3 holds them and row 3; descending they come
+	// last, so the page is rows 1, 5 and 3.
 	for _, tc := range []struct {
-		label                string
-		by                   dal.OrderExpression
-		statement            string
-		documented, observed []int
+		label     string
+		by        dal.OrderExpression
+		statement string
+		want      []int
 	}{
-		{"ascending", dal.AscendingField("v"), `SELECT "id" FROM "nv" ORDER BY "v" ASC, "id" ASC LIMIT $1`, []int{2, 4, 3}, []int{3, 5, 1}},
-		{"descending", dal.DescendingField("v"), `SELECT "id" FROM "nv" ORDER BY "v" DESC, "id" ASC LIMIT $1`, []int{1, 5, 3}, []int{2, 4, 1}},
+		{"ascending", dal.AscendingField("v"), `SELECT "id" FROM "nv" ORDER BY "v" ASC NULLS FIRST, "id" ASC LIMIT $1`, []int{2, 4, 3}},
+		{"descending", dal.DescendingField("v"), `SELECT "id" FROM "nv" ORDER BY "v" DESC NULLS LAST, "id" ASC LIMIT $1`, []int{1, 5, 3}},
 	} {
 		o := observe(t, f, ordered(tc.by))
-		t.Logf("KNOWN DEFECT of dal-go/dalgo2sql (a wrong result, not a rule): ORDER BY v %s, LIMIT 3\n    statement: %s\n    arguments: %s\n    result:    %s\n    DALgo's rule gives: rows %v",
-			tc.label, o.statement, argsText(o.args), o.result(), tc.documented)
-		switch {
-		case rowsOf(tc.documented...).matches(o):
-			t.Errorf("ORDER BY v %s: got the documented rows %v: %s", tc.label, tc.documented, fixed)
-		case !rowsOf(tc.observed...).matches(o):
-			t.Errorf("ORDER BY v %s: got %s, want the pinned rows %v (the known defect)", tc.label, o.result(), tc.observed)
+		check(t, "ORDER BY v "+tc.label+", LIMIT 3 on a column with a NOT VALID not-null constraint", o, rowsOf(tc.want...))
+		if o.statement != tc.statement {
+			t.Errorf("ORDER BY v %s: statement = %s, want %s", tc.label, o.statement, tc.statement)
 		}
-		if o.statement != tc.statement && !strings.Contains(o.statement, "NULLS") {
-			t.Errorf("ORDER BY v %s: statement = %s, want %s (the known defect)", tc.label, o.statement, tc.statement)
-		}
-		if strings.Contains(o.statement, "NULLS") {
-			t.Errorf("ORDER BY v %s: statement = %s has a NULLS clause: %s", tc.label, o.statement, fixed)
+		if len(o.args) != 1 || fmt.Sprint(o.args[0]) != "3" {
+			t.Errorf("ORDER BY v %s: arguments = %s, want the limit 3 as the only argument", tc.label, argsText(o.args))
 		}
 	}
 }

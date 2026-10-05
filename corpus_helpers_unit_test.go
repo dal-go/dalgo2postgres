@@ -245,17 +245,19 @@ func TestReadRecordsetRows(t *testing.T) {
 
 func TestPlainNamesAndKeyPathProblems(t *testing.T) {
 	for text, want := range map[string]bool{
-		"canary": true, "_x9": true, "Mixed_Case": true, strings.Repeat("n", 64): true, strings.Repeat("n", 255): true,
-		strings.Repeat("n", 256): false, "9lives": false, "": false, "a b": false, `a"b`: false, "naïve": false, "a\x00b": false, "a;b": false,
+		"canary": true, "_x9": true, "Mixed_Case": true, strings.Repeat("n", 63): true,
+		strings.Repeat("n", 64): false, strings.Repeat("n", 255): false, strings.Repeat("n", 256): false,
+		"9lives": false, "": false, "a b": false, `a"b`: false, "naïve": false, "a\x00b": false, "a;b": false,
 	} {
 		if got := isPlainName(text); got != want {
 			t.Errorf("isPlainName(%q) = %v, want %v", text, got, want)
 		}
 	}
-	// Of the probes, only the name of 64 bytes is a plain name: it is what the key paths pass to the server.
+	// None of the probes is a name a key path accepts: the name of 64 bytes is a plain identifier too
+	// long for PostgreSQL, and every other text holds a character a plain identifier does not.
 	for _, probe := range probes {
-		if want := probe.label == "a name of 64 bytes"; isPlainName(probe.text) != want {
-			t.Errorf("probe %q: isPlainName = %v, want %v", probe.label, isPlainName(probe.text), want)
+		if isPlainName(probe.text) {
+			t.Errorf("probe %q: isPlainName = true, want false", probe.label)
 		}
 	}
 	clean := []tracedStatement{{sql: "SELECT 1 FROM probe_keys WHERE code = $1"}}
@@ -264,7 +266,7 @@ func TestPlainNamesAndKeyPathProblems(t *testing.T) {
 	}
 	wantProblem(t, keyPathProblems("l", "x", []tracedStatement{{sql: "SELECT 1; SELECT 2"}}, false), `holds ";"`)
 	wantProblem(t, keyPathProblems("l", "x", []tracedStatement{{sql: `SELECT "a" FROM t`}}, false), `holds "\""`)
-	text := strings.Repeat("n", 64)
+	text := strings.Repeat("n", 63)
 	named := []tracedStatement{{sql: "SELECT 1 FROM " + text + " WHERE code = $1"}}
 	wantProblem(t, keyPathProblems("l", text, named, false), "holds the text")
 	if problems := keyPathProblems("l", text, named, true); len(problems) != 0 {
@@ -275,27 +277,40 @@ func TestPlainNamesAndKeyPathProblems(t *testing.T) {
 	}
 }
 
-// A name of 64 to 255 bytes is the one a key path accepts and the server cuts: the table and
-// the column of the key-path fixture are named by what is left of the probe's 64 bytes.
-func TestServerTruncatesTheNamesAKeyPathAccepts(t *testing.T) {
-	for text, want := range map[string]bool{
-		strings.Repeat("n", 63): false, strings.Repeat("n", 64): true, strings.Repeat("n", 255): true,
-		strings.Repeat("n", 256):        false, // refused by the key path itself (too long)
-		"a b" + strings.Repeat("n", 64): false, // not a plain name: refused before any statement
-		"canary":                        false, "": false,
-	} {
-		if got := serverTruncates(text); got != want {
-			t.Errorf("serverTruncates(%d bytes %.8q) = %v, want %v", len(text), text, got, want)
-		}
-	}
-	// Of the probes only the name of 64 bytes is cut, and the first 63 bytes of it are the name of the fixture.
-	var cut []string
+// The name of 64 bytes is the one the server would cut to the 63 bytes of the fixture's table and
+// column: it is a plain identifier, and it is the only probe that is, so the only text whose
+// refusal is a matter of length. The fixture's names are what is left of it.
+func TestTheProbeOf64BytesIsTheOnePlainNameTheServerWouldCut(t *testing.T) {
+	var long []string
 	for _, probe := range probes {
-		if serverTruncates(probe.text) {
-			cut = append(cut, probe.text)
+		if plainName.MatchString(probe.text) {
+			long = append(long, probe.text)
 		}
 	}
-	if len(cut) != 1 || cut[0][:postgresNameBytes] != truncatedName || len(truncatedName) != 63 {
-		t.Errorf("the probes the server cuts = %d bytes %q; truncatedName has %d bytes; want the one name of 64 whose first 63 bytes are the fixture's", len(cut), cut, len(truncatedName))
+	if len(long) != 1 || len(long[0]) != postgresNameBytes+1 || long[0][:postgresNameBytes] != truncatedName || len(truncatedName) != 63 {
+		t.Fatalf("the probes that are plain identifiers = %d, %q; truncatedName has %d bytes; want the one of 64 bytes whose first 63 are the fixture's", len(long), long, len(truncatedName))
+	}
+	if isPlainName(long[0]) || !isPlainName(truncatedName) {
+		t.Errorf("isPlainName of the 64 bytes = %v and of the 63 = %v, want false and true", isPlainName(long[0]), isPlainName(truncatedName))
+	}
+}
+
+// The joined names of the nested keys are 63 and 64 bytes, from a collection of 32 bytes and a
+// parent's of 30 and of 31, and the first 63 bytes of the longer are the shorter: the table the
+// longer would reach once cut. The other names the fixture writes through are 63 bytes.
+func TestTheNamesTheKeyPathFixtureWritesThroughHaveTheLengthsTheyAreMeantFor(t *testing.T) {
+	for name, want := range map[string]int{
+		nestedTable63: 63, nestedTable64: 64, undeclaredTable: 63, truncatedName: 63,
+		nestedChild: 32, nestedParent63: 30, nestedParent64: 31,
+	} {
+		if len(name) != want {
+			t.Errorf("%.8q... has %d bytes, want %d", name, len(name), want)
+		}
+	}
+	if nestedTable64[:postgresNameBytes] != nestedTable63 {
+		t.Errorf("the first 63 bytes of the joined name of 64 are %q, want the joined name of 63, %q", nestedTable64[:postgresNameBytes], nestedTable63)
+	}
+	if !strings.HasPrefix(strings.Repeat("m", postgresNameBytes+1), undeclaredTable) {
+		t.Errorf("the collection of 64 bytes of the undeclared Delete does not start with the table of 63 bytes")
 	}
 }
