@@ -10,6 +10,7 @@ import (
 
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/dalgo2sql"
+	dalrecord "github.com/dal-go/record"
 )
 
 // With dalgo2sql v0.26.3 the records of a read of a source nobody declared (no
@@ -63,7 +64,7 @@ func keysOf(t *testing.T, f *queryFixture, q dal.Query) (statement string, rows 
 // catalogAnswer runs the catalog statement the last read sent again, with the arguments it
 // was sent, on the untraced handle, writes the statement and the rows the server answers
 // to the output, and returns the names of the columns the catalog marks as the primary key
-// (the last column of its answer).
+// (the ninth column of its answer; the tenth, the column's own collation, is no key).
 func catalogAnswer(t *testing.T, f *queryFixture) (primaryKey []string) {
 	t.Helper()
 	var statement string
@@ -96,14 +97,14 @@ func catalogAnswer(t *testing.T, f *queryFixture) (primaryKey []string) {
 			t.Fatalf("Scan: %v", err)
 		}
 		lines = append(lines, fmt.Sprintf("%v", values))
-		if len(values) == 9 && values[8] == true {
+		if len(values) == 10 && values[8] == true {
 			primaryKey = append(primaryKey, fmt.Sprint(values[1]))
 		}
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("rows: %v", err)
 	}
-	t.Logf("catalog statement: %s\n    arguments: %s\n    columns: %v\n    rows (name, attname, data_type, category, type_oid, type_elem, attnotnull, nondeterministic, pk):\n        %s\n    primary key columns: %v",
+	t.Logf("catalog statement: %s\n    arguments: %s\n    columns: %v\n    rows (name, attname, data_type, category, type_oid, type_elem, attnotnull, nondeterministic, pk, collation):\n        %s\n    primary key columns: %v",
 		statement, argsText(args), columns, strings.Join(lines, "\n        "), primaryKey)
 	return primaryKey
 }
@@ -197,11 +198,15 @@ func TestStructuredQueryIntegration_RecordKeysFromTheCatalog(t *testing.T) {
 		assertKeys(t, got, "ck_single", int64(10), int64(20), int64(30))
 		assertPrimaryKey(t, "id")
 	})
-	t.Run("a keys-only read is ordered by the primary key", func(t *testing.T) {
+	t.Run("a keys-only read is ordered by the primary key, and reads every column", func(t *testing.T) {
 		statement, got := keysOf(t, f, from("ck_single").NewQuery().SelectKeysOnly(reflect.Int))
 		t.Logf("statement: %s", statement)
-		if !strings.Contains(statement, `ORDER BY "id" ASC`) {
-			t.Errorf("statement = %s, want an ORDER BY on the primary key", statement)
+		// KNOWN LIMIT of dal-go/dalgo2sql (described in the README under Known limits; not a rule): a keys-only read is a
+		// select-all, so the server reads and sends every column of every row to return a key.
+		// It FAILS when dalgo2sql selects the key column only; assert then the statement
+		// SELECT "id" FROM "ck_single" ORDER BY "id" ASC, and delete the README's known limit.
+		if want := `SELECT * FROM "ck_single" ORDER BY "id" ASC`; statement != want {
+			t.Errorf("statement = %s, want %s (every column is read for a key). If it is now SELECT \"id\" FROM \"ck_single\" ORDER BY \"id\" ASC, dalgo2sql reads the key only: assert that statement here and delete the known limit in the README", statement, want)
 		}
 		// The rows were inserted as 30, 10, 20: the order is the statement's.
 		assertKeys(t, got, "ck_single", int64(10), int64(20), int64(30))
@@ -283,10 +288,11 @@ func TestStructuredQueryIntegration_RecordKeysFromTheCatalog(t *testing.T) {
 	// without an error, and the records are keyed by the catalog's id and not by the code
 	// the recordset declares.
 	//
-	// KNOWN LIMIT of dal-go/dalgo2sql (reported for it; not a rule): the two cases that
-	// are not found FAIL when dalgo2sql folds the registered names too, and say what to
-	// assert instead. Until then a caller in fold-lower mode registers its recordsets under
-	// lower case names (README, "How records are keyed").
+	// KNOWN LIMIT of dal-go/dalgo2sql (described in the README under Known
+	// limits; not a rule): the two cases that are not found FAIL when dalgo2sql folds the registered names
+	// too, and say what to assert instead. Until then a caller in fold-lower mode registers
+	// its recordsets under lower case names and spells the collection of every key the same
+	// way, because a key read folds nothing (README, "How a recordset is found").
 	t.Run("a recordset registered as Ck_Mixed is found when the query spells the source Ck_Mixed", func(t *testing.T) {
 		statement, got := keysOf(t, f, ordered("Ck_Mixed").SelectColumns(payload))
 		t.Logf("statement: %s", statement)
@@ -310,6 +316,73 @@ func TestStructuredQueryIntegration_RecordKeysFromTheCatalog(t *testing.T) {
 			assertKeys(t, got, spelling, int64(1), int64(2), int64(3))
 		})
 	}
+}
+
+// A key read finds its recordset by a rule of its own, which is not the one of a query: a
+// query finds the recordset under the source's spelling and then lower-cased (the three
+// spellings above), and a key read or write finds it only under the collection of the key as
+// the key spells it, with no folding. The recordset ck_decl, whose key is the column code, is
+// found by Exists and Get for a key spelled ck_decl, and for a key spelled Ck_Decl the
+// recordset is not found: the table is, the server folds the unquoted name, but its primary key
+// is not defined for the name, and the answer is an error that matches ErrRecordNotFound
+// ("primary key is not defined for recorset Ck_Decl") for a row that exists. No statement is
+// sent for it.
+//
+// KNOWN LIMIT of dal-go/dalgo2sql (described in the README under Known limits; not a rule). The cases for the spelling
+// Ck_Decl FAIL when a key read folds the name as a query does, and say what to assert instead:
+// the row is found, with the statement of the control. Until then, in IdentifierFoldLower, spell
+// the collection of every key in lower case, or register the recordset under the spelling the
+// keys use (README, "How a recordset is found").
+func TestStructuredQueryIntegration_KeyReadFindsItsRecordsetOnlyUnderTheCollectionAsSpelled(t *testing.T) {
+	options := dalgo2sql.DbOptions{Recordsets: map[string]*dalgo2sql.Recordset{
+		"ck_decl": dalgo2sql.NewRecordset("ck_decl", dalgo2sql.Table, []dal.FieldRef{dal.Field("code")}),
+	}}
+	f := openQueryFixtureWithOptions(t, options, "test_record_keys_read", IdentifierFoldLower, []string{
+		`CREATE TABLE ck_decl (id integer PRIMARY KEY, code text, payload text)`,
+		`INSERT INTO ck_decl VALUES (1, 'k-a', 'a'), (2, 'k-b', 'b')`,
+	})
+	ctx := context.Background()
+	const fixed = "dalgo2sql now folds the collection of a key as a query does: assert here that the row is found, with the statement of the control (SELECT 1 FROM ck_decl WHERE code = $1, and the key as the argument), and delete this limit and the README's"
+
+	t.Run("control: a key spelled ck_decl finds the recordset", func(t *testing.T) {
+		f.trace.reset()
+		exists, err := f.db.Exists(ctx, dalrecord.NewKeyWithID("ck_decl", "k-a"))
+		if err != nil || !exists {
+			t.Fatalf("Exists = %v, %v; want true", exists, err)
+		}
+		sent := f.trace.sent()
+		t.Logf("statements: %v", sent)
+		if len(sent) != 1 || sent[0].sql != "SELECT 1 FROM ck_decl WHERE code = $1" || !reflect.DeepEqual(valueArguments(sent[0].args), []any{"k-a"}) {
+			t.Errorf("statements = %v, want SELECT 1 FROM ck_decl WHERE code = $1 with the argument k-a", sent)
+		}
+		rec := dalrecord.NewRecordWithData(dalrecord.NewKeyWithID("ck_decl", "k-b"), map[string]any{})
+		if err := f.db.Get(ctx, rec); err != nil || rec.Data().(map[string]any)["payload"] != "b" {
+			t.Errorf("Get = %v, data %v; want the row k-b with its payload", err, rec.Data())
+		}
+	})
+	t.Run("KNOWN LIMIT: a key spelled Ck_Decl does not find the recordset, for a row that exists", func(t *testing.T) {
+		f.trace.reset()
+		exists, err := f.db.Exists(ctx, dalrecord.NewKeyWithID("Ck_Decl", "k-a"))
+		t.Logf("Exists by the key Ck_Decl: %v, %v; statements: %v", exists, err, f.trace.sent())
+		if err == nil && exists {
+			t.Errorf("Exists = true: %s", fixed)
+		}
+		if !errors.Is(err, dalrecord.ErrRecordNotFound) || exists {
+			t.Errorf("Exists = %v, %v; want false with an error that matches ErrRecordNotFound (no primary key for the name Ck_Decl)", exists, err)
+		}
+		if sent := f.trace.sent(); len(sent) != 0 {
+			t.Errorf("statements = %v, want none: the error is built before the server", sent)
+		}
+		rec := dalrecord.NewRecordWithData(dalrecord.NewKeyWithID("Ck_Decl", "k-a"), map[string]any{})
+		err = f.db.Get(ctx, rec)
+		t.Logf("Get by the key Ck_Decl: %v", err)
+		if err == nil {
+			t.Errorf("Get found the row: %s", fixed)
+		}
+		if !errors.Is(err, dalrecord.ErrRecordNotFound) {
+			t.Errorf("Get = %v, want an error that matches ErrRecordNotFound", err)
+		}
+	})
 }
 
 // typesOf names the Go types of values.

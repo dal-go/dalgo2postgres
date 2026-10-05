@@ -167,6 +167,7 @@ jobs:
             RecordsetReader \
             RecordsCarryTheirKey \
             RecordKeysFromTheCatalog \
+            KeyReadFindsItsRecordsetOnlyUnderTheCollectionAsSpelled \
             ContextEndsBetweenAndDuringTheStatements; do
             if ! grep -qE "^\s*--- PASS: TestStructuredQueryIntegration_${name} \(" /tmp/gotest.log; then
               echo "::error::TestStructuredQueryIntegration_${name} did not run to a pass"
@@ -233,6 +234,43 @@ jobs:
             TestServerPinsIntegration_RuntimeErrorAtRowN \
             TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation \
             TestServerPinsIntegration_NotNullColumnKeepsItsOrderByWithoutANullsClause \
+            TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimit \
+            TestVendoredFixturesAreTheDalgoModulesAtTheRequiredVersion \
+            TestFixturesJoinsAreVendoredWithTheirDigests \
+            TestFixturesJoinNegativeCasesAreRefusedWithTheFixturesDiagnostic \
+            TestFixturesEveryJoinFixtureIsRunByATest \
+            TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer \
+            TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer/chinook-nested \
+            TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer/chinook-hinted \
+            TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer/chinook-wildcard \
+            TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer/chinook-nested/recordset_reader \
+            TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer/chinook-hinted/recordset_reader \
+            TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer/chinook-wildcard/recordset_reader \
+            TestFixturesIntegration_SubqueriesRunInDALgoOverLeafReads \
+            TestFixturesIntegration_SubqueriesRunInDALgoOverLeafReads/a_correlated_subquery_reads_the_whole_inner_table_once_for_each_row_of_the_outer_table \
+            TestPushdownIntegration_GroupByOver150000GroupsRunsOnTheServer \
+            TestPushdownIntegration_GroupByOver150000GroupsRunsOnTheServer/through_the_records_reader \
+            TestPushdownIntegration_GroupByOver150000GroupsRunsOnTheServer/through_the_recordset_reader \
+            TestPushdownIntegration_JoinOver50000RowsRunsOnTheServer \
+            TestPushdownIntegration_JoinOver50000RowsRunsOnTheServer/through_the_records_reader \
+            TestPushdownIntegration_JoinOver50000RowsRunsOnTheServer/through_the_recordset_reader \
+            TestPushdownIntegration_WithoutTheNativeRouteTheSameQueriesAreRefused \
+            TestAccessIntegration_RowConditionWithAQuoteReturnsExactlyThePermittedRows/exact_mode \
+            TestAccessIntegration_RowConditionWithAQuoteReturnsExactlyThePermittedRows/fold-lower_mode \
+            TestAccessIntegration_HiddenFieldUnderAnAliasAndAnEmptyProjectionAreDenied/exact_mode \
+            TestAccessIntegration_HiddenFieldUnderAnAliasAndAnEmptyProjectionAreDenied/fold-lower_mode \
+            TestAccessIntegration_HiddenFieldInAJoinOrAScanOrderIsDeniedWithNoStatement/exact_mode \
+            TestAccessIntegration_HiddenFieldInAJoinOrAScanOrderIsDeniedWithNoStatement/fold-lower_mode \
+            TestAccessIntegration_AFieldListOnAJoinedSourceIsRefusedWithNoStatement/exact_mode \
+            TestAccessIntegration_AFieldListOnAJoinedSourceIsRefusedWithNoStatement/fold-lower_mode \
+            TestAccessIntegration_SessionWithNoPolicyIsDenied/exact_mode \
+            TestAccessIntegration_SessionWithNoPolicyIsDenied/fold-lower_mode \
+            TestAccessIntegration_UnconditionalAllowBehindAConditionDecidesTheRow/exact_mode \
+            TestAccessIntegration_UnconditionalAllowBehindAConditionDecidesTheRow/fold-lower_mode \
+            TestProbesIntegration_NothingACallerWritesBecomesSQL/exact_mode \
+            TestProbesIntegration_NothingACallerWritesBecomesSQL/fold-lower_mode \
+            TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath/exact_mode \
+            TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath/fold-lower_mode \
             TestSchemaReaderIntegration_ListsEverySchemaButTheSystemOnes \
             TestSchemaReaderIntegration_ListsViewsAndMaterializedViewsApartFromTables \
             TestSchemaReaderIntegration_DescribesEveryListedCollectionOfEverySchema \

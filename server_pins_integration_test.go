@@ -3,6 +3,7 @@ package dalgo2postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -221,16 +222,14 @@ func TestServerPinsIntegration_SelectAllOverAJoinListsTheBasesColumnsFirst(t *te
 }
 
 // Two text join keys whose columns carry different collations, neither the database's
-// default, are accepted by the compiler, which compares the type's category (text with
-// text), and planned onto the server. The server cannot compare them: it cannot decide
-// which collation the comparison uses and refuses the statement with 42P22. A pair in
-// which only one column has a collation of its own is compared in that one, and answers.
-//
-// KNOWN DEFECT of dal-go/dalgo2sql, not a rule (task SQL-W4, item 4, which declines such a
-// join to DALgo's own engine; no release has it yet). The refusal is an honest one, but
-// the join is planned on the server and then fails, where DALgo's engine would answer.
-// The first case below FAILS when that is fixed, and says what to assert instead: a plan
-// that is not native, and rows [1] for the same query.
+// default, cannot be compared by the server: it cannot decide which collation the
+// comparison uses and refuses the statement with 42P22. The catalog tells the compiler each
+// column's collation (dalgo2sql v0.26.5), so such a join is declined to DALgo's own engine,
+// which compares the two texts itself and answers; a pair in which only one column has a
+// collation of its own is compared by the server in that one, and answers. (Up to v0.26.4
+// the compiler planned the first pair on the server, which refused it.) The control below
+// states the server's refusal of the statement the compiler no longer sends, so the reason
+// for the plan is a fact about the server and not only about the compiler.
 func TestServerPinsIntegration_TextJoinKeysWithDifferentCollations(t *testing.T) {
 	f := openQueryFixture(t, "test_pin_collation", IdentifierFoldLower, []string{
 		`CREATE TABLE c_c (id integer PRIMARY KEY, k text COLLATE "C")`,
@@ -251,23 +250,34 @@ func TestServerPinsIntegration_TextJoinKeysWithDifferentCollations(t *testing.T)
 			NewQuery().
 			SelectColumns(dal.Column{Expression: dal.NewFieldRef("l", "id"), Alias: "id"})
 	}
-	t.Run(`KNOWN DEFECT: collation "C" against "POSIX": planned on the server, which cannot choose one`, func(t *testing.T) {
+	t.Run(`control: the server refuses collation "C" against "POSIX" with 42P22`, func(t *testing.T) {
+		var id int
+		err := f.admin.QueryRowContext(context.Background(),
+			`SELECT l.id FROM c_c AS l INNER JOIN c_p AS r ON l.k = r.k`).Scan(&id)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "42P22" {
+			t.Errorf("error = %v, want the server's 42P22 (indeterminate collation)", err)
+		}
+	})
+	t.Run(`collation "C" against "POSIX": declined to DALgo's engine, which answers`, func(t *testing.T) {
 		q := join("c_c", "c_p")
 		plan, err := dal.PlanJoin(context.Background(), q, joiner)
 		t.Logf("plan: %+v, %v", plan, err)
-		t.Logf("KNOWN DEFECT of dal-go/dalgo2sql (task SQL-W4, item 4; not a rule): the compiler plans on the server a join of two text columns with different collations, and the server refuses it with 42P22")
-		o := observe(t, f, q)
-		t.Logf("statement: %s\n    arguments: %s\n    result:    %s", o.statement, argsText(o.args), o.result())
-		const fixed = "dalgo2sql now declines such a join to DALgo's engine (SQL-W4 item 4 is fixed): assert here a plan whose strategy is not dal.JoinNative and rows [1] for the same query, and delete this pin and the README's known limit"
-		if err == nil && plan.Strategy != dal.JoinNative {
-			t.Errorf("plan = %+v: %s", plan, fixed)
-		} else if err != nil || plan.Strategy != dal.JoinNative {
-			t.Errorf("plan = %+v, err = %v; want the join planned on the server (the compiler accepts the pair by category)", plan, err)
+		if err != nil || plan.Strategy == dal.JoinNative {
+			t.Errorf("plan = %+v, err = %v; want a plan that is not native: the server cannot compare the two", plan, err)
 		}
-		if o.code == "" {
-			t.Errorf("result = %s: %s", o.result(), fixed)
-		} else if o.code != "42P22" {
-			t.Errorf("result = %s, want the server's refusal 42P22 (indeterminate collation)", o.result())
+		o := observe(t, f, q)
+		t.Logf("statements: %v\n    rows: %v (error: %v)", statementsSent(f), o.rows, o.err)
+		// DALgo's engine returns the integer as its own Go type, not the reader's int64, so
+		// the rows are compared as JSON holds them.
+		got, normalizeErr := normalizeRows(o.rows)
+		if o.err != nil || normalizeErr != nil || rowDifference(got, []map[string]any{{"id": 1.0}}) != "" {
+			t.Errorf(`collation "C" against "POSIX", in DALgo's engine: rows = %v, error %v, want the one row with id 1`, o.rows, o.err)
+		}
+		for _, statement := range statementsSent(f) {
+			if strings.Contains(statement, " JOIN ") {
+				t.Errorf("a statement joins on the server: %s", statement)
+			}
 		}
 	})
 	t.Run(`collation "C" against the default: the column with a collation of its own decides`, func(t *testing.T) {
@@ -456,8 +466,8 @@ func TestServerPinsIntegration_NotNullColumnKeepsItsOrderByWithoutANullsClause(t
 // the fixture of TestEndToEnd gives the key COLLATE "C" and it passes.
 //
 // This is a DIVERGENCE from the shared suite's keys-only contract, not a rule and not a
-// defect of this package, reported for dal-go/dalgo (does the contract say the order is
-// Go's?) and dal-go/dalgo2sql (which writes the ORDER BY on the key): a real table does not
+// defect of this package, for dal-go/dalgo (does the contract say the order is
+// Go's?) and dal-go/dalgo2sql (which writes the ORDER BY on the key; described in the README under Known limits): a real table does not
 // declare COLLATE "C". The test pins what the server does with the statement shown, prints
 // the database's collation, and runs the same rows under COLLATE "C" as the control that
 // equals sort.Strings. If the database's collation orders like C the pin shows nothing, and
@@ -497,10 +507,13 @@ func TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation(t *testi
 	t.Run("in the database's collation the server's order is not Go's", func(t *testing.T) {
 		_, ids := keys(t, "kc_default")
 		if reflect.DeepEqual(ids, goOrder) {
-			t.Fatalf("keys = %v: the database's collation (%s) orders like C, so this pin shows nothing; run the job on a database whose collation is not C or POSIX", ids, collate)
+			t.Fatalf("keys = %v: either the database's collation (%s) orders like C, so this pin shows nothing and the job must run on a database whose collation is not C or POSIX, "+
+				"or a keys-only read is now in Go's order: then assert Go's order here, drop COLLATE \"C\" from the dalgotest_cities table in end2endDDL, and delete the limit in the README", ids, collate)
 		}
 		if want := []string{"São Paulo_São Paulo", "Shanghai_Shanghai", "Sindh_Karachi"}; !reflect.DeepEqual(ids, want) {
-			t.Errorf("keys = %v, want the linguistic order of %s: %v. This differs from sort.Strings, which the shared suite's keys-only contract asserts: a divergence reported for dal-go/dalgo and dal-go/dalgo2sql", ids, collate, want)
+			t.Errorf("keys = %v, want the linguistic order of %s: %v. This differs from sort.Strings, which the shared suite's keys-only contract asserts: a divergence for dal-go/dalgo and dal-go/dalgo2sql, described in the README under Known limits. "+
+				"If the keys are now in Go's order, a keys-only read no longer follows the database's collation: assert Go's order for kc_default here, "+
+				"drop COLLATE \"C\" from the dalgotest_cities table in end2endDDL (end2end_test.go), and delete the limit in the README", ids, collate, want)
 		}
 	})
 	t.Run(`control: the same keys under COLLATE "C" are in Go's order`, func(t *testing.T) {
@@ -509,4 +522,113 @@ func TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation(t *testi
 			t.Errorf("keys = %v, want Go's order %v", ids, goOrder)
 		}
 	})
+}
+
+// PostgreSQL 18 lets a not-null constraint be added NOT VALID: the constraint is enforced for the
+// rows written from then on and does not vouch for the rows that were there, which may hold
+// NULL. The catalog calls such a column NOT NULL (pg_attribute.attnotnull is true; the
+// constraint's convalidated is false). The compiler writes no NULLS clause for a NOT NULL
+// column, so that an index can serve the order, and relies on the server's default (NULLs last
+// ascending, first descending), which is the opposite of DALgo's rule (NULLs first ascending
+// and last descending). With ORDER BY and LIMIT the NULL rows that DALgo puts first would then be
+// cut off: the first rows would not be the ones DALgo returns.
+//
+// dalgo2sql v0.26.7 reads the not-null fact as true only when no constraint that is not
+// validated covers the column, so such a column is nullable for ordering: the compiler writes the
+// NULLS clause and the rows are DALgo's, ascending and descending, with LIMIT. The test asserts
+// both statements and both results, the catalog's two facts that make the case (so that the test
+// cannot pass for a column that is not one), and the control with the clause written by hand.
+//
+// On PostgreSQL 17 the syntax does not exist, and the control asserts that it is refused (a
+// syntax error), so the test runs and passes on both legs of the job and says which it is.
+func TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimit(t *testing.T) {
+	f := openQueryFixture(t, "test_pin_not_valid", IdentifierFoldLower, []string{
+		`CREATE TABLE nv (id integer PRIMARY KEY, v integer)`,
+		`INSERT INTO nv VALUES (1, 3), (2, NULL), (3, 1), (4, NULL), (5, 2)`,
+	})
+	ctx := context.Background()
+	var major int
+	if err := f.admin.QueryRowContext(ctx, `SELECT current_setting('server_version_num')::int / 10000`).Scan(&major); err != nil {
+		t.Fatalf("server_version_num: %v", err)
+	}
+	const addConstraint = `ALTER TABLE nv ADD CONSTRAINT nv_v_not_null NOT NULL v NOT VALID`
+	if major < 18 {
+		_, err := f.admin.ExecContext(ctx, addConstraint)
+		var pgErr *pgconn.PgError
+		t.Logf("PostgreSQL %d: %s -> %v", major, addConstraint, err)
+		if !errors.As(err, &pgErr) || pgErr.Code != "42601" {
+			t.Errorf("error = %v, want the server's syntax error 42601: PostgreSQL %d has no NOT VALID not-null constraint", err, major)
+		}
+		return
+	}
+	if _, err := f.admin.ExecContext(ctx, addConstraint); err != nil {
+		t.Fatalf("%s: %v", addConstraint, err)
+	}
+	var notNull, validated bool
+	if err := f.admin.QueryRowContext(ctx, `SELECT a.attnotnull, c.convalidated FROM pg_attribute a
+		JOIN pg_constraint c ON c.conrelid = a.attrelid AND c.contype = 'n' AND a.attnum = ANY (c.conkey)
+		WHERE a.attrelid = 'nv'::regclass AND a.attname = 'v'`).Scan(&notNull, &validated); err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	t.Logf("PostgreSQL %d, column v: attnotnull = %v, constraint validated = %v; rows 2 and 4 hold NULL", major, notNull, validated)
+	// The cause the pin below describes: the catalog calls the column NOT NULL while its
+	// constraint has not been validated against the rows that were there.
+	if !notNull || validated {
+		t.Fatalf("attnotnull = %v and the constraint's convalidated = %v, want true and false: the column is NOT NULL to the catalog and its constraint vouches for no row, which is the case this pin is about", notNull, validated)
+	}
+
+	ordered := func(by dal.OrderExpression) dal.StructuredQuery {
+		return dal.From(dal.NewRootCollectionRef("nv", "")).NewQuery().
+			OrderBy(by, dal.AscendingField("id")).Limit(3).
+			SelectColumns(dal.Column{Expression: field("id")})
+	}
+	// The control: the same order with the NULLS clause written is DALgo's, so the clause the
+	// compiler leaves out is what the answer below lacks.
+	for _, tc := range []struct {
+		order string
+		want  []int
+	}{
+		{`"v" ASC NULLS FIRST`, []int{2, 4, 3}},
+		{`"v" DESC NULLS LAST`, []int{1, 5, 3}},
+	} {
+		var got []int
+		rows, err := f.admin.QueryContext(ctx, `SELECT id FROM nv ORDER BY `+tc.order+`, id ASC LIMIT 3`)
+		if err != nil {
+			t.Fatalf("control: %v", err)
+		}
+		for rows.Next() {
+			var id int
+			if err := rows.Scan(&id); err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, id)
+		}
+		_ = rows.Close()
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("control ORDER BY %s: ids = %v, want %v", tc.order, got, tc.want)
+		}
+	}
+
+	// The compiler writes the NULLS clause for the column, because the catalog's not-null fact is
+	// false for a column whose constraint is not validated, and the rows are DALgo's: the two NULL
+	// rows (2 and 4) come first ascending, so LIMIT 3 holds them and row 3; descending they come
+	// last, so the page is rows 1, 5 and 3.
+	for _, tc := range []struct {
+		label     string
+		by        dal.OrderExpression
+		statement string
+		want      []int
+	}{
+		{"ascending", dal.AscendingField("v"), `SELECT "id" FROM "nv" ORDER BY "v" ASC NULLS FIRST, "id" ASC LIMIT $1`, []int{2, 4, 3}},
+		{"descending", dal.DescendingField("v"), `SELECT "id" FROM "nv" ORDER BY "v" DESC NULLS LAST, "id" ASC LIMIT $1`, []int{1, 5, 3}},
+	} {
+		o := observe(t, f, ordered(tc.by))
+		check(t, "ORDER BY v "+tc.label+", LIMIT 3 on a column with a NOT VALID not-null constraint", o, rowsOf(tc.want...))
+		if o.statement != tc.statement {
+			t.Errorf("ORDER BY v %s: statement = %s, want %s", tc.label, o.statement, tc.statement)
+		}
+		if len(o.args) != 1 || fmt.Sprint(o.args[0]) != "3" {
+			t.Errorf("ORDER BY v %s: arguments = %s, want the limit 3 as the only argument", tc.label, argsText(o.args))
+		}
+	}
 }
