@@ -42,17 +42,16 @@ jobs:
       code_coverage: true
       # Backstop floor. This job runs without a database, so the DB-backed
       # tests skip here and only the unit and sqlmock tests count; the real
-      # floor is in the integration job below. Measured on this branch's head
-      # merged with main, which holds NonDeterministicTextColumns, as CI runs
-      # it (`go test -count=1 -cover ./...`): 65.4%. The floor stays at 62: the
-      # margin is wide enough for a pull request that adds code only a live
-      # server tests. With both version tests skipped
+      # floor is in the integration job below. Measured as CI runs it
+      # (`go test -count=1 -cover ./...`): 71.9% on the head of pull request
+      # 13 and on this branch's head. The floor is 71, that value rounded down,
+      # which leaves less than a point in which coverage can fall unnoticed
+      # while a pull request still has room to add code only a live server
+      # tests. With both version tests skipped
       # (-skip 'TestResolveVersion|TestAdapterReportsVersion') the total is
-      # 63.9%, and with only TestAdapterReportsVersion skipped 65.3%, so this
-      # floor does not protect the version tests; raise it to 65 once the
-      # wave's remaining pull requests have landed, to make it do so. Must rise
-      # with the PostgreSQL wave; never lower it.
-      min_test_coverage_percent: 62
+      # 70.4%, so this floor also protects the version tests, as the floor of 62
+      # did not. Must rise with the PostgreSQL wave; never lower it.
+      min_test_coverage_percent: 71
 
   # Runs the shared dalgotest conformance suite against a real PostgreSQL.
   #
@@ -64,12 +63,21 @@ jobs:
   # No test code needed changing: the DB-backed tests already skip unless
   # DALGO2POSTGRES_TEST_DSN is set, and TestConformance creates and drops its
   # own table, so a running server and a DSN are the whole requirement.
+  #
+  # It runs on two server versions, a matrix on the service image: 17, the version the
+  # fleet runs, and 18, the newest. Each leg is a job of its own and each must pass;
+  # DALGO2POSTGRES_EXPECT_SERVER_MAJOR makes the version test fail if a leg met another
+  # server than the one it names.
   integration:
-    name: Conformance (PostgreSQL)
+    name: Conformance (PostgreSQL ${{ matrix.postgres }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['17', '18']
     services:
       postgres:
-        image: postgres:17
+        image: postgres:${{ matrix.postgres }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -93,7 +101,17 @@ jobs:
         # prevent. Run verbose and assert on the result line.
         run: |
           set -o pipefail
-          go test -race -v -coverprofile=profile.cov ./... 2>&1 | tee /tmp/gotest.log
+          # Sub-tests of the shared end2end suite (TestEndToEnd) that cannot run in
+          # fold-lower mode, excluded by name and for no other reason: a key read
+          # returns the names as the table stores them (lower case) and the suite's
+          # access policy spells them Country and IsCapital, which the access layer
+          # compares exactly, so it denies a row the policy allows. The reason is
+          # asserted by TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames
+          # (Exists) and TestEndToEndIntegration_UpdateUnderRowConditionsFailsClosedOnStoredNames
+          # (Update), and TestEndToEnd reports each of them as a skip that names it (the
+          # allow-list of skips below). Keep the two lists the same.
+          not_run='^TestEndToEnd$/^query$/^access_conditions$/^(point_reads_follow_the_condition|writes_follow_the_condition)$'
+          go test -race -v -skip "$not_run" -coverprofile=profile.cov ./... 2>&1 | tee /tmp/gotest.log
           if grep -qE '^\s*--- SKIP: TestConformance' /tmp/gotest.log; then
             echo "::error::TestConformance SKIPPED - the DSN did not reach the tests"
             exit 1
@@ -145,22 +163,93 @@ jobs:
             ReadsRunOnOneLeasedConnection \
             RecordsetReader \
             RecordsCarryTheirKey \
+            RecordKeysFromTheCatalog \
             ContextEndsBetweenAndDuringTheStatements; do
             if ! grep -qE "^\s*--- PASS: TestStructuredQueryIntegration_${name} \(" /tmp/gotest.log; then
               echo "::error::TestStructuredQueryIntegration_${name} did not run to a pass"
               exit 1
             fi
           done
+          # The shared end2end suite, the type matrix and the server pins. No skip is
+          # allowed in this job but the ones listed here, which are the sub-tests of
+          # the shared suite that cannot run in fold-lower mode (see not_run above).
+          # Two checks follow: a skip that is not in the list fails the job (so a skip
+          # from any other cause does), and a listed skip that did not appear fails it
+          # too. The second check sees only that this repository's TestEndToEnd ran,
+          # because it writes the two skips itself, from its own list; it cannot see
+          # the shared suite. A rename in the shared suite is noticed for another
+          # reason: the old name in the -skip pattern then matches nothing and the
+          # renamed sub-test runs, and fails in fold-lower mode. A removal is not
+          # noticed.
+          # Last, a PASS line is required for each test by name, so a test that is
+          # renamed, deleted or never reached fails the job. Add a new test of these
+          # families to the list.
+          allowed_skips=(
+            TestEndToEnd/not_run_in_fold_lower_mode/point_reads_follow_the_condition
+            TestEndToEnd/not_run_in_fold_lower_mode/writes_follow_the_condition
+          )
+          skipped=$(grep -E '^\s*--- SKIP: ' /tmp/gotest.log | sed -E 's/^[[:space:]]*--- SKIP: ([^ ]+) .*/\1/' || true)
+          while IFS= read -r name; do
+            [ -z "$name" ] && continue
+            if ! printf '%s\n' "${allowed_skips[@]}" | grep -qxF -- "$name"; then
+              echo "::error::${name} SKIPPED and is not in the allow-list of skips of this job"
+              exit 1
+            fi
+          done <<< "$skipped"
+          for name in "${allowed_skips[@]}"; do
+            if ! grep -qE "^\s*--- SKIP: ${name} \(" /tmp/gotest.log; then
+              echo "::error::the allowed skip ${name} did not run"
+              exit 1
+            fi
+          done
+          for name in \
+            TestEndToEnd \
+            TestEndToEnd/single \
+            TestEndToEnd/multi \
+            TestEndToEnd/query \
+            TestEndToEnd/query/access_conditions \
+            TestEndToEnd/query/access_field_lists \
+            TestEndToEnd/query/access_sources \
+            TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames \
+            TestEndToEndIntegration_UpdateUnderRowConditionsFailsClosedOnStoredNames \
+            TestServerVersionIntegration_IsTheOneTheJobNames \
+            TestTypeMatrixIntegration_FilterByColumnTypeAndConstantType \
+            TestTypeMatrixIntegration_ProjectionAndOrderBy \
+            TestTypeMatrixIntegration_EveryIntegerAndFloatType \
+            TestTypeMatrixIntegration_ValuesAtTheEdges \
+            TestTypeMatrixIntegration_ArithmeticOnDoublePrecision \
+            TestTypeMatrixIntegration_NumericWithAFractionIntoAnIntegerField \
+            TestTypeMatrixIntegration_ByteStringAgainstBytea \
+            TestTypeMatrixIntegration_TimestampWithoutZoneFollowsTheSessionTimeZone \
+            TestServerPinsIntegration_ColumnNamedLikeItsAliasIsTheColumn \
+            TestServerPinsIntegration_QualifiedColumnWinsOverAFunctionOfTheRow \
+            TestServerPinsIntegration_AliasesThatFoldTogetherAreRefusedBeforeTheServer \
+            TestServerPinsIntegration_SelectAllOverAJoinListsTheBasesColumnsFirst \
+            TestServerPinsIntegration_TextJoinKeysWithDifferentCollations \
+            TestServerPinsIntegration_RuntimeErrorAtRowN \
+            TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation \
+            TestServerPinsIntegration_NotNullColumnKeepsItsOrderByWithoutANullsClause; do
+            if ! grep -qE "^\s*--- PASS: ${name} \(" /tmp/gotest.log; then
+              echo "::error::${name} did not run to a pass"
+              exit 1
+            fi
+          done
+          # The version test compares nothing when DALGO2POSTGRES_EXPECT_SERVER_MAJOR does
+          # not reach it, so the line it prints is required here with the major version
+          # this leg names: the leg met the server it says it did.
+          if ! grep -qF "server_version_num major ${{ matrix.postgres }})" /tmp/gotest.log; then
+            echo "::error::the server of this leg is not PostgreSQL ${{ matrix.postgres }}: no \"server_version_num major ${{ matrix.postgres }})\" line"
+            exit 1
+          fi
         env:
           DALGO2POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/dalgo_test?sslmode=disable
+          DALGO2POSTGRES_EXPECT_SERVER_MAJOR: ${{ matrix.postgres }}
       - name: Integration coverage floor
         # The floor that matters: this is the only job where the database
-        # tests run. Measured on this branch's head merged with main, which
-        # holds NonDeterministicTextColumns and its integration test, as CI
-        # runs it (CI log "Integration coverage: 86.7%"). The floor is that
-        # value rounded down. Must rise with the PostgreSQL wave; never lower
-        # it.
+        # tests run. Measured as CI runs it (CI log "Integration coverage"):
+        # 90.0% on the head of pull request 13. The floor is 89, that value
+        # rounded down. Must rise with the PostgreSQL wave; never lower it.
         run: |
           total=$(go tool cover -func=profile.cov | awk '$1 == "total:" {print $3}' | sed 's/%//')
           echo "Integration coverage: $total%"
-          awk -v t="$total" -v m="86" 'BEGIN { if (t < m) { print "Integration coverage " t "% is below required " m "%"; exit 1 } }'
+          awk -v t="$total" -v m="89" 'BEGIN { if (t < m) { print "Integration coverage " t "% is below required " m "%"; exit 1 } }'

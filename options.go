@@ -57,7 +57,9 @@ func (m IdentifierMode) valid() bool {
 // zero Database (to reject an invalid set before any connection is attempted,
 // when the embedded dal.DB is still nil), then to the real one. An option that
 // touches anything else, or that does something observable when it runs, would
-// run twice and, the first time, against a Database that has no connection.
+// run twice and, both times, against a Database that has no connection yet: the
+// constructors give the Database the embedded dal.DB, the *sql.DB and the identifier
+// mode they resolved after the options have run, so an option cannot replace them.
 type Option func(*Database)
 
 // WithSchema makes the schema reader inspect the named PostgreSQL schema
@@ -213,12 +215,18 @@ func (d *Database) chooseIdentifierMode(identifierCase dalgo2sql.IdentifierCase)
 // newDatabaseFromSQL wraps an already open, already verified *sql.DB. It is
 // the part of construction that needs no server, so unit tests reach it with a
 // mocked handle, and the only place a dalgo2sql database is built.
+//
+// The options are applied to an empty Database first, and the dalgo2sql database,
+// the *sql.DB and the identifier mode the settings resolved are assigned after them.
+// An [Option] is a func over *Database and could set any of those fields (the embedded
+// dal.DB is exported), so an option applied last could replace the dalgo2sql database
+// with one built with no dialect, whose structured queries reach the legacy text
+// emitter. Assigned last, they are the ones this package built.
 func newDatabaseFromSQL(sqlDB *sql.DB, schema dal.Schema, s settings, options []Option) *Database {
-	d := &Database{
-		DB:    dalgo2sql.NewDatabase(sqlDB, schema, s.db),
-		sqlDB: sqlDB,
-	}
+	d := &Database{}
 	applyOptions(d, options)
+	d.DB = dalgo2sql.NewDatabase(sqlDB, schema, s.db)
+	d.sqlDB = sqlDB
 	d.identifierMode = s.mode
 	return d
 }

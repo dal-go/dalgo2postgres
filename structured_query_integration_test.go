@@ -131,12 +131,23 @@ func openQueryFixture(t *testing.T, schema string, mode IdentifierMode, ddl []st
 // caller's DbOptions (the primary keys of its recordsets, for one).
 func openQueryFixtureWithOptions(t *testing.T, dbOptions dalgo2sql.DbOptions, schema string, mode IdentifierMode, ddl []string, extraSchemas ...string) *queryFixture {
 	t.Helper()
+	return openQueryFixtureWithParams(t, nil, dbOptions, schema, mode, ddl, extraSchemas...)
+}
+
+// openQueryFixtureWithParams is openQueryFixtureWithOptions for sessions that carry
+// runtime parameters of their own (a time zone, for one): every connection of the
+// fixture, the untraced one included, is opened with them.
+func openQueryFixtureWithParams(t *testing.T, params map[string]string, dbOptions dalgo2sql.DbOptions, schema string, mode IdentifierMode, ddl []string, extraSchemas ...string) *queryFixture {
+	t.Helper()
 	dsn := testDSN(t)
 	cfg, err := pgx.ParseConfig(dsn)
 	if err != nil {
 		t.Fatalf("ParseConfig: %v", err)
 	}
 	cfg.RuntimeParams["search_path"] = schema
+	for name, value := range params {
+		cfg.RuntimeParams[name] = value
+	}
 	admin := stdlib.OpenDB(*cfg)
 
 	trace := &queryTrace{}
