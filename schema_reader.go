@@ -11,39 +11,33 @@ import (
 	dalrecord "github.com/dal-go/record"
 )
 
-// ListCollections returns the tables and views of the configured schema
-// ([DefaultSchema] unless [WithSchema] says otherwise) in alphabetical order,
-// under the names PostgreSQL reports. The parent *dalrecord.Key is ignored —
-// Postgres has a flat table namespace within a schema.
+// ListCollections returns the tables, views, materialized views, partitioned
+// tables and foreign tables of the configured schema ([DefaultSchema] unless
+// [WithSchema] says otherwise) in alphabetical order, under the names PostgreSQL
+// reports, each by a reference that names no schema. The parent *dalrecord.Key is
+// ignored: it does not choose a schema. [Database.ListSchemas] and
+// [Database.ListSchemaCollections] read the others.
 func (d *Database) ListCollections(ctx context.Context, parent *dalrecord.Key) ([]dal.CollectionRef, error) {
 	_ = parent // ignored
-	rows, err := d.sqlDB.QueryContext(ctx,
-		`SELECT table_name
-		 FROM information_schema.tables
-		 WHERE table_schema = $1
-		   AND table_type IN ('BASE TABLE', 'VIEW')
-		 ORDER BY table_name`,
-		d.schemaName(),
-	)
+	relations, err := listRelations(ctx, d.sqlDB, d.schemaName(), "ListCollections")
 	if err != nil {
-		return nil, fmt.Errorf("dalgo2postgres: ListCollections: %w", err)
+		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	var out []dal.CollectionRef
-	for rows.Next() {
-		var name string
-		if scanErr := rows.Scan(&name); scanErr != nil {
-			return nil, fmt.Errorf("dalgo2postgres: ListCollections scan: %w", scanErr)
-		}
-		out = append(out, dal.NewRootCollectionRef(name, ""))
-	}
-	return out, rows.Err()
+	return relationRefs(relations, "", false), nil
 }
 
-// DescribeCollection returns the full schema definition for the named table or
-// view. It queries information_schema for columns and primary-key membership.
-// The table is read from the schema the reference names, else from the
+// DescribeCollection returns the full schema definition for the named table,
+// view, materialized view, partitioned table or foreign table. It queries
+// information_schema for columns and primary-key membership (a materialized
+// view, which information_schema does not list, from pg_attribute). The
+// collection is read from the schema the reference names, else from the
 // configured schema.
+//
+// A column's default is recorded as [dbschema.DefaultLiteral] whose Value is the
+// text of the expression as PostgreSQL stores it (`'new'::text`, `now()`,
+// `nextval('t_id_seq'::regclass)`); a generated column's is the text
+// `GENERATED ALWAYS AS (<expression>)`, and an identity column has
+// AutoIncrement set and no default. See the README for what each reads as.
 // A column whose PostgreSQL type has no dbschema counterpart (uuid, json,
 // jsonb, arrays, enums, interval, inet, money, ...) is reported as a String
 // field rather than failing the whole table.
@@ -64,18 +58,19 @@ func (d *Database) ListIndexes(ctx context.Context, ref *dal.CollectionRef) ([]d
 // describeCollectionImpl is the inner reader, factored so tests can reuse it.
 // label names the collection in error messages (see [collectionLabel]).
 func describeCollectionImpl(ctx context.Context, db *sql.DB, schema, name string, label quotedCollection) (*dbschema.CollectionDef, error) {
-	// 1. Confirm the table or view exists.
-	var found string
-	probeErr := db.QueryRowContext(ctx,
-		`SELECT table_name FROM information_schema.tables
-		 WHERE table_schema = $1 AND table_type IN ('BASE TABLE', 'VIEW') AND table_name = $2`,
-		schema, name,
-	).Scan(&found)
+	// 1. Confirm the table or view exists, and learn whether it is a materialized
+	//    view: information_schema.columns does not list those.
+	var kind string
+	probeErr := db.QueryRowContext(ctx, relationKindSQL, schema, name).Scan(&kind)
 	if probeErr == sql.ErrNoRows {
 		return nil, newQualifiedCollectionNotFoundError(label)
 	}
 	if probeErr != nil {
 		return nil, fmt.Errorf("dalgo2postgres: DescribeCollection probe %s: %w", label, probeErr)
+	}
+	columnsSQL := informationSchemaColumnsSQL
+	if kind == relkindMaterializedView {
+		columnsSQL = materializedViewColumnsSQL
 	}
 
 	// 2. Enumerate primary key columns.
@@ -88,17 +83,10 @@ func describeCollectionImpl(ctx context.Context, db *sql.DB, schema, name string
 		pkSet[c] = true
 	}
 
-	// 3. Enumerate columns from information_schema (including numeric precision/scale
-	//    and character max length for proper type round-trip).
-	rows, err := db.QueryContext(ctx,
-		`SELECT column_name, data_type, udt_name,
-		        character_maximum_length, numeric_precision, numeric_scale,
-		        is_nullable
-		 FROM information_schema.columns
-		 WHERE table_schema = $1 AND table_name = $2
-		 ORDER BY ordinal_position`,
-		schema, name,
-	)
+	// 3. Enumerate columns (including numeric precision/scale and character max
+	//    length for proper type round-trip, and the default, identity and
+	//    generation of each).
+	rows, err := db.QueryContext(ctx, columnsSQL, schema, name)
 	if err != nil {
 		return nil, fmt.Errorf("dalgo2postgres: DescribeCollection columns %q: %w", name, err)
 	}
@@ -107,15 +95,20 @@ func describeCollectionImpl(ctx context.Context, db *sql.DB, schema, name string
 	var fields []dbschema.FieldDef
 	for rows.Next() {
 		var (
-			colName    string
-			dataType   string
-			udtName    string
-			charMaxLen sql.NullInt64
-			numPrec    sql.NullInt64
-			numScale   sql.NullInt64
-			isNullable string
+			colName     string
+			dataType    string
+			udtName     string
+			charMaxLen  sql.NullInt64
+			numPrec     sql.NullInt64
+			numScale    sql.NullInt64
+			isNullable  string
+			colDefault  sql.NullString
+			isIdentity  string
+			isGenerated string
+			generation  sql.NullString
 		)
-		if scanErr := rows.Scan(&colName, &dataType, &udtName, &charMaxLen, &numPrec, &numScale, &isNullable); scanErr != nil {
+		if scanErr := rows.Scan(&colName, &dataType, &udtName, &charMaxLen, &numPrec, &numScale, &isNullable,
+			&colDefault, &isIdentity, &isGenerated, &generation); scanErr != nil {
 			return nil, fmt.Errorf("dalgo2postgres: DescribeCollection column scan: %w", scanErr)
 		}
 
@@ -146,6 +139,10 @@ func describeCollectionImpl(ctx context.Context, db *sql.DB, schema, name string
 			Precision: precision,
 			Length:    fieldLength,
 			Nullable:  nullable,
+			Default:   columnDefaultOf(colDefault, isGenerated, generation),
+			// An identity column is told by the catalog; a column that only defaults
+			// to nextval() is a plain default and is not marked.
+			AutoIncrement: isIdentity == "YES",
 		}
 		fields = append(fields, f)
 	}

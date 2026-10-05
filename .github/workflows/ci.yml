@@ -170,7 +170,8 @@ jobs:
               exit 1
             fi
           done
-          # The shared end2end suite, the type matrix and the server pins. No skip is
+          # The shared end2end suite, the type matrix, the server pins and the schema reader's
+          # schemas, views and defaults. No skip is
           # allowed in this job but the ones listed here, which are the sub-tests of
           # the shared suite that cannot run in fold-lower mode (see not_run above).
           # Two checks follow: a skip that is not in the list fails the job (so a skip
@@ -228,7 +229,11 @@ jobs:
             TestServerPinsIntegration_TextJoinKeysWithDifferentCollations \
             TestServerPinsIntegration_RuntimeErrorAtRowN \
             TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation \
-            TestServerPinsIntegration_NotNullColumnKeepsItsOrderByWithoutANullsClause; do
+            TestServerPinsIntegration_NotNullColumnKeepsItsOrderByWithoutANullsClause \
+            TestSchemaReaderIntegration_ListsEverySchemaButTheSystemOnes \
+            TestSchemaReaderIntegration_ListsViewsAndMaterializedViewsApartFromTables \
+            TestSchemaReaderIntegration_DescribesEveryListedCollectionOfEverySchema \
+            TestSchemaReaderIntegration_ReadsDefaultsIdentityAndGeneratedColumns; do
             if ! grep -qE "^\s*--- PASS: ${name} \(" /tmp/gotest.log; then
               echo "::error::${name} did not run to a pass"
               exit 1
