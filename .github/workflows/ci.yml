@@ -203,7 +203,7 @@ jobs:
             TestServerPinsIntegration_AliasesThatFoldTogetherAreRefusedBeforeTheServer \
             TestServerPinsIntegration_SelectAllOverAJoinListsTheBasesColumnsFirst \
             TestServerPinsIntegration_TextJoinKeysWithDifferentCollations \
-            TestServerPinsIntegration_RuntimeErrorAtRowNReachesTheCaller \
+            TestServerPinsIntegration_RuntimeErrorAtRowN \
             TestServerPinsIntegration_NotNullColumnKeepsItsOrderByWithoutANullsClause; do
             if ! grep -qE "^\s*--- PASS: ${name} \(" /tmp/gotest.log; then
               echo "::error::${name} did not run to a pass"

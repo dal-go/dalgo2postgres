@@ -100,7 +100,9 @@ func TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames(t *testing.T) 
 	}
 	f := openQueryFixtureWithOptions(t, dalgo2sql.DbOptions{Recordsets: recordsets}, "test_e2e_names", IdentifierFoldLower, end2endDDL)
 	ctx := context.Background()
-	if _, err := f.admin.ExecContext(ctx, `INSERT INTO dalgotest_cities (id, name, country) VALUES ('Tokyo_Tokyo', 'Tokyo', 'JP')`); err != nil {
+	// A complete row: Get into a struct refuses a NULL for a string field.
+	if _, err := f.admin.ExecContext(ctx, `INSERT INTO dalgotest_cities VALUES
+		('Tokyo_Tokyo', 'Tokyo', 'Tokyo', 'JP', 37400068, 2187, true, true, '1457-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatalf("INSERT: %v", err)
 	}
 	key := dalrecord.NewKeyWithID(models.CitiesCollection, "Tokyo_Tokyo")
