@@ -507,7 +507,9 @@ func TestSafeToDial(t *testing.T) {
 		want bool
 	}{
 		{"the driver cannot parse it", "host=h port=notaport", true},
-		{"the string is refused", `"postgres://u:p@h/d"`, true},
+		// Parses (the driver reads the quoted URL as a keyword string whose first
+		// setting name is not a name) and is refused: the misread branch decides.
+		{"the string is refused", `"postgres://u:p@h/d?sslmode=disable"`, true},
 		{"port 1 of this machine", "host=127.0.0.1 port=1", true},
 		{"a host that cannot be resolved", "host=a;b port=5432", true},
 		{"a name that may resolve", "host=db.example port=5432", false},

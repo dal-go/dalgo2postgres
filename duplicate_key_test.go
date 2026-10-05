@@ -104,6 +104,18 @@ func TestApplyPostgresDbOptionDefaults(t *testing.T) {
 		}
 	})
 
+	t.Run("the structured query dialect is always forced to postgres", func(t *testing.T) {
+		// "" is the legacy text emitter, "sqlite" and "mysql" are other emitters, and
+		// "nonsense" is refused by dalgo2sql at read time: none may survive.
+		for _, dialect := range []string{"", "sqlite", "mysql", "nonsense", "postgres"} {
+			opts := dalgo2sql.DbOptions{StructuredQueryDialect: dialect}
+			applyPostgresDbOptionDefaults(&opts)
+			if opts.StructuredQueryDialect != "postgres" {
+				t.Errorf("StructuredQueryDialect %q became %q, want postgres", dialect, opts.StructuredQueryDialect)
+			}
+		}
+	})
+
 	t.Run("Placeholder is always forced to the dollar dialect", func(t *testing.T) {
 		opts := dalgo2sql.DbOptions{Placeholder: dalgo2sql.PlaceholderQuestion}
 		applyPostgresDbOptionDefaults(&opts)

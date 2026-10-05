@@ -4,6 +4,13 @@
 // surface (transactions, recordset reader, Get/Set/Insert/Delete) and
 // adds PostgreSQL-native implementations of:
 //
+//   - structured queries, which dalgo2sql compiles with its typed PostgreSQL
+//     compiler (every value a bound argument, every name quoted) and which run
+//     filtering, ordering, grouping, aggregation and joins on the server; the
+//     constructors force the dialect, so the legacy text emitter is never reached,
+//     and [*Database] declares what the dialect runs on the server
+//     ([dal.QueryCapabilitiesProvider], [dal.NativeJoinProvider] and
+//     [dal.JoinFieldsProvider])
 //   - [dbschema.SchemaReader] for schema introspection via information_schema
 //     and pg_indexes
 //   - [ddl.SchemaModifier] for PostgreSQL-flavored CREATE / DROP / ALTER
@@ -42,8 +49,9 @@ type Database struct {
 	dal.DB         // delegate for the dal.DB surface
 	sqlDB  *sql.DB // direct handle for DDL + introspection queries
 
-	schema         string         // schema the reader inspects; "" means DefaultSchema
-	identifierMode IdentifierMode // how reader table names are matched
+	schema            string         // schema the reader inspects; "" means DefaultSchema
+	identifierMode    IdentifierMode // how names are matched by the reader and written by queries
+	identifierModeSet bool           // WithIdentifierMode was given (the zero mode is a real mode)
 }
 
 // NewDatabase opens a connection to the PostgreSQL server identified by dsn
@@ -58,8 +66,8 @@ type Database struct {
 //
 // Use [NewDatabaseWithOptions] when you need to supply per-collection
 // primary-key metadata (required for Insert/Get/Delete with map[string]any data).
-// The optional [Option] values choose the schema and table-name matching the
-// schema reader uses.
+// The optional [Option] values choose the schema the schema reader inspects and
+// how names are matched and written ([IdentifierMode]: lower-cased by default).
 func NewDatabase(dsn string, options ...Option) (*Database, error) {
 	return NewDatabaseWithOptions(dsn, dal.NewSchema(nil, nil), dalgo2sql.DbOptions{}, options...)
 }
@@ -79,9 +87,19 @@ func NewDatabase(dsn string, options ...Option) (*Database, error) {
 //	    })
 //
 // The optional [Option] values choose the PostgreSQL schema the schema reader
-// inspects ([WithSchema]) and whether it matches table names exactly
-// ([WithIdentifierMode]). A nil option is ignored; an unknown IdentifierMode is
-// an error, returned before any connection is attempted.
+// inspects ([WithSchema]) and whether names are matched by the reader and written
+// by structured queries exactly or lower-cased ([WithIdentifierMode]); the mode
+// may also be given as opts.IdentifierCase, but not as two different values. A nil
+// option is ignored; an unknown IdentifierMode or IdentifierCase, and two that
+// disagree, are an error, returned before any connection is attempted.
+//
+// Three fields of opts are replaced whatever the caller set: Placeholder (always
+// dollar markers), StructuredQueryDialect (always "postgres", so no structured
+// query reaches dalgo2sql's legacy text emitter) and IdentifierCase (resolved from
+// the mode above). IsAlreadyExists is defaulted only when nil. A caller's own
+// compiler is not accepted beside the dialect: NativeStructuredQueryCompiler,
+// NativeJoinEligibility and NativeJoinHintTranslator are an error too, returned before
+// any connection is attempted.
 //
 // A failure to open or reach the server is a [*ConnectionError], as for
 // [NewDatabase].
@@ -92,16 +110,15 @@ func NewDatabaseWithOptions(dsn string, schema dal.Schema, opts dalgo2sql.DbOpti
 // newDatabase is the body of [NewDatabaseWithOptions], taking the function that
 // opens the *sql.DB so tests can make the driver fail in every way a driver does.
 func newDatabase(dsn string, schema dal.Schema, opts dalgo2sql.DbOptions, options []Option, open sqlOpener) (*Database, error) {
-	if err := checkOptions(options); err != nil {
+	resolved, err := resolveSettings(opts, options)
+	if err != nil {
 		return nil, err
 	}
-	applyPostgresDbOptionDefaults(&opts)
-
 	sqlDB, err := openVerified(dsn, open)
 	if err != nil {
 		return nil, err
 	}
-	return newDatabaseFromSQL(sqlDB, schema, opts, options), nil
+	return newDatabaseFromSQL(sqlDB, schema, resolved, options), nil
 }
 
 // sqlOpener is [sql.Open]; it is a seam so tests can make the driver fail.
@@ -112,14 +129,15 @@ type sqlOpener func(driverName, dataSourceName string) (*sql.DB, error)
 // (told from the types in the driver's error, never from its text), plus the
 // host, port and database name of the driver's own parsed configuration, each only
 // when it passes a strict check and repeats neither the user name nor the
-// password. No text of dsn and no message of the driver or the server is copied
-// into it, and the driver's error is not reachable from it: both hold the
+// password. No other text of dsn and no message of the driver or the server is
+// copied into it, and the driver's error is not reachable from it: both hold the
 // credentials, whatever separator a string uses and however long a name is.
 //
 // A string the driver would misread (a quoted URL, a leading space, another
-// scheme, a key=value string whose host, user or database holds an equals sign) is refused before the driver is asked, with a [FailureMisread] error:
-// the text the driver takes for a setting name holds the credentials, and the
-// server it reaches would receive it.
+// scheme, a key=value string whose host, user or database holds an equals sign)
+// is refused before the driver is asked, with a [FailureMisread] error: the text
+// the driver takes for a setting name holds the credentials, and the server it
+// reaches would receive it.
 //
 // The driver is asked even when pgx cannot parse dsn: the string may be a name
 // registered with stdlib.RegisterConnConfig, which only the driver knows.

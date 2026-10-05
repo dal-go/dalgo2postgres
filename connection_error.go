@@ -86,12 +86,12 @@ func (k FailureKind) sentence(sqlState string) string {
 // when the connection to PostgreSQL cannot be opened or verified.
 //
 // Its text is built only from a fixed sentence chosen by Kind and from the parts
-// below that passed a strict check. Nothing from the connection string, and
-// nothing from the driver's or the server's own message, is ever copied into it:
-// those hold the user name, the password and other settings, and callers print
-// errors. For the same reason the driver's error is not reachable through
-// [errors.Unwrap], [errors.Is] or [errors.As]; branch on Kind and SQLState
-// instead.
+// below that passed a strict check. Nothing of the connection string but those
+// parts, and nothing from the driver's or the server's own message, is ever
+// copied into it: those hold the user name, the password and other settings, and
+// callers print errors. For the same reason the driver's error is not reachable
+// through [errors.Unwrap], [errors.Is] or [errors.As]; branch on Kind and
+// SQLState instead.
 //
 // A part that is empty was not known, or could not be named safely.
 type ConnectionError struct {
@@ -270,9 +270,35 @@ func isTLS(err error) bool {
 		return true
 	}
 	// An alert of the server, or one this side sends, comes back from crypto/tls
-	// as a *net.OpError around a type the package does not export.
-	var opErr *net.OpError
-	return errors.As(err, &opErr) && (opErr.Op == "remote error" || opErr.Op == "local error")
+	// as a *net.OpError around a type the package does not export. The driver
+	// joins one error per attempt, so the alert may follow a failed dial: the whole
+	// tree is walked, not only the first *net.OpError in it.
+	return anyInTree(err, func(err error) bool {
+		opErr, ok := err.(*net.OpError)
+		return ok && (opErr.Op == "remote error" || opErr.Op == "local error")
+	})
+}
+
+// anyInTree reports whether match is true for err or for any error reachable from
+// it through Unwrap() error or Unwrap() []error.
+func anyInTree(err error, match func(error) bool) bool {
+	if err == nil {
+		return false
+	}
+	if match(err) {
+		return true
+	}
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() error }:
+		return anyInTree(wrapped.Unwrap(), match)
+	case interface{ Unwrap() []error }:
+		for _, inner := range wrapped.Unwrap() {
+			if anyInTree(inner, match) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isNetwork(err error) bool {
