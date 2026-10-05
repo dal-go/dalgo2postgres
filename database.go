@@ -4,6 +4,10 @@
 // surface (transactions, recordset reader, Get/Set/Insert/Delete) and
 // adds PostgreSQL-native implementations of:
 //
+//   - structured queries, which dalgo2sql compiles with its typed PostgreSQL
+//     compiler (every value a bound argument, every name quoted) and which run
+//     filtering, ordering, grouping, aggregation and joins on the server; the
+//     constructors force the dialect, so the legacy text emitter is never reached
 //   - [dbschema.SchemaReader] for schema introspection via information_schema
 //     and pg_indexes
 //   - [ddl.SchemaModifier] for PostgreSQL-flavored CREATE / DROP / ALTER
@@ -59,8 +63,8 @@ type Database struct {
 //
 // Use [NewDatabaseWithOptions] when you need to supply per-collection
 // primary-key metadata (required for Insert/Get/Delete with map[string]any data).
-// The optional [Option] values choose the schema and table-name matching the
-// schema reader uses.
+// The optional [Option] values choose the schema the schema reader inspects and
+// how names are matched and written ([IdentifierMode]: lower-cased by default).
 func NewDatabase(dsn string, options ...Option) (*Database, error) {
 	return NewDatabaseWithOptions(dsn, dal.NewSchema(nil, nil), dalgo2sql.DbOptions{}, options...)
 }
@@ -80,9 +84,16 @@ func NewDatabase(dsn string, options ...Option) (*Database, error) {
 //	    })
 //
 // The optional [Option] values choose the PostgreSQL schema the schema reader
-// inspects ([WithSchema]) and whether it matches table names exactly
-// ([WithIdentifierMode]). A nil option is ignored; an unknown IdentifierMode is
-// an error, returned before any connection is attempted.
+// inspects ([WithSchema]) and whether names are matched by the reader and written
+// by structured queries exactly or lower-cased ([WithIdentifierMode]); the mode
+// may also be given as opts.IdentifierCase, but not as two different values. A nil
+// option is ignored; an unknown IdentifierMode or IdentifierCase, and two that
+// disagree, are an error, returned before any connection is attempted.
+//
+// Three fields of opts are replaced whatever the caller set: Placeholder (always
+// dollar markers), StructuredQueryDialect (always "postgres", so no structured
+// query reaches dalgo2sql's legacy text emitter) and IdentifierCase (resolved from
+// the mode above). IsAlreadyExists is defaulted only when nil.
 //
 // A failure to open or reach the server is a [*ConnectionError], as for
 // [NewDatabase].

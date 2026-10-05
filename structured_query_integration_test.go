@@ -306,7 +306,9 @@ func TestStructuredQueryIntegration_FilterWithEachConstantType(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f.trace.reset()
 			rows := f.rows(t, albumQuery().Where(tc.condition).SelectColumns(titleColumn()))
-			if got := titlesOf(rows); !reflect.DeepEqual(got, tc.wantTitles) && !(len(got) == 0 && len(tc.wantTitles) == 0) {
+			got := titlesOf(rows)
+			bothEmpty := len(got) == 0 && len(tc.wantTitles) == 0
+			if !bothEmpty && !reflect.DeepEqual(got, tc.wantTitles) {
 				t.Errorf("titles = %v, want %v", got, tc.wantTitles)
 			}
 			for _, sent := range f.trace.sent() {

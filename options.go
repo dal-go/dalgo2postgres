@@ -116,8 +116,9 @@ func (d *Database) resolveName(name string) string {
 // checked: the dalgo2sql options this package hands to dalgo2sql, with the dialect
 // forced and the identifier case resolved, and the identifier mode the reader uses.
 // resolveSettings is the only producer, and newDatabaseFromSQL, the only caller of
-// dalgo2sql.NewDatabase, takes nothing else, so no constructor of this package can
-// open a database whose structured queries reach dalgo2sql's legacy text emitter.
+// dalgo2sql.NewDatabase outside tests, takes nothing else, so no constructor of this
+// package can open a database whose structured queries reach dalgo2sql's legacy
+// text emitter.
 type settings struct {
 	db   dalgo2sql.DbOptions
 	mode IdentifierMode

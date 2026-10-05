@@ -85,8 +85,9 @@ result.
 - **A query with a subquery** (`EXISTS`, a scalar subquery, a derived source): DALgo reads
   each source with plain statements and combines them itself.
 - **A join the database declines**: the `ON` types differ (text with an integer, a boolean
-  with an integer), a key's type has no usable equality (`json`, `xml`, geometric types,
-  `oid`, the `reg*` types), or the compiler cannot write the query.
+  with an integer). dalgo2sql also declines a key whose type has no usable equality
+  (`json`, `xml`, geometric types, `oid`, the `reg*` types), and a query its compiler cannot
+  write; this repository's tests do not exercise those two.
 - **`FIRST` and `LAST`** are refused with an error, not run anywhere: PostgreSQL promises
   no row order for them, and this database declares no stable row order.
 
