@@ -445,7 +445,7 @@ func TestAccessIntegration_AFieldListOnAJoinedSourceIsRefusedWithNoStatement(t *
 		// whatever dal-go/dalgo does with a field rule on a joined source later.
 		f.trace.reset()
 		_, err := readThrough(ctx, session, joined().NewQuery().SelectColumns(dal.Column{Expression: dal.NewFieldRef("i", w.name("Total"))}))
-		refused("the hidden field of the joined source in the select list", err)
+		_ = refused("the hidden field of the joined source in the select list", err)
 
 		// A query that names only fields the lists allow is refused too: the rule is what the
 		// access layer cannot apply, not the query.

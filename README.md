@@ -296,9 +296,9 @@ observations, not rules to rely on.
   deletes from it, and an `Insert` whose field is 64 bytes long writes into the column of 63
   (`TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath` pins each statement and each
   row, in both identifier modes). The structured path refuses the same name before any
-  statement (the dialect holds a name to 63 bytes). The key paths build every other write
-  from the same names, so `Set` and `Update` are held to read the same way; they are not
-  separately tested. Keep the names of collections and fields in a key path to 63 bytes.
+  statement (the dialect holds a name to 63 bytes). `Set` and `Update` name their table and
+  columns through the same functions of dalgo2sql, so they are read to behave the same way;
+  they are not run. Keep the names of collections and fields in a key path to 63 bytes.
   Issue or pull request: not yet filed.
 - **A derived source** (a query in `FROM` or in a join, DTQL's `from: {query: ...}`) is refused:
   DALgo's engine asks the adapter for the columns of each source, and dalgo2sql answers for a
@@ -456,11 +456,12 @@ field or primary-key name that is a plain identifier (ASCII letters, digits and 
 not starting with a digit, at most 255 bytes), written as given and unquoted, so PostgreSQL
 folds it to lower case. Any other name is refused with an error that matches
 `dalgo2sql.ErrUnsafeName` before a statement is sent; a table whose name needs quoting cannot
-be addressed by key, whatever the identifier mode. **A name of 64 to 255 bytes is accepted and
+be addressed by key, whatever the identifier mode. **A name of 64 to 255 bytes is accepted, and
 PostgreSQL cuts it to 63**, so it addresses the table or column named by its first 63 bytes (a
-known limit of dal-go/dalgo2sql, see "Known limits"): keep these names to 63 bytes. A nested key addresses one table whose
-name joins the collections of the key and of its parents with an underscore, the key's own
-first (`pets_owners`), and the primary key is looked up in the recordset of that name.
+known limit of dal-go/dalgo2sql, see "Known limits"): keep these names to 63 bytes. A nested
+key addresses one table whose name joins the collections of the key and of its parents with an
+underscore, the key's own first (`pets_owners`), and the primary key is looked up in the
+recordset of that name.
 
 ## Schema reader options
 

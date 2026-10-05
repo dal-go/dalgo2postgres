@@ -288,7 +288,7 @@ func TestStructuredQueryIntegration_RecordKeysFromTheCatalog(t *testing.T) {
 	// without an error, and the records are keyed by the catalog's id and not by the code
 	// the recordset declares.
 	//
-	// KNOWN LIMIT of dal-go/dalgo2sql (issue: not yet filed; no fix is under way; not a
+	// KNOWN LIMIT of dal-go/dalgo2sql (issue: not yet filed; not a
 	// rule): the two cases that are not found FAIL when dalgo2sql folds the registered names
 	// too, and say what to assert instead. Until then a caller in fold-lower mode registers
 	// its recordsets under lower case names and spells the collection of every key the same
