@@ -117,6 +117,34 @@ jobs:
             echo "::error::no TestSchemaReaderIntegration_ test ran"
             exit 1
           fi
+          # The structured-query tests are the first place the typed compiler's
+          # statements and dalgo2sql's catalog queries meet a server; they skip on
+          # their own when the DSN does not reach them. The SKIP pattern matches a
+          # subtest's indented line too. A PASS line is then required for each test
+          # by name, so a test that is renamed, deleted or never reached fails the
+          # job instead of leaving it green on the others. Add a new test of the
+          # family to this list.
+          if grep -qE '^\s*--- SKIP: TestStructuredQueryIntegration_' /tmp/gotest.log; then
+            echo "::error::a structured-query integration test SKIPPED - the DSN did not reach the tests"
+            exit 1
+          fi
+          for name in \
+            CatalogOverEverySourceKind \
+            FilterWithEachConstantType \
+            OrderByLimitOffset \
+            GroupByHavingAndAggregates \
+            Join \
+            ArithmeticWithTheCast \
+            SelectAllWithAnExclusionFoldLower \
+            UnknownTableIsNotFoundWithASuggestion \
+            ExactModeAndQualifiedSchema \
+            ReadsRunOnOneLeasedConnection \
+            ContextEndsBetweenAndDuringTheStatements; do
+            if ! grep -qE "^\s*--- PASS: TestStructuredQueryIntegration_${name} \(" /tmp/gotest.log; then
+              echo "::error::TestStructuredQueryIntegration_${name} did not run to a pass"
+              exit 1
+            fi
+          done
         env:
           DALGO2POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/dalgo_test?sslmode=disable
       - name: Integration coverage floor

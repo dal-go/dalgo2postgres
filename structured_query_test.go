@@ -3,15 +3,17 @@ package dalgo2postgres
 import (
 	"context"
 	"database/sql"
-	"database/sql/driver"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/dalgo2sql"
+	dalrecord "github.com/dal-go/record"
+	"github.com/dal-go/record/update"
 )
 
 // The tests in this file run the real constructor body (newDatabase), the real
@@ -150,4 +152,401 @@ func TestNewDatabase_StructuredQueryNeverReachesTheLegacyEmitter(t *testing.T) {
 	}
 }
 
-var _ = driver.Value(nil)
+// Identifier case: this package's default folds names to lower case (its DDL does),
+// the exact mode writes them as the query spells them, and DbOptions.IdentifierCase
+// reaches the compiler as well as the option does.
+func TestNewDatabase_IdentifierModesDecideHowNamesAreWritten(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		opts      dalgo2sql.DbOptions
+		options   []Option
+		relation  string
+		statement string
+		columns   []catalogColumn
+	}{
+		{"the default folds to lower case", dalgo2sql.DbOptions{}, nil,
+			`"album"`, `SELECT "title" FROM "album"`,
+			[]catalogColumn{textColumn("title")}},
+		{"WithIdentifierMode(IdentifierExact)", dalgo2sql.DbOptions{}, []Option{WithIdentifierMode(IdentifierExact)},
+			`"Album"`, `SELECT "Title" FROM "Album"`,
+			[]catalogColumn{textColumn("Title")}},
+		{"DbOptions.IdentifierCase exact", dalgo2sql.DbOptions{IdentifierCase: dalgo2sql.IdentifierCaseExact}, nil,
+			`"Album"`, `SELECT "Title" FROM "Album"`,
+			[]catalogColumn{textColumn("Title")}},
+		{"DbOptions.IdentifierCase fold-lower", dalgo2sql.DbOptions{IdentifierCase: dalgo2sql.IdentifierCaseFoldLower}, nil,
+			`"album"`, `SELECT "title" FROM "album"`,
+			[]catalogColumn{textColumn("title")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sqlDB, mock := newStructuredMock(t)
+			db := openMockedDatabase(t, sqlDB, tc.opts, tc.options...)
+			mock.ExpectQuery(catalogStatement).WithArgs(tc.relation).WillReturnRows(catalogRows(tc.relation, tc.columns...))
+			mock.ExpectQuery(tc.statement).WillReturnRows(sqlmock.NewRows([]string{"x"}).AddRow("One"))
+			reader, err := db.ExecuteQueryToRecordsReader(context.Background(), albumFrom().NewQuery().SelectColumns(titleColumn()))
+			if err != nil {
+				t.Fatalf("ExecuteQueryToRecordsReader: %v", err)
+			}
+			if rows := readAll(t, reader); len(rows) != 1 || rows[0]["Title"] != "One" {
+				t.Errorf("rows = %v, want one row keyed by the name the query asked for (Title)", rows)
+			}
+		})
+	}
+}
+
+// Behaviour change (dalgo2sql v0.26.0): a table the catalog does not know is a
+// *dalgo2sql.TableNotFoundError that names the nearest table and, in the exact
+// mode, says names are case-sensitive; no statement is sent for it.
+func TestNewDatabase_UnknownTableIsATableNotFoundErrorWithASuggestion(t *testing.T) {
+	sqlDB, mock := newStructuredMock(t)
+	db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{}, WithIdentifierMode(IdentifierExact))
+	mock.ExpectQuery(catalogStatement).WithArgs(`"album"`).WillReturnRows(catalogRows(`"album"`))
+	mock.ExpectQuery("SELECT n.nspname::text, c.relname::text FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace " +
+		"WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND pg_catalog.has_table_privilege(c.oid, 'SELECT') " +
+		"AND CASE WHEN $1::text = '' THEN pg_catalog.pg_table_is_visible(c.oid) AND n.nspname NOT IN ('pg_catalog', 'information_schema') " +
+		"ELSE pg_catalog.lower(n.nspname::text) = pg_catalog.lower($1::text) END ORDER BY n.nspname, c.relname LIMIT 5000").
+		WithArgs("").
+		WillReturnRows(sqlmock.NewRows([]string{"nspname", "relname"}).AddRow("public", "Album").AddRow("public", "Artist"))
+
+	q := dal.From(dal.NewRootCollectionRef("album", "")).NewQuery().SelectColumns(titleColumn())
+	_, err := db.ExecuteQueryToRecordsReader(context.Background(), q)
+	var notFound *dalgo2sql.TableNotFoundError
+	if !errors.Is(err, dalgo2sql.ErrTableNotFound) || !errors.As(err, &notFound) {
+		t.Fatalf("error = %v, want a table-not-found error", err)
+	}
+	if notFound.Name != "album" || notFound.SuggestedName != "Album" || !notFound.CaseSensitive {
+		t.Errorf("error = %+v, want album not found, suggesting Album, case-sensitive", *notFound)
+	}
+	if want := `table "album" not found; did you mean "Album"? Table names are case-sensitive.`; !strings.Contains(err.Error(), want) {
+		t.Errorf("message = %q, want it to contain %q", err, want)
+	}
+}
+
+// Behaviour change (dalgo2sql v0.26.0): aggregation is declared native, so DALgo
+// sends GROUP BY, HAVING and the aggregates to the server in one statement (SUM and
+// AVG cast to double precision, COUNT, MIN and MAX native) instead of reading every
+// row and aggregating in memory.
+func TestNewDatabase_AggregationRunsOnTheServer(t *testing.T) {
+	sqlDB, mock := newStructuredMock(t)
+	db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
+	mock.ExpectQuery(catalogStatement).WithArgs(`"album"`).WillReturnRows(albumCatalog(`"album"`))
+	mock.ExpectQuery(`SELECT "title", COUNT(*) AS "n", ((SUM("price"))::double precision) AS "total", MIN("albumid") AS "first" ` +
+		`FROM "album" GROUP BY "title" HAVING COUNT(*) > $1::bigint`).
+		WithArgs(int64(1)).
+		WillReturnRows(sqlmock.NewRows([]string{"title", "n", "total", "first"}).AddRow("Dup", int64(2), 19.5, int64(3)))
+
+	q := albumFrom().NewQuery().
+		GroupBy(dal.NewFieldRef("", "Title")).
+		Having(dal.NewComparison(dal.NewAggregate(dal.COUNT, false, dal.Star()), dal.GreaterThen, dal.NewConstant(1))).
+		SelectColumns(
+			titleColumn(),
+			dal.Column{Expression: dal.NewAggregate(dal.COUNT, false, dal.Star()), Alias: "n"},
+			dal.SumAs(dal.NewFieldRef("", "Price"), "total"),
+			dal.MinAs(dal.NewFieldRef("", "AlbumId"), "first"),
+		)
+	reader, err := db.ExecuteQueryToRecordsReader(context.Background(), q)
+	if err != nil {
+		t.Fatalf("ExecuteQueryToRecordsReader: %v", err)
+	}
+	rows := readAll(t, reader)
+	if len(rows) != 1 || rows[0]["Title"] != "Dup" || rows[0]["n"] != int64(2) || rows[0]["total"] != 19.5 || rows[0]["first"] != int64(3) {
+		t.Errorf("rows = %v, want the one group the server returned, keyed as the query asked", rows)
+	}
+}
+
+// Behaviour change (dalgo2sql v0.26.0): FIRST and LAST need a stable input order,
+// which PostgreSQL does not promise and this adapter does not declare, so DALgo
+// refuses the query itself and sends nothing to the server.
+func TestNewDatabase_FirstAndLastAreRefusedBeforeAnythingIsSent(t *testing.T) {
+	for name, column := range map[string]dal.Column{
+		"FIRST": dal.FirstAs(dal.NewFieldRef("", "Title"), "x"),
+		"LAST":  dal.LastAs(dal.NewFieldRef("", "Title"), "x"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			sqlDB, _ := newStructuredMock(t) // no expectation: any statement fails the test
+			db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
+			q := albumFrom().NewQuery().GroupBy(dal.NewFieldRef("", "AlbumId")).SelectColumns(column)
+			_, err := db.ExecuteQueryToRecordsReader(context.Background(), q)
+			if err == nil || !strings.Contains(err.Error(), "FIRST/LAST require a provider-declared stable input order") {
+				t.Errorf("error = %v, want the planner's refusal of FIRST/LAST", err)
+			}
+		})
+	}
+}
+
+// Behaviour change (dalgo2sql v0.26.0): a read inside a transaction compiles
+// with the dialect too (it used the legacy emitter before), and the catalog lookup
+// runs on the transaction, so the two statements see one session.
+func TestNewDatabase_ReadInATransactionUsesTheTypedCompiler(t *testing.T) {
+	sqlDB, mock := newStructuredMock(t)
+	db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
+	mock.ExpectBegin()
+	mock.ExpectQuery(catalogStatement).WithArgs(`"album"`).WillReturnRows(albumCatalog(`"album"`))
+	mock.ExpectQuery(`SELECT "title" FROM "album" WHERE "albumid" = $1::bigint`).WithArgs(int64(7)).
+		WillReturnRows(sqlmock.NewRows([]string{"title"}).AddRow("Seven"))
+	mock.ExpectCommit()
+
+	err := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+		q := albumFrom().NewQuery().Where(dal.WhereField("AlbumId", dal.Equal, 7)).SelectColumns(titleColumn())
+		reader, err := tx.ExecuteQueryToRecordsReader(ctx, q)
+		if err != nil {
+			return err
+		}
+		if rows := readAll(t, reader); len(rows) != 1 || rows[0]["Title"] != "Seven" {
+			t.Errorf("rows = %v, want the Seven row", rows)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("RunReadonlyTransaction: %v", err)
+	}
+}
+
+// Behaviour change (dalgo2sql v0.26.0): a NUMERIC column, which pgx delivers as
+// text, reaches the caller as a float64.
+func TestNewDatabase_NumericTextIsReadAsFloat64(t *testing.T) {
+	sqlDB, mock := newStructuredMock(t)
+	db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
+	mock.ExpectQuery(catalogStatement).WithArgs(`"album"`).WillReturnRows(albumCatalog(`"album"`))
+	mock.ExpectQuery(`SELECT "price" FROM "album"`).WillReturnRows(
+		sqlmock.NewRowsWithColumnDefinition(sqlmock.NewColumn("price").OfType("NUMERIC", "")).
+			AddRow("12.50").AddRow("NaN").AddRow(nil))
+	q := albumFrom().NewQuery().SelectColumns(dal.Column{Expression: dal.NewFieldRef("", "Price")})
+	reader, err := db.ExecuteQueryToRecordsReader(context.Background(), q)
+	if err != nil {
+		t.Fatalf("ExecuteQueryToRecordsReader: %v", err)
+	}
+	rows := readAll(t, reader)
+	if len(rows) != 3 || rows[0]["Price"] != 12.5 || rows[2]["Price"] != nil {
+		t.Fatalf("rows = %v, want 12.5 as a float64 and NULL as nil", rows)
+	}
+	if nan, ok := rows[1]["Price"].(float64); !ok || nan == nan {
+		t.Errorf("NaN = %#v, want a float64 NaN", rows[1]["Price"])
+	}
+}
+
+// Behaviour change (dalgo2sql v0.26.0): a text query's arguments are bound
+// (dal.QueryArg used to be handed to the driver as a struct and failed every call).
+func TestNewDatabase_TextQueryArgumentsAreBound(t *testing.T) {
+	sqlDB, mock := newStructuredMock(t)
+	db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
+	mock.ExpectQuery(`SELECT title FROM album WHERE albumid = $1 AND title = $2`).WithArgs(int64(7), hostile).
+		WillReturnRows(sqlmock.NewRows([]string{"title"}).AddRow("Seven"))
+	q := dal.NewTextQuery(`SELECT title FROM album WHERE albumid = $1 AND title = $2`, nil,
+		dal.QueryArg{Value: int64(7)}, dal.QueryArg{Value: hostile})
+	reader, err := db.ExecuteQueryToRecordsReader(context.Background(), q)
+	if err != nil {
+		t.Fatalf("ExecuteQueryToRecordsReader: %v", err)
+	}
+	if rows := readAll(t, reader); len(rows) != 1 {
+		t.Errorf("rows = %v, want one", rows)
+	}
+}
+
+// keyOptions give the recordsets of the key tests their primary key.
+func keyOptions(tables ...string) dalgo2sql.DbOptions {
+	recordsets := map[string]*dalgo2sql.Recordset{}
+	for _, table := range tables {
+		recordsets[table] = dalgo2sql.NewRecordset(table, dalgo2sql.Table, []dal.FieldRef{dal.Field("ID")})
+	}
+	return dalgo2sql.DbOptions{Recordsets: recordsets}
+}
+
+// Behaviour change (dalgo2sql v0.26.0): key reads and writes refuse a collection,
+// field or primary-key name that is not a plain identifier, with an error that
+// matches dalgo2sql.ErrUnsafeName, and send no statement. A PostgreSQL table whose
+// name needs quoting cannot be addressed by key.
+func TestNewDatabase_KeyWritesAndReadsRefuseUnsafeNames(t *testing.T) {
+	const evil = `x"; DROP TABLE widgets; --`
+	for _, tc := range []struct {
+		name       string
+		collection string
+		pk         string
+		data       map[string]any
+		position   string
+	}{
+		{"a collection with a space", "Order Details", "ID", map[string]any{"Name": "x"}, "collection"},
+		{"a collection that is quoted", `"widgets"`, "ID", map[string]any{"Name": "x"}, "collection"},
+		{"a collection with an injection", evil, "ID", map[string]any{"Name": "x"}, "collection"},
+		{"a field with a space", "widgets", "ID", map[string]any{"first name": "x"}, "field"},
+		{"a field with an injection", "widgets", "ID", map[string]any{evil: "x"}, "field"},
+		{"a primary key with a space", "widgets", "the id", map[string]any{"Name": "x"}, "primary key"},
+		{"a non-ASCII field", "widgets", "ID", map[string]any{"Naïve": "x"}, "field"},
+	} {
+		recordsets := map[string]*dalgo2sql.Recordset{
+			tc.collection: dalgo2sql.NewRecordset(tc.collection, dalgo2sql.Table, []dal.FieldRef{dal.Field(tc.pk)}),
+		}
+		key := dalrecord.NewKeyWithID(tc.collection, "id1")
+		newRecord := func() dalrecord.Record { return dalrecord.NewRecordWithData(key, tc.data) }
+		check := func(t *testing.T, err error) {
+			t.Helper()
+			if !errors.Is(err, dalgo2sql.ErrUnsafeName) || !strings.Contains(err.Error(), tc.position) {
+				t.Errorf("error = %v, want one matching ErrUnsafeName that names the %s", err, tc.position)
+			}
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			sqlDB, _ := newStructuredMock(t) // no expectation: any statement fails the test
+			db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{Recordsets: recordsets})
+			ctx := context.Background()
+			check(t, db.Insert(ctx, newRecord()))
+			check(t, db.Set(ctx, newRecord()))
+			updated := "Name"
+			if tc.position == "field" {
+				for field := range tc.data {
+					updated = field
+				}
+			}
+			check(t, db.Update(ctx, key, []update.Update{update.ByFieldName(updated, "y")}))
+			err := db.Delete(ctx, key)
+			if tc.position == "field" {
+				// a delete names no field
+				if err == nil || errors.Is(err, dalgo2sql.ErrUnsafeName) {
+					t.Errorf("Delete: error = %v, want the mock's refusal of an unexpected statement", err)
+				}
+				return
+			}
+			check(t, err)
+		})
+	}
+}
+
+// Behaviour change (dalgo2sql v0.26.0): a name a key read or write accepts is
+// written as given: unquoted and not folded, so PostgreSQL folds it to lower case
+// itself. (The structured compiler quotes; the key paths do not.)
+func TestNewDatabase_KeyPathsWritePlainNamesUnquoted(t *testing.T) {
+	sqlDB, mock := newStructuredMock(t)
+	db := openMockedDatabase(t, sqlDB, keyOptions("Widgets"))
+	ctx := context.Background()
+	key := dalrecord.NewKeyWithID("Widgets", "id1")
+
+	mock.ExpectExec("INSERT INTO Widgets(ID, Name) VALUES ($1, $2)").WithArgs("id1", "w1").WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := db.Insert(ctx, dalrecord.NewRecordWithData(key, map[string]any{"Name": "w1"})); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	// Two fields: the assignments are separated by a comma (they were not before).
+	mock.ExpectExec("UPDATE Widgets SET Name = $1, Size = $2 WHERE ID = $3").WithArgs("w2", int64(3), "id1").WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := db.Update(ctx, key, []update.Update{update.ByFieldName("Name", "w2"), update.ByFieldName("Size", int64(3))}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	mock.ExpectExec("DELETE FROM Widgets WHERE ID = $1").WithArgs("id1").WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := db.Delete(ctx, key); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+}
+
+// Behaviour change (dalgo2sql v0.26.0): a nested key addresses one table, whose
+// name joins the key's collection and its parents' with an underscore, in every
+// statement (it was the key's own collection before), and its primary key is looked
+// up in the recordset of that name.
+func TestNewDatabase_NestedKeyUsesOneJoinedTableName(t *testing.T) {
+	sqlDB, mock := newStructuredMock(t)
+	db := openMockedDatabase(t, sqlDB, keyOptions("pets_owners"))
+	ctx := context.Background()
+	owner := dalrecord.NewKeyWithID("owners", "o1")
+	key := dalrecord.NewKeyWithParentAndID(owner, "pets", "p1")
+
+	mock.ExpectExec("INSERT INTO pets_owners(ID, Name) VALUES ($1, $2)").WithArgs("p1", "Rex").WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := db.Insert(ctx, dalrecord.NewRecordWithData(key, map[string]any{"Name": "Rex"})); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	mock.ExpectExec("DELETE FROM pets_owners WHERE ID = $1").WithArgs("p1").WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := db.Delete(ctx, key); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+}
+
+// A structured read holds one connection from its catalog lookup to the end of its
+// rows: the reader gives it back when it is closed, when its rows are read to the
+// end, when its statement fails, and when its context ends. (The integration test
+// pins the same with pgx under it.)
+func TestNewDatabase_StructuredReadLeasesOneConnection(t *testing.T) {
+	query := func() dal.StructuredQuery { return albumFrom().NewQuery().SelectColumns(titleColumn()) }
+	expectRead := func(mock sqlmock.Sqlmock) {
+		mock.ExpectQuery(catalogStatement).WithArgs(`"album"`).WillReturnRows(albumCatalog(`"album"`))
+		mock.ExpectQuery(`SELECT "title" FROM "album"`).WillReturnRows(sqlmock.NewRows([]string{"title"}).AddRow("a").AddRow("b"))
+	}
+	inUse := func(sqlDB *sql.DB) int { return sqlDB.Stats().InUse }
+
+	t.Run("held while the reader is open, back on Close", func(t *testing.T) {
+		sqlDB, mock := newStructuredMock(t)
+		db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
+		expectRead(mock)
+		reader, err := db.ExecuteQueryToRecordsReader(context.Background(), query())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := inUse(sqlDB); got != 1 {
+			t.Errorf("connections in use while the reader is open = %d, want 1", got)
+		}
+		if err := reader.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if got := inUse(sqlDB); got != 0 {
+			t.Errorf("connections in use after Close = %d, want 0", got)
+		}
+	})
+	t.Run("back when the rows are read to the end", func(t *testing.T) {
+		sqlDB, mock := newStructuredMock(t)
+		db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
+		expectRead(mock)
+		reader, err := db.ExecuteQueryToRecordsReader(context.Background(), query())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for {
+			if _, err := reader.Next(); err != nil {
+				if !errors.Is(err, dal.ErrNoMoreRecords) {
+					t.Fatalf("Next: %v", err)
+				}
+				break
+			}
+		}
+		if got := inUse(sqlDB); got != 0 {
+			t.Errorf("connections in use at the end of the rows (no Close) = %d, want 0", got)
+		}
+		_ = reader.Close()
+	})
+	t.Run("back when the catalog lookup fails", func(t *testing.T) {
+		sqlDB, mock := newStructuredMock(t)
+		db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
+		boom := errors.New("boom")
+		mock.ExpectQuery(catalogStatement).WithArgs(`"album"`).WillReturnError(boom)
+		if _, err := db.ExecuteQueryToRecordsReader(context.Background(), query()); !errors.Is(err, boom) {
+			t.Fatalf("error = %v, want the lookup's own", err)
+		}
+		if got := inUse(sqlDB); got != 0 {
+			t.Errorf("connections in use after a failed lookup = %d, want 0", got)
+		}
+	})
+	t.Run("back when the statement fails", func(t *testing.T) {
+		sqlDB, mock := newStructuredMock(t)
+		db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
+		boom := errors.New("boom")
+		mock.ExpectQuery(catalogStatement).WithArgs(`"album"`).WillReturnRows(albumCatalog(`"album"`))
+		mock.ExpectQuery(`SELECT "title" FROM "album"`).WillReturnError(boom)
+		if _, err := db.ExecuteQueryToRecordsReader(context.Background(), query()); !errors.Is(err, boom) {
+			t.Fatalf("error = %v, want the statement's own", err)
+		}
+		if got := inUse(sqlDB); got != 0 {
+			t.Errorf("connections in use after a failed statement = %d, want 0", got)
+		}
+	})
+	t.Run("back when the context ends, with no Close", func(t *testing.T) {
+		sqlDB, mock := newStructuredMock(t)
+		db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
+		expectRead(mock)
+		ctx, cancel := context.WithCancel(context.Background())
+		reader, err := db.ExecuteQueryToRecordsReader(ctx, query())
+		if err != nil {
+			t.Fatal(err)
+		}
+		cancel()
+		deadline := time.Now().Add(5 * time.Second)
+		for inUse(sqlDB) != 0 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if got := inUse(sqlDB); got != 0 {
+			t.Errorf("connections in use after the context ended = %d, want 0", got)
+		}
+		_ = reader.Close()
+	})
+}
