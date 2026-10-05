@@ -19,9 +19,10 @@ import (
 // drop the canary, comment markers, a NUL byte, a name of 64 bytes (one more than a PostgreSQL
 // identifier holds) and a non-ASCII name.
 //
-// The answer to every probe is rows, an empty result or an error the adapter builds before it
-// sends anything; the one exception is a NUL byte in a value, which the server itself refuses
-// as a data exception. After all of them the canary table exists with its rows unchanged, and
+// The answer to every probe is rows, an empty result or an error the adapter or DALgo builds (for
+// a name PostgreSQL cannot hold, a NUL byte or 64 bytes; in a join DALgo's engine may have read the
+// other sources first, with plain statements); the one exception is a NUL byte in a value, which
+// the server itself refuses as a data exception. After all of them the canary table exists with its rows unchanged, and
 // the statement recorder shows the rest: outside a quoted identifier no statement holds a
 // semicolon, a comment marker or a quote, every string value reached the server as a bound
 // argument, and the statement of a value does not change with the value.
@@ -259,8 +260,12 @@ func TestProbesIntegration_NothingACallerWritesBecomesSQL(t *testing.T) {
 							t.Errorf("%s: error = %v, want the quoted name to be found and rows to come back", label, run.err)
 						}
 					default:
-						if run.err == nil || len(run.statements) != 0 {
-							t.Errorf("%s: error = %v after %d statements, want an error built before any statement", label, run.err, len(run.statements))
+						// The adapter or DALgo builds the error. In a join DALgo's engine may have
+						// read the other sources first, with plain statements, which the checks
+						// below hold to the same rules; the server never sees the name.
+						var pgErr *pgconn.PgError
+						if run.err == nil || errors.As(run.err, &pgErr) {
+							t.Errorf("%s: error = %v, want an error built by the adapter or DALgo, not the server's", label, run.err)
 						}
 					}
 
@@ -356,12 +361,13 @@ func classifyProbe(run adapterRun) string {
 		return "rows"
 	case run.err == nil:
 		return "an empty result"
-	case len(run.statements) == 0:
-		return "an error built before any statement"
 	}
 	var pgErr *pgconn.PgError
 	if errors.As(run.err, &pgErr) {
 		return "the server's refusal, SQLSTATE " + pgErr.Code
 	}
-	return "an error after a statement"
+	if len(run.statements) == 0 {
+		return "an error built before any statement"
+	}
+	return "an error built by DALgo's engine after plain reads"
 }

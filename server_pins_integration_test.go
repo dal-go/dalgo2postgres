@@ -570,15 +570,64 @@ func TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimi
 			OrderBy(by, dal.AscendingField("id")).Limit(3).
 			SelectColumns(dal.Column{Expression: field("id")})
 	}
+	// The control: the same order with the NULLS clause written is DALgo's, so the clause the
+	// compiler leaves out is what the answer below lacks.
 	for _, tc := range []struct {
-		label string
-		by    dal.OrderExpression
+		order string
 		want  []int
 	}{
-		{"ascending: the NULL rows first", dal.AscendingField("v"), []int{2, 4, 3}},
-		{"descending: the NULL rows last", dal.DescendingField("v"), []int{1, 5, 3}},
+		{`"v" ASC NULLS FIRST`, []int{2, 4, 3}},
+		{`"v" DESC NULLS LAST`, []int{1, 5, 3}},
+	} {
+		var got []int
+		rows, err := f.admin.QueryContext(ctx, `SELECT id FROM nv ORDER BY `+tc.order+`, id ASC LIMIT 3`)
+		if err != nil {
+			t.Fatalf("control: %v", err)
+		}
+		for rows.Next() {
+			var id int
+			if err := rows.Scan(&id); err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, id)
+		}
+		_ = rows.Close()
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("control ORDER BY %s: ids = %v, want %v", tc.order, got, tc.want)
+		}
+	}
+
+	// KNOWN DEFECT of dal-go/dalgo2sql (reported for it; a WRONG RESULT, not a rule): the
+	// catalog says the column is NOT NULL, the compiler leaves out the NULLS clause for it, and
+	// the server's default puts the NULL rows last ascending and first descending, the opposite
+	// of DALgo's rule. With LIMIT 3 the two NULL rows are cut off ascending, and they are the
+	// whole first page descending. The compiler should write the NULLS clause when the
+	// column's constraint is not validated (pg_constraint.convalidated is false), or never leave
+	// it out. Each case below FAILS when that is fixed and says what to assert instead.
+	const fixed = "dalgo2sql now orders a column with a NOT VALID not-null constraint as DALgo does: assert here the documented rows (ascending [2 4 3], descending [1 5 3]) and the statement with NULLS FIRST / NULLS LAST, and delete this pin and the README's known limit"
+	for _, tc := range []struct {
+		label                string
+		by                   dal.OrderExpression
+		statement            string
+		documented, observed []int
+	}{
+		{"ascending", dal.AscendingField("v"), `SELECT "id" FROM "nv" ORDER BY "v" ASC, "id" ASC LIMIT $1`, []int{2, 4, 3}, []int{3, 5, 1}},
+		{"descending", dal.DescendingField("v"), `SELECT "id" FROM "nv" ORDER BY "v" DESC, "id" ASC LIMIT $1`, []int{1, 5, 3}, []int{2, 4, 1}},
 	} {
 		o := observe(t, f, ordered(tc.by))
-		check(t, "ORDER BY v "+tc.label+", LIMIT 3", o, rowsOf(tc.want...))
+		t.Logf("KNOWN DEFECT of dal-go/dalgo2sql (a wrong result, not a rule): ORDER BY v %s, LIMIT 3\n    statement: %s\n    arguments: %s\n    result:    %s\n    DALgo's rule gives: rows %v",
+			tc.label, o.statement, argsText(o.args), o.result(), tc.documented)
+		switch {
+		case rowsOf(tc.documented...).matches(o):
+			t.Errorf("ORDER BY v %s: got the documented rows %v: %s", tc.label, tc.documented, fixed)
+		case !rowsOf(tc.observed...).matches(o):
+			t.Errorf("ORDER BY v %s: got %s, want the pinned rows %v (the known defect)", tc.label, o.result(), tc.observed)
+		}
+		if o.statement != tc.statement && !strings.Contains(o.statement, "NULLS") {
+			t.Errorf("ORDER BY v %s: statement = %s, want %s (the known defect)", tc.label, o.statement, tc.statement)
+		}
+		if strings.Contains(o.statement, "NULLS") {
+			t.Errorf("ORDER BY v %s: statement = %s has a NULLS clause: %s", tc.label, o.statement, fixed)
+		}
 	}
 }

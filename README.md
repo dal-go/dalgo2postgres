@@ -261,9 +261,27 @@ What the server answers, as observed:
   `IdentifierFoldLower`; in `IdentifierExact` they are two columns.
 
 Known limits. Each is pinned by a test that prints the statement and the server's answer.
-The three that follow are **defects or limits of dal-go/dalgo2sql**, reported to it; no fix of
+The ones that follow are **defects or limits of dal-go/dalgo2sql**, reported to it; no fix of
 any of them is under way yet. Each test FAILS when the fix is released and says what to assert
 instead, so the line here is then deleted. They are observations, not rules to rely on.
+
+- **A column with a `NOT VALID` not-null constraint** (PostgreSQL 18; `ALTER TABLE ... ADD
+  CONSTRAINT ... NOT NULL col NOT VALID`) that holds NULL rows is **sorted wrongly**, which is a
+  wrong result and not a refusal. The catalog calls the column NOT NULL, the compiler writes
+  no `NULLS` clause for it, and the server's default puts the NULLs last ascending and first
+  descending, the opposite of DALgo's rule: `ORDER BY v LIMIT 3` over the values 3, NULL, 1, NULL,
+  2 returns 1, 2, 3 where DALgo's rule gives the two NULL rows first
+  (`TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimit` pins the
+  statement and the rows). Do not rely on the order of such a column until it is fixed, or
+  validate the constraint.
+- **A derived source** (a query in `FROM` or in a join, DTQL's `from: {query: ...}`) is refused:
+  DALgo's engine asks the adapter for the columns of each source, and dalgo2sql answers for a
+  table and refuses for a derived source with `not supported: source dal.QuerySource`. Four
+  cases of the subquery fixtures are listed in `testdata/postgres-divergences.json` for it.
+- **A wildcard between two explicit columns of a join** is not compiled for the server (the
+  compiler refuses a wildcard that does not come first), so the join is declined to DALgo's
+  engine, which reads each table with one statement and joins in memory, within its bounds. The
+  fixture `chinook-wildcard` is listed in the divergence file for it.
 
 - **A recordset registered under a name with capitals** (`Ck_Mixed`) is found only by a query
   that spells the source exactly so; dalgo2sql folds the name the query spells, never the
@@ -302,6 +320,49 @@ Limits of this combination that are not defects of one library:
   wider rule. Spell the names as stored, and give a row condition no wider allow behind it;
   `TestAccessIntegration_UnconditionalAllowBehindAConditionDecidesTheRow` asserts the
   fall-through case.
+
+### What the integration tests prove about queries
+
+Every one runs in the Conformance job on PostgreSQL 17 and 18, and the job fails when one is
+skipped, missing or not passing.
+
+- **The corpus.** The DTQL fixtures of dal-go/dalgo under `testdata/joins` and
+  `testdata/subqueries` are vendored with their SHA-256 digests and the module version they come
+  from, and a test fails when a file or a digest changes, when the files are not those of the
+  dalgo the module requires, and when a bump of dalgo has not been followed by vendoring them
+  again. The join fixtures run on hand-written PostgreSQL DDL (quoted mixed-case names, `text
+  COLLATE "C"`, the exact identifier mode), each as one statement in the server, and the
+  subquery fixtures run in DALgo's engine over plain reads. Each case is compared with its
+  fixture (numbers within 1e-9); a case that differs is listed in
+  `testdata/postgres-divergences.json` with the reason, and the test fails for a difference that
+  is not listed and for a listed case that no longer differs
+  (`TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer`,
+  `TestFixturesIntegration_SubqueriesRunInDALgoOverLeafReads`).
+- **Pushdown.** A `GROUP BY` with `HAVING` over 200,000 rows and 150,000 groups, and a join of
+  50,000 orders to their customers (20,000,000 bytes of text), are each one statement in the
+  server, with an answer past the bounds of DALgo's engine (100,000 groups; 10,000 joined rows and
+  16 MiB). The negative control runs the same queries over the same tables without the native
+  route (a database with no dialect for the grouped query, DALgo's engine over the adapter's plain
+  reads for the join), and the engine refuses them with its own limit; the same shapes over a few
+  rows are answered by both with the same rows (`TestPushdownIntegration_`).
+- **Access.** Through `access.SecureReadSession`: a row condition whose value holds a quote
+  returns exactly the permitted rows, the value is a bound argument, and the table is whole
+  afterwards; the alias of a hidden field and a projection with no permitted column are denied; a
+  hidden field in a join's `ON` condition at any depth, in a filter, in an order and in a scan
+  order is denied with no statement sent to the server; a session with no policy is denied; and a
+  wider allow behind a conditional rule decides the row (`TestAccessIntegration_`, each in both
+  identifier modes). A field list is held to every field that orders the query, so an `ORDER BY`
+  on a field of a joined source is denied by the listed source's list: it fails closed. The shared access controls of dal-go/dalgo run beside them in `TestEndToEnd`.
+- **Probes.** A canary table, and a quote, a double quote, doubled quotes, a semicolon with a
+  second statement, comment markers, a NUL byte, a name of 64 bytes and a non-ASCII name written
+  where a value, a field, a collection, an alias, an `ORDER BY` field, a `GROUP BY` field and a
+  join key go, in both identifier modes. Each answer is rows, an empty result or an error built
+  before any statement (a NUL byte in a value is the server's own refusal); outside its quoted
+  identifiers no statement holds a marker, every value is a bound argument, and the canary is
+  unchanged (`TestProbesIntegration_NothingACallerWritesBecomesSQL`).
+- **PostgreSQL 18.** A column with a `NOT VALID` not-null constraint and NULL rows under
+  `ORDER BY` with `LIMIT` (`TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimit`;
+  on 17 it asserts that the syntax is refused).
 
 ### The connection a read holds
 
@@ -528,7 +589,9 @@ DALGO2POSTGRES_TEST_DSN='postgres://ovdb:ovdb@127.0.0.1:15432/ovdb?sslmode=disab
 
 `TestEndToEnd` then reports those two as skips that name the reason; the Conformance job
 fails on any other skip, and on a test of the families `TestEndToEnd`, `TestTypeMatrixIntegration_`,
-`TestServerPinsIntegration_` and `TestStructuredQueryIntegration_` that does not run to a pass.
+`TestServerPinsIntegration_`, `TestStructuredQueryIntegration_`, `TestFixturesIntegration_`,
+`TestPushdownIntegration_`, `TestAccessIntegration_` and `TestProbesIntegration_` that does not run
+to a pass.
 
 ## PostgreSQL driver: `github.com/jackc/pgx/v5/stdlib` (pure Go, `CGO_ENABLED=0`)
 

@@ -3,7 +3,6 @@ package dalgo2postgres
 import (
 	"context"
 	"errors"
-	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,14 +14,14 @@ import (
 // Pushdown: a grouped query and a join that DALgo's own engine cannot answer, because they
 // are past its bounds, are answered by the server in one statement. DALgo's engine is in
 // memory and bounded (dalgo v0.89.6, dal/aggregation_execute.go and dal/join_execute.go):
-// an aggregation stops at 100,000 groups with "group limit 100000 exceeded", a join at
-// 10,000 rows (and at 16 MiB of rows) with a join_plan error, and neither returns a partial
-// result. So an answer past those bounds cannot have been made in memory, and the tests
-// below ask for one: 150,000 groups out of 200,000 rows, and 50,000 joined rows of 400 bytes
-// of text each, which is 20,000,000 bytes. The negative control runs the very same queries
-// against the same tables through a database with no dialect, which has no native route,
-// and they are refused; the same shapes over a handful of rows are answered by both, with
-// the same rows, so the refusal is the bound and not the shape.
+// an aggregation stops at 100,000 groups (or at 64 MiB retained, whichever it meets first), a
+// join at 10,000 fetched rows (and at 16 MiB of rows) with a query_limit or join_plan error, and
+// neither returns a partial result. So an answer past those bounds cannot have been made in
+// memory, and the tests below ask for one: 150,000 groups out of 200,000 rows, and 50,000 joined
+// rows of 400 bytes of text each, which is 20,000,000 bytes. The negative control runs the very
+// same queries against the same tables without the native route, and they are refused; the same
+// shapes over a handful of rows are answered by both, with the same rows, so the refusal is the
+// bound and not the shape.
 //
 // They run against PostgreSQL and skip unless DALGO2POSTGRES_TEST_DSN is set; CI fails when a
 // TestPushdownIntegration_ test skips or is missing.
@@ -201,18 +200,39 @@ func TestPushdownIntegration_JoinOver50000RowsRunsOnTheServer(t *testing.T) {
 
 // The negative control. A database with no dialect has no native route: it declares no
 // aggregation and accepts no join, so DALgo's engine runs the same queries in memory over
-// plain reads of the tables, and over the bounds it refuses them. Without this test the two
+// plain reads of the tables, and over its bounds it refuses them. Without this test the two
 // above would pass for any database that answers.
+//
+// Three refusals, as the engine gives them: a grouped query over 200,000 rows stops at the
+// engine's retained-bytes limit (64 MiB, which it reaches before the 100,000 groups); a join
+// asked of a database with no dialect is refused before any statement, because it cannot say
+// the columns of its sources; and the join through DALgo's engine over the adapter's own
+// plain reads stops at the engine's fetched-rows bound (10,000, a query_limit diagnostic).
 //
 // The same queries over the _small tables, a few rows, are answered by the engine and by the
 // server with the same rows: the refusal at scale is the bound, not the shape of the query
-// and not the legacy reads.
+// and not the leaf reads.
 func TestPushdownIntegration_WithoutTheNativeRouteTheSameQueriesAreRefused(t *testing.T) {
 	f := openQueryFixture(t, "test_pd_control", IdentifierFoldLower, pushdownDDL())
 	ctx := context.Background()
 	inMemory := dalgo2sql.NewDatabase(f.sqlDB, dal.NewSchema(nil, nil), dalgo2sql.DbOptions{})
 	readRows := func(db dal.DB, q dal.StructuredQuery) ([]map[string]any, error) {
 		records, err := dal.ExecuteQueryAndReadAllToRecords(ctx, q, db)
+		rows := make([]map[string]any, 0, len(records))
+		for _, rec := range records {
+			data, _ := rec.Data().(map[string]any)
+			rows = append(rows, data)
+		}
+		return rows, err
+	}
+	// engineJoin runs a join through DALgo's own engine over the adapter's plain reads, the
+	// native route not asked.
+	engineJoin := func(q dal.StructuredQuery) ([]map[string]any, error) {
+		reader, err := dal.ExecuteRecursiveQuery(ctx, f.db, q)
+		if err != nil {
+			return nil, err
+		}
+		records, err := dal.ReadAllToRecords(ctx, reader)
 		rows := make([]map[string]any, 0, len(records))
 		for _, rec := range records {
 			data, _ := rec.Data().(map[string]any)
@@ -230,45 +250,37 @@ func TestPushdownIntegration_WithoutTheNativeRouteTheSameQueriesAreRefused(t *te
 		}
 	}
 
-	t.Run("a grouped query past 100,000 groups is refused", func(t *testing.T) {
+	t.Run("a grouped query over 200,000 rows is refused by the engine's limit", func(t *testing.T) {
 		f.trace.reset()
 		rows, err := readRows(inMemory, groupedQuery("pd_fact"))
 		t.Logf("error: %v (rows returned: %d); statements: %v", err, len(rows), statementsSent(f))
-		if err == nil || !strings.Contains(err.Error(), "group limit") {
-			t.Errorf("error = %v, want DALgo's group limit: the query was not answered by the engine", err)
+		if err == nil || !strings.HasPrefix(err.Error(), "dalgo aggregation:") || !strings.Contains(err.Error(), "limit") {
+			t.Errorf("error = %v, want one of DALgo's aggregation limits: the query was not answered by the engine", err)
 		}
 		if len(rows) != 0 {
 			t.Errorf("%d rows were returned with the refusal, want none: a partial result is worse than none", len(rows))
 		}
 		noServerSideWork(t)
 	})
-	t.Run("a join past 10,000 rows is refused", func(t *testing.T) {
+	t.Run("a join asked of a database with no dialect is refused before any statement", func(t *testing.T) {
 		f.trace.reset()
 		rows, err := readRows(inMemory, joinQuery("pd_order", "pd_customer"))
 		t.Logf("error: %v (rows returned: %d); statements: %v", err, len(rows), statementsSent(f))
 		var join *dal.JoinValidationError
+		if err == nil || !errors.As(err, &join) || len(rows) != 0 || len(statementsSent(f)) != 0 {
+			t.Errorf("error = %v, rows %d, statements %v; want a join_plan refusal with no row and no statement", err, len(rows), statementsSent(f))
+		}
+	})
+	t.Run("the engine over the adapter's plain reads stops a join at its fetched-rows bound", func(t *testing.T) {
+		f.trace.reset()
+		rows, err := engineJoin(joinQuery("pd_order", "pd_customer"))
+		t.Logf("error: %v (rows returned: %d); statements: %v", err, len(rows), statementsSent(f))
 		var query *dal.QueryValidationError
-		if err == nil || (!errors.As(err, &join) && !errors.As(err, &query)) {
-			t.Errorf("error = %v, want DALgo's join bound: the query was not answered by the engine", err)
+		if err == nil || !errors.As(err, &query) || query.Category != "query_limit" {
+			t.Errorf("error = %v, want DALgo's query_limit diagnostic: the join was not answered by the engine", err)
 		}
 		if len(rows) != 0 {
 			t.Errorf("%d rows were returned with the refusal, want none", len(rows))
-		}
-		noServerSideWork(t)
-	})
-	t.Run("the engine's own leaf reads of the adapter refuse the join too", func(t *testing.T) {
-		// The same refusal through the existing seam of DALgo: the generic engine over
-		// the adapter's plain reads, the native join route not asked.
-		f.trace.reset()
-		reader, err := dal.ExecuteRecursiveQuery(ctx, f.db, joinQuery("pd_order", "pd_customer"))
-		if err == nil {
-			_, err = dal.ReadAllToRecords(ctx, reader)
-		}
-		t.Logf("error: %v; statements: %v", err, statementsSent(f))
-		var join *dal.JoinValidationError
-		var query *dal.QueryValidationError
-		if err == nil || (!errors.As(err, &join) && !errors.As(err, &query)) {
-			t.Errorf("error = %v, want DALgo's join bound", err)
 		}
 		noServerSideWork(t)
 	})
@@ -297,15 +309,17 @@ func TestPushdownIntegration_WithoutTheNativeRouteTheSameQueriesAreRefused(t *te
 			t.Fatalf("native join: %v", err)
 		}
 		f.trace.reset()
-		memoryJoin, err := readRows(inMemory, joinQuery("pd_order_small", "pd_customer_small"))
+		memoryJoin, err := engineJoin(joinQuery("pd_order_small", "pd_customer_small"))
 		if err != nil {
 			t.Fatalf("in-memory join: %v", err)
 		}
 		noServerSideWork(t)
 		checkJoinRows(t, nativeJoin, smallJoinRow)
 		checkJoinRows(t, memoryJoin, smallJoinRow)
-		if !reflect.DeepEqual(nativeJoin, memoryJoin) {
-			t.Error("the engine's joined rows differ from the server's")
+		gotJoin, _ := normalizeRows(memoryJoin)
+		wantJoin, _ := normalizeRows(nativeJoin)
+		if difference := rowDifference(gotJoin, wantJoin); difference != "" {
+			t.Errorf("the engine's joined rows differ from the server's: %s", difference)
 		}
 	})
 }
