@@ -90,6 +90,13 @@ result.
 - **`FIRST` and `LAST`** are refused with an error, not run anywhere: PostgreSQL promises
   no row order for them, and this database declares no stable row order.
 
+DALgo's engine reads each source as the catalog names its columns and matches the names a
+query spells against them exactly. So in `IdentifierFoldLower` a query that runs there must
+spell its names as the catalog stores them (lower case, for a database this package
+created): a subquery that reads `Title` from a column stored as `title` is answered with
+`field "Title" is unavailable in "a"`. The native path accepts any case. A join that DALgo
+runs itself is read by the same engine.
+
 ### Identifier modes
 
 `IdentifierFoldLower`, the default, lower-cases every name before it quotes it, which is

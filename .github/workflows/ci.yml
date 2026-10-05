@@ -138,6 +138,7 @@ jobs:
             CountDistinct \
             PlansJoinsOnTheServerOrInDALgo \
             SubqueryRunsInDALgoOverPlainReads \
+            ConstantOfAnotherTypeThanItsColumnIsAServerError \
             SelectAllWithAnExclusionFoldLower \
             UnknownTableIsNotFoundWithASuggestion \
             ExactModeAndQualifiedSchema \

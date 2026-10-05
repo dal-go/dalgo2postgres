@@ -3,8 +3,10 @@ package dalgo2postgres
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -582,5 +584,119 @@ func TestNewDatabase_DeclaresWhatItRunsOnTheServer(t *testing.T) {
 	}
 	if _, ok := dal.As[dal.NativeJoinProvider](db.DB); !ok {
 		t.Error("the backend declares no native join provider")
+	}
+}
+
+// Behaviour change (dalgo2sql v0.26.0): a keys-only query that names no order is
+// ordered ascending by the primary key (it had no defined order before).
+func TestNewDatabase_KeysOnlyQueryIsOrderedByThePrimaryKey(t *testing.T) {
+	sqlDB, mock := newStructuredMock(t)
+	db := openMockedDatabase(t, sqlDB, keyOptions("widgets"))
+	mock.ExpectQuery(catalogStatement).WithArgs(`"widgets"`).WillReturnRows(catalogRows(`"widgets"`, textColumn("id"), textColumn("name")))
+	mock.ExpectQuery(`SELECT * FROM "widgets" ORDER BY "id" ASC NULLS FIRST`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("a").AddRow("b"))
+	q := dal.From(dal.NewRootCollectionRef("widgets", "")).NewQuery().SelectKeysOnly(reflect.String)
+	reader, err := db.ExecuteQueryToRecordsReader(context.Background(), q)
+	if err != nil {
+		t.Fatalf("ExecuteQueryToRecordsReader: %v", err)
+	}
+	defer func() { _ = reader.Close() }()
+	var ids []any
+	for {
+		rec, err := reader.Next()
+		if errors.Is(err, dal.ErrNoMoreRecords) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		ids = append(ids, rec.Key().ID)
+	}
+	if want := []any{"a", "b"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("keys = %v, want %v", ids, want)
+	}
+}
+
+type widgetRow struct {
+	ID        string
+	FirstName string
+}
+
+// Behaviour change (dalgo2sql v0.26.0): Get into a struct matches a column to a field
+// without regard to case and underscores (first_name reaches FirstName), and a column
+// that no field matches is an error that names it (scany used to decide).
+func TestNewDatabase_GetIntoAStructMatchesColumnsLeniently(t *testing.T) {
+	get := func(t *testing.T, columns ...string) (*widgetRow, error) {
+		sqlDB, mock := newStructuredMock(t)
+		db := openMockedDatabase(t, sqlDB, keyOptions("widgets"))
+		row := sqlmock.NewRows(columns)
+		values := make([]driver.Value, len(columns))
+		for i := range values {
+			values[i] = "x" + columns[i]
+		}
+		mock.ExpectQuery("SELECT ID, FirstName FROM widgets WHERE ID = $1").WithArgs("w1").WillReturnRows(row.AddRow(values...))
+		data := &widgetRow{}
+		record := dalrecord.NewRecordWithData(dalrecord.NewKeyWithID("widgets", "w1"), data)
+		return data, db.Get(context.Background(), record)
+	}
+	t.Run("a column in another case and with an underscore", func(t *testing.T) {
+		data, err := get(t, "first_name")
+		if err != nil || data.FirstName != "xfirst_name" {
+			t.Errorf("data = %+v, err = %v; want first_name to reach FirstName", data, err)
+		}
+	})
+	t.Run("a column no field matches is named", func(t *testing.T) {
+		_, err := get(t, "nickname")
+		if err == nil || !strings.Contains(err.Error(), `column "nickname": no corresponding field in dalgo2postgres.widgetRow`) {
+			t.Errorf("err = %v, want the column and the struct named", err)
+		}
+	})
+}
+
+// Behaviour change (dalgo2sql v0.26.0): an Insert whose key has an ID and whose
+// recordset has no primary key is an error, not a panic.
+func TestNewDatabase_InsertWithoutAPrimaryKeyIsAnErrorNotAPanic(t *testing.T) {
+	sqlDB, _ := newStructuredMock(t) // no expectation: nothing may be sent
+	db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
+	record := dalrecord.NewRecordWithData(dalrecord.NewKeyWithID("widgets", "w1"), map[string]any{"Name": "x"})
+	err := db.Insert(context.Background(), record)
+	if err == nil || !strings.Contains(err.Error(), "primary key is not defined for recordset widgets") {
+		t.Errorf("error = %v, want one that says no primary key is defined for widgets", err)
+	}
+}
+
+// A batch with one record whose name is refused sends nothing at all: the whole batch
+// is checked before its first statement (the good record would otherwise be written).
+func TestNewDatabase_BatchesWithAnUnsafeNameSendNothing(t *testing.T) {
+	sqlDB, mock := newStructuredMock(t) // only the begin and the rollback of a transaction are expected
+	db := openMockedDatabase(t, sqlDB, keyOptions("widgets"))
+	ctx := context.Background()
+	good := func() dalrecord.Record {
+		return dalrecord.NewRecordWithData(dalrecord.NewKeyWithID("widgets", "g1"), map[string]any{"Name": "x"})
+	}
+	bad := func() dalrecord.Record {
+		return dalrecord.NewRecordWithData(dalrecord.NewKeyWithID("widgets", "b1"), map[string]any{"first name": "x"})
+	}
+	refused := func(err error) bool { return errors.Is(err, dalgo2sql.ErrUnsafeName) }
+	mock.ExpectBegin() // SetMulti on the database handle runs inside a transaction
+	mock.ExpectRollback()
+	if err := db.SetMulti(ctx, []dalrecord.Record{good(), bad()}); !refused(err) {
+		t.Errorf("SetMulti: error = %v", err)
+	}
+	updates := []update.Update{update.ByFieldName("first name", "y")}
+	keys := []*dalrecord.Key{dalrecord.NewKeyWithID("widgets", "g1"), dalrecord.NewKeyWithID("widgets", "g2")}
+	if err := db.UpdateMulti(ctx, keys, updates); !refused(err) {
+		t.Errorf("UpdateMulti: error = %v", err)
+	}
+	if err := db.DeleteMulti(ctx, []*dalrecord.Key{dalrecord.NewKeyWithID("widgets", "g1"), dalrecord.NewKeyWithID(`"widgets"`, "g2")}); !refused(err) {
+		t.Errorf("DeleteMulti: error = %v", err)
+	}
+	mock.ExpectBegin()
+	mock.ExpectRollback()
+	err := db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+		return tx.InsertMulti(ctx, []dalrecord.Record{good(), bad()})
+	})
+	if !refused(err) {
+		t.Errorf("InsertMulti in a transaction: error = %v", err)
 	}
 }
