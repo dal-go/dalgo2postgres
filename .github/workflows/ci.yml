@@ -63,12 +63,21 @@ jobs:
   # No test code needed changing: the DB-backed tests already skip unless
   # DALGO2POSTGRES_TEST_DSN is set, and TestConformance creates and drops its
   # own table, so a running server and a DSN are the whole requirement.
+  #
+  # It runs on two server versions, a matrix on the service image: 17, the version the
+  # fleet runs, and 18, the newest. Each leg is a job of its own and each must pass;
+  # DALGO2POSTGRES_EXPECT_SERVER_MAJOR makes the version test fail if a leg met another
+  # server than the one it names.
   integration:
-    name: Conformance (PostgreSQL)
+    name: Conformance (PostgreSQL ${{ matrix.postgres }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['17', '18']
     services:
       postgres:
-        image: postgres:17
+        image: postgres:${{ matrix.postgres }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -153,6 +162,7 @@ jobs:
             ReadsRunOnOneLeasedConnection \
             RecordsetReader \
             RecordsCarryTheirKey \
+            RecordKeysFromTheCatalog \
             ContextEndsBetweenAndDuringTheStatements; do
             if ! grep -qE "^\s*--- PASS: TestStructuredQueryIntegration_${name} \(" /tmp/gotest.log; then
               echo "::error::TestStructuredQueryIntegration_${name} did not run to a pass"
@@ -192,6 +202,7 @@ jobs:
             TestEndToEnd/query/access_conditions \
             TestEndToEnd/query/access_field_lists \
             TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames \
+            TestServerVersionIntegration_IsTheOneTheJobNames \
             TestTypeMatrixIntegration_FilterByColumnTypeAndConstantType \
             TestTypeMatrixIntegration_ProjectionAndOrderBy \
             TestTypeMatrixIntegration_EveryIntegerAndFloatType \
@@ -213,6 +224,7 @@ jobs:
           done
         env:
           DALGO2POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/dalgo_test?sslmode=disable
+          DALGO2POSTGRES_EXPECT_SERVER_MAJOR: ${{ matrix.postgres }}
       - name: Integration coverage floor
         # The floor that matters: this is the only job where the database
         # tests run. Measured as CI runs it (CI log "Integration coverage"):

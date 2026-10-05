@@ -540,14 +540,20 @@ func TestTypeMatrixIntegration_ProjectionAndOrderBy(t *testing.T) {
 			if len(viaRecordset) != 3 {
 				t.Fatalf("recordset reader returned %d rows, want 3", len(viaRecordset))
 			}
-			// KNOWN LIMITATION, a finding for dalgo and dalgo2sql: a typed column of a
-			// recordset holds no NULL, so the reader puts the zero value of the column's type
-			// where the database has NULL (dalgo2sql reader_recordset.go, DefaultValue), and
-			// a caller of the recordset reader cannot tell a NULL from 0, false, "" or the
-			// zero time. The records reader above returns nil for it.
+			// KNOWN DEFECT of the recordset reader, not a rule: a typed column of a recordset
+			// holds no NULL, so the reader puts the zero value of the column's type where the
+			// database has NULL (dalgo2sql reader_recordset.go, DefaultValue), and a caller of
+			// the recordset reader cannot tell a NULL from 0, false, "" or the zero time. The
+			// records reader above returns nil for the same cell, and that is asserted. The fix
+			// is the work of dal-go/dalgo2sql (task SQL-W4) and no release has it yet; this
+			// pin FAILS when the reader returns nil, and the line to assert instead is then
+			// "viaRecordset[2] == nil", as for the records reader.
 			zero := reflect.Zero(reflect.TypeOf(col.values[0])).Interface()
-			if !sameValue(viaRecordset[0], col.values[0]) || !sameValue(viaRecordset[1], col.values[1]) || !sameValue(viaRecordset[2], zero) {
-				t.Errorf("recordset projection of %s = %s, want %s: the values with the type's zero value, %v, where the row is NULL",
+			t.Logf("    KNOWN DEFECT of the recordset reader (dal-go/dalgo2sql, task SQL-W4 is fixing it; not a rule): the NULL row reads as %v, the zero value of the type; the records reader above returns nil for it", valuesText([]any{zero}))
+			if viaRecordset[2] == nil {
+				t.Errorf("recordset projection of %s = %s: the NULL row is now nil, so the defect is fixed in dalgo2sql: assert viaRecordset[2] == nil here, as for the records reader, and delete this pin and the README's known limit", col.name, valuesText(viaRecordset))
+			} else if !sameValue(viaRecordset[0], col.values[0]) || !sameValue(viaRecordset[1], col.values[1]) || !sameValue(viaRecordset[2], zero) {
+				t.Errorf("recordset projection of %s = %s, want %s: the values with the type's zero value, %v, where the row is NULL (the known defect)",
 					col.name, valuesText(viaRecordset), valuesText([]any{col.values[0], col.values[1], zero}), zero)
 			}
 

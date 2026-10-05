@@ -73,8 +73,10 @@ func openMockedDatabase(t *testing.T, sqlDB *sql.DB, opts dalgo2sql.DbOptions, o
 	return db
 }
 
-// catalogColumns are the columns of the catalog lookup's answer.
-var catalogColumns = []string{"name", "attname", "data_type", "category", "type_oid", "type_elem", "attnotnull", "nondeterministic"}
+// catalogColumns are the columns of the catalog lookup's answer. The last, pk, is the
+// catalog's own primary key flag (dalgo2sql v0.26.3): the mocked sources declare none, so
+// every row says false and the keys come from the options a test passes.
+var catalogColumns = []string{"name", "attname", "data_type", "category", "type_oid", "type_elem", "attnotnull", "nondeterministic", "pk"}
 
 // catalogColumn is one column of a source in a mocked catalog answer.
 type catalogColumn struct {
@@ -94,7 +96,7 @@ var (
 func catalogRows(relation string, columns ...catalogColumn) *sqlmock.Rows {
 	rows := sqlmock.NewRows(catalogColumns)
 	for _, c := range columns {
-		rows.AddRow(relation, c.name, c.dataType, c.category, c.oid, int64(0), c.notNull, false)
+		rows.AddRow(relation, c.name, c.dataType, c.category, c.oid, int64(0), c.notNull, false, false)
 	}
 	return rows
 }
@@ -719,7 +721,7 @@ func TestNewDatabase_ForwardsTheJoinAnswers(t *testing.T) {
 	joinCatalog := func() *sqlmock.Rows {
 		rows := catalogRows(`"album"`, intColumn("albumid", true), textColumn("title"), intColumn("artistid", true))
 		for _, c := range []catalogColumn{intColumn("artistid", true), textColumn("name")} {
-			rows.AddRow(`"artist"`, c.name, c.dataType, c.category, c.oid, int64(0), c.notNull, false)
+			rows.AddRow(`"artist"`, c.name, c.dataType, c.category, c.oid, int64(0), c.notNull, false, false)
 		}
 		return rows
 	}
@@ -872,34 +874,64 @@ func TestNewDatabase_RecordsCarryTheirKey(t *testing.T) {
 			t.Errorf("data = %v, want both selected columns", data)
 		}
 	})
-	t.Run("no primary key configured: the collection, and a placeholder where the ID would be", func(t *testing.T) {
-		// dalgo2sql v0.26.0 gives such a record the name of its helper column as its ID, not
-		// an identity of the row; this pins it so that a bump that changes it is seen.
+	t.Run("no primary key configured, none in the catalog: the rows are keyed by their ordinal", func(t *testing.T) {
+		// Up to dalgo2sql v0.26.0 such a record carried the name of the reader's helper column
+		// as its ID, the same for every record, an identity of no row. With v0.26.3 the
+		// catalog is asked for the key; this source has none (the mocked rows say so), so
+		// the records are keyed by ordinal, "0", "1", ... The server tests of the catalog's
+		// key are TestStructuredQueryIntegration_RecordKeysFromTheCatalog.
 		got := run(t, dalgo2sql.DbOptions{}, idAndName, `SELECT "name" FROM "widgets"`,
-			sqlmock.NewRows([]string{"name"}).AddRow("One"),
+			sqlmock.NewRows([]string{"name"}).AddRow("One").AddRow("Two"),
 			widgets().SelectColumns(nameColumn))
-		if len(got) != 1 || got[0].Key().Collection() != "widgets" || got[0].Key().ID != "__dalgo_record_id" {
-			t.Fatalf("records = %v, want one keyed widgets/__dalgo_record_id", got)
+		if len(got) != 2 {
+			t.Fatalf("records = %d, want 2", len(got))
+		}
+		for i, record := range got {
+			if key := record.Key(); key.Collection() != "widgets" || key.ID != strconv.Itoa(i) {
+				t.Errorf("record %d: key = %v, want widgets/%d", i, key, i)
+			}
 		}
 		if data := got[0].Data(); !reflect.DeepEqual(data, map[string]any{"Name": "One"}) {
 			t.Errorf("data = %v, want only Name", data)
 		}
 	})
-	// dalgo2sql looks the recordset up by the source name exactly as the query spells it,
-	// also in the mode that folds names: the statement reads the table (it writes
-	// "widgets" whatever the case), but the recordset registered as widgets is not found
-	// for a query that spells Widgets, so no key is read and every record carries the
-	// placeholder, silently. Register the recordset under the spelling the queries use.
-	t.Run("the recordset is found by the source name as the query spells it", func(t *testing.T) {
+	t.Run("the catalog's primary key keys the records when nothing else names one", func(t *testing.T) {
+		pk := textColumn("id")
+		catalog := sqlmock.NewRows(catalogColumns).
+			AddRow(`"widgets"`, "id", pk.dataType, pk.category, pk.oid, int64(0), false, false, true).
+			AddRow(`"widgets"`, "name", "text", "S", int64(25), int64(0), false, false, false)
+		sqlDB, mock := newStructuredMock(t)
+		db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
+		mock.ExpectQuery(catalogStatement).WithArgs(`"widgets"`).WillReturnRows(catalog)
+		mock.ExpectQuery(`SELECT "name", "id" AS "__dalgo_record_id" FROM "widgets"`).
+			WillReturnRows(sqlmock.NewRows([]string{"name", "__dalgo_record_id"}).AddRow("One", "w1"))
+		reader, err := db.ExecuteQueryToRecordsReader(context.Background(), widgets().SelectColumns(nameColumn))
+		if err != nil {
+			t.Fatalf("ExecuteQueryToRecordsReader: %v", err)
+		}
+		defer func() { _ = reader.Close() }()
+		record, err := reader.Next()
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if key := record.Key(); key.Collection() != "widgets" || key.ID != "w1" {
+			t.Errorf("key = %v, want widgets/w1, the catalog's primary key", key)
+		}
+	})
+	// dalgo2sql finds the recordset of the source in the mode that folds names under the
+	// name the query spells and under that name folded to lower case, as the catalog lookup
+	// folds it (v0.26.3; with v0.26.0 a query spelling Widgets did not find the recordset
+	// registered as widgets, and every record carried the placeholder, silently).
+	t.Run("the recordset is found by the source name as the query spells it, and folded", func(t *testing.T) {
 		spelledWithACapital := dal.From(dal.NewRootCollectionRef("Widgets", "")).NewQuery().SelectColumns(nameColumn)
-		got := run(t, keyOptions("widgets"), idAndName, `SELECT "name" FROM "widgets"`,
-			sqlmock.NewRows([]string{"name"}).AddRow("One").AddRow("Two"), spelledWithACapital)
+		got := run(t, keyOptions("widgets"), idAndName, `SELECT "name", "id" AS "__dalgo_record_id" FROM "widgets"`,
+			sqlmock.NewRows([]string{"name", "__dalgo_record_id"}).AddRow("One", "w1").AddRow("Two", "w2"), spelledWithACapital)
 		if len(got) != 2 {
 			t.Fatalf("records = %d, want 2", len(got))
 		}
 		for i, record := range got {
-			if key := record.Key(); key.Collection() != "Widgets" || key.ID != "__dalgo_record_id" {
-				t.Errorf("record %d: key = %v, want Widgets/__dalgo_record_id: the recordset registered as widgets is not the one a query spelled Widgets finds", i, key)
+			if key := record.Key(); key.Collection() != "Widgets" || key.ID != fmt.Sprintf("w%d", i+1) {
+				t.Errorf("record %d: key = %v, want Widgets/w%d: the recordset registered as widgets is the one a query spelled Widgets finds", i, key, i+1)
 			}
 		}
 	})
@@ -1009,8 +1041,9 @@ func TestNewDatabase_BatchesWithAnUnsafeNameSendNothing(t *testing.T) {
 		return dalrecord.NewRecordWithData(dalrecord.NewKeyWithID("widgets", "b1"), map[string]any{"first name": "x"})
 	}
 	refused := func(err error) bool { return errors.Is(err, dalgo2sql.ErrUnsafeName) }
-	mock.ExpectBegin() // SetMulti on the database handle runs inside a transaction
-	mock.ExpectRollback()
+	// SetMulti on the database handle sends nothing: with dalgo2sql v0.26.3 and dalgo
+	// v0.89.6 it refuses the unsafe name before it opens the transaction it opened (and
+	// rolled back) with v0.26.0 and v0.89.4.
 	if err := db.SetMulti(ctx, []dalrecord.Record{good(), bad()}); !refused(err) {
 		t.Errorf("SetMulti: error = %v", err)
 	}
