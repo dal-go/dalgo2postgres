@@ -100,7 +100,7 @@ func TestGuardedBackend_AnswersAsTheBackendUnderIt(t *testing.T) {
 
 // The backend has no InsertMulti and no UpdateRecord, so DALgo does not take it for one that
 // writes outside a transaction through its own pipeline: the writes of the Database outside a
-// transaction go to the statement as they always have.
+// transaction go straight to the statement.
 func TestGuardedBackend_IsNotAWriteSession(t *testing.T) {
 	if _, ok := any(newGuardedBackend(nil)).(dal.WriteSession); ok {
 		t.Error("the guarded backend is a dal.WriteSession: DALgo would put a validation pipeline on the writes outside a transaction")

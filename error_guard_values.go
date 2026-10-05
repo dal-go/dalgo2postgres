@@ -207,7 +207,7 @@ func newGuardedBackend(inner dal.Backend) guardedBackend {
 
 // guardDatabase puts the guard under the framework layer of a database dalgo2sql made: the
 // backend of inner is guarded, and a framework layer is built over it again. inner's own layer is
-// not kept: the transaction a worker is given has one layer of validation and hooks, as before.
+// not kept: the transaction a worker is given has one layer of validation and hooks.
 func guardDatabase(inner dal.DB) dal.DB {
 	return dal.NewDB(newGuardedBackend(dal.BackendOf(inner)))
 }

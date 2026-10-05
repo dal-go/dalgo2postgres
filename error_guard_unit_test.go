@@ -183,7 +183,7 @@ func TestLeaveAdapter_ContextErrorsStayFindable(t *testing.T) {
 }
 
 // The error of a connection that fails at the open is built the same way, so it answers
-// errors.Is for its context's error too, and its text and fields are what they were.
+// errors.Is for its context's error too, and its text, fields and unwrapping are the open's own.
 func TestDescribe_ContextErrorsAreFindableAtTheOpenToo(t *testing.T) {
 	failure := dsnInfo{}.describe("PingContext", fmt.Errorf("ping: %w", context.DeadlineExceeded))
 	if !errors.Is(failure, context.DeadlineExceeded) || errors.Is(failure, context.Canceled) {
