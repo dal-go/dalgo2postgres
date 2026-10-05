@@ -170,12 +170,19 @@ connection's `search_path` resolves. `WithSchema` affects only the schema reader
   `__dalgo_record_id` is only the name of that column, never an ID. A query that reads into a
   record of its own (`SelectIntoRecord`) fills that record.
   `TestStructuredQueryIntegration_RecordKeysFromTheCatalog` runs every case on the server.
-- **How a recordset is found.** The recordset is looked up under the source name as the query
-  spells it and, in `IdentifierFoldLower`, under that name in lower case, so a recordset
-  registered as `album` is found for `album`, `Album` and `ALBUM` (the record's collection is
-  the spelling the query used). A recordset registered under a name with capitals is found
-  only by a query that spells it exactly so: see the known limits, and register recordsets
-  under lower case names in `IdentifierFoldLower`.
+- **How a recordset is found** follows two rules. For a **query**, the recordset is looked up
+  under the source name as the query spells it and, in `IdentifierFoldLower`, under that name in
+  lower case, so a recordset registered as `album` is found for `album`, `Album` and `ALBUM` (the
+  record's collection is the spelling the query used); a recordset registered under a name with
+  capitals is found only by a query that spells it exactly so (see the known limits). For a
+  **key read or write** (`Get`, `Exists`, `Set` and the rest) the recordset is found only under
+  the collection of the key exactly as the key spells it, with no folding: a key spelled `Album`
+  does not find a recordset registered as `album`, and `Exists` and `Get` answer an error that
+  matches `ErrRecordNotFound` (the primary key is not defined for the recordset), with no
+  statement sent, for a row that exists
+  (`TestStructuredQueryIntegration_KeyReadFindsItsRecordsetOnlyUnderTheCollectionAsSpelled`).
+  So register each recordset under the one spelling the keys use, and in `IdentifierFoldLower`
+  spell the collection of every key in lower case when queries may spell it in another case.
 - The rows of a grouped query (one with `GroupBy` or an aggregate) are keyed by their
   ordinal in the result, whether a primary key is configured or not: a group is not a row of
   the table, so no key is read and no hidden column is added.
@@ -205,10 +212,13 @@ What the server answers, as observed:
 
 - **A number against a number** compares as numbers, whatever the types: an integer column
   against `1.5` is a miss, not an error, and `2.0` as a `float64` finds the integer 2.
-- **A constant of another type than its column is a server error, never a wrong match**: a
-  number, a bool, a time or bytes against `boolean`, `date`, `timestamp`, `timestamptz`,
-  `uuid`, `jsonb` or `text`, a bool, a time or bytes against a number, and bytes against any
-  of the columns above (none is a `bytea`), are `42883` (no such operator).
+- **A constant the column's type has no comparison with is a server error, never a wrong
+  match.** The pairs the server refuses with `42883` (no such operator) are: a number or bytes
+  against `boolean`, `date`, `timestamp`, `timestamptz`, `uuid`, `jsonb` or `text`; a bool
+  against any column but `boolean`; a `time.Time` against any column but `date`, `timestamp` and
+  `timestamptz`; and bytes against any column but `bytea`. A bool against `boolean` and a
+  `time.Time` against `date`, `timestamp` and `timestamptz` are compared and match (the
+  session's time zone decides the last: see below).
 - **A string** is read by the server as the column's own type, so a date, a UUID or a JSON
   document is matched by its text; a string that is no value of the type is `22P02` (`22007`
   for a date or a time). Any string is a `text`.
@@ -251,9 +261,9 @@ What the server answers, as observed:
   `IdentifierFoldLower`; in `IdentifierExact` they are two columns.
 
 Known limits. Each is pinned by a test that prints the statement and the server's answer.
-The first is a **defect or limit of dal-go/dalgo2sql** that is reported to it, and no fix is
-under way yet; its test FAILS when the fix is released and says what to assert instead, so
-the line here is then deleted. It is an observation, not a rule to rely on.
+The three that follow are **defects or limits of dal-go/dalgo2sql**, reported to it; no fix of
+any of them is under way yet. Each test FAILS when the fix is released and says what to assert
+instead, so the line here is then deleted. They are observations, not rules to rely on.
 
 - **A recordset registered under a name with capitals** (`Ck_Mixed`) is found only by a query
   that spells the source exactly so; dalgo2sql folds the name the query spells, never the
@@ -261,6 +271,14 @@ the line here is then deleted. It is an observation, not a rule to rely on.
   records are keyed by the catalog's key instead of the declared one. In
   `IdentifierFoldLower` register recordsets under lower case names. Reported for
   dal-go/dalgo2sql.
+- **A key read does not fold the collection of its key** (`Ck_Decl` for a recordset registered as
+  `ck_decl`): the recordset is not found, and `Exists` and `Get` answer an error that matches
+  `ErrRecordNotFound` for a row that exists (see "How a recordset is found"). A query finds it.
+  Reported for dal-go/dalgo2sql.
+- **A keys-only read selects every column.** A read of keys only is sent as
+  `SELECT * FROM "t" ORDER BY "id" ASC` for a table whose key the catalog gives, so the server
+  reads and sends every column of every row to return a key. Reported for dal-go/dalgo2sql
+  (`TestStructuredQueryIntegration_RecordKeysFromTheCatalog` pins the statement).
 
 Limits of this combination that are not defects of one library:
 
@@ -282,7 +300,8 @@ Limits of this combination that are not defects of one library:
   rule whose condition does not hold falls through to an unconditional allow when the policy has
   one, so a policy that narrows with a condition and then allows without one is decided by the
   wider rule. Spell the names as stored, and give a row condition no wider allow behind it;
-  the fall-through case belongs to the access checks (PG-03b).
+  `TestAccessIntegration_UnconditionalAllowBehindAConditionDecidesTheRow` asserts the
+  fall-through case.
 
 ### The connection a read holds
 

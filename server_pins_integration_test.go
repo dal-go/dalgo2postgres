@@ -266,8 +266,13 @@ func TestServerPinsIntegration_TextJoinKeysWithDifferentCollations(t *testing.T)
 			t.Errorf("plan = %+v, err = %v; want a plan that is not native: the server cannot compare the two", plan, err)
 		}
 		o := observe(t, f, q)
-		t.Logf("statements: %v\n    result: %s\n    rows: %v (error: %v)", statementsSent(f), o.result(), o.rows, o.err)
-		check(t, `collation "C" against "POSIX", in DALgo's engine`, o, rowsOf(1))
+		t.Logf("statements: %v\n    rows: %v (error: %v)", statementsSent(f), o.rows, o.err)
+		// DALgo's engine returns the integer as its own Go type, not the reader's int64, so
+		// the rows are compared as JSON holds them.
+		got, normalizeErr := normalizeRows(o.rows)
+		if o.err != nil || normalizeErr != nil || rowDifference(got, []map[string]any{{"id": 1.0}}) != "" {
+			t.Errorf(`collation "C" against "POSIX", in DALgo's engine: rows = %v, error %v, want the one row with id 1`, o.rows, o.err)
+		}
 		for _, statement := range statementsSent(f) {
 			if strings.Contains(statement, " JOIN ") {
 				t.Errorf("a statement joins on the server: %s", statement)
@@ -501,10 +506,13 @@ func TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation(t *testi
 	t.Run("in the database's collation the server's order is not Go's", func(t *testing.T) {
 		_, ids := keys(t, "kc_default")
 		if reflect.DeepEqual(ids, goOrder) {
-			t.Fatalf("keys = %v: the database's collation (%s) orders like C, so this pin shows nothing; run the job on a database whose collation is not C or POSIX", ids, collate)
+			t.Fatalf("keys = %v: either the database's collation (%s) orders like C, so this pin shows nothing and the job must run on a database whose collation is not C or POSIX, "+
+				"or a keys-only read is now in Go's order: then assert Go's order here, drop COLLATE \"C\" from the dalgotest_cities table in end2endDDL, and delete the limit in the README", ids, collate)
 		}
 		if want := []string{"São Paulo_São Paulo", "Shanghai_Shanghai", "Sindh_Karachi"}; !reflect.DeepEqual(ids, want) {
-			t.Errorf("keys = %v, want the linguistic order of %s: %v. This differs from sort.Strings, which the shared suite's keys-only contract asserts: a divergence reported for dal-go/dalgo and dal-go/dalgo2sql", ids, collate, want)
+			t.Errorf("keys = %v, want the linguistic order of %s: %v. This differs from sort.Strings, which the shared suite's keys-only contract asserts: a divergence reported for dal-go/dalgo and dal-go/dalgo2sql. "+
+				"If the keys are now in Go's order, a keys-only read no longer follows the database's collation: assert Go's order for kc_default here, "+
+				"drop COLLATE \"C\" from the dalgotest_cities table in end2endDDL (end2end_test.go), and delete the limit in the README", ids, collate, want)
 		}
 	})
 	t.Run(`control: the same keys under COLLATE "C" are in Go's order`, func(t *testing.T) {

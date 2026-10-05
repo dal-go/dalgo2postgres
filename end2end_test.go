@@ -146,7 +146,11 @@ func TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames(t *testing.T) 
 	t.Run("a condition that spells the field as the suite does denies the row it allows", func(t *testing.T) {
 		got, err := exists(t, "Country")
 		if !errors.Is(err, access.ErrAccessDenied) || got {
-			t.Errorf("Exists = %v, %v; want a denial: the condition on Country is not satisfied by the stored country", got, err)
+			t.Errorf("Exists = %v, %v; want a denial: the condition on Country is not satisfied by the stored country. "+
+				"If the row is now admitted, a key read returns the names as the suite spells them or the access layer folds them: "+
+				"assert the admission here, remove point_reads_follow_the_condition and writes_follow_the_condition from "+
+				"notRunInFoldLowerMode, from the -skip pattern and from the allow-list of skips in .github/workflows/ci.yml, "+
+				"and delete the limit in the README", got, err)
 		}
 		t.Logf("Exists under a condition on Country: %v", err)
 	})
@@ -168,7 +172,7 @@ func TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames(t *testing.T) 
 // the row. A conditional rule whose condition does not hold falls through to an
 // unconditional allow when the policy has one, so a policy that narrows with a condition
 // and then allows without one is decided by the wider rule: the README says so, and
-// PG-03b (access checks) owns that case.
+// TestAccessIntegration_UnconditionalAllowBehindAConditionDecidesTheRow asserts it.
 func TestEndToEndIntegration_UpdateUnderRowConditionsFailsClosedOnStoredNames(t *testing.T) {
 	testDSN(t)
 	recordsets := map[string]*dalgo2sql.Recordset{
@@ -204,7 +208,11 @@ func TestEndToEndIntegration_UpdateUnderRowConditionsFailsClosedOnStoredNames(t 
 		err := edit("Country")
 		t.Logf("Update under a condition on Country: %v; hasairport is now %v", err, hasAirport(t))
 		if !errors.Is(err, access.ErrAccessDenied) {
-			t.Errorf("Update = %v, want a denial: the condition on Country is not satisfied by the stored country", err)
+			t.Errorf("Update = %v, want a denial: the condition on Country is not satisfied by the stored country. "+
+				"If the Update is now admitted, a key read returns the names as the suite spells them or the access layer folds them: "+
+				"assert the admission and the written row here, remove writes_follow_the_condition and point_reads_follow_the_condition from "+
+				"notRunInFoldLowerMode, from the -skip pattern and from the allow-list of skips in .github/workflows/ci.yml, "+
+				"and delete the limit in the README", err)
 		}
 		if !hasAirport(t) {
 			t.Error("hasairport was written although the Update was denied")
