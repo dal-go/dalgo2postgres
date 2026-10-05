@@ -13,30 +13,35 @@ import (
 // [WithSchema] is not used.
 const DefaultSchema = "public"
 
-// IdentifierMode says how the schema reader treats the table names it is given.
+// IdentifierMode says how a [Database] treats the names it is given: the schema
+// reader matches a table by it, and a structured query writes the names it spells
+// by it (dalgo2sql's DbOptions.IdentifierCase, which this package sets from it).
 type IdentifierMode int
 
 const (
-	// IdentifierFoldLower lower-cases a table name before looking it up. It
-	// matches the DDL this package writes (see quoteIdent), which stores every
-	// name lower-cased. It is the default, so callers that pass no option and
-	// create their tables through this package keep their behaviour. A caller
-	// that reads a database it did not create with this package (mixed-case
-	// table names) must choose [IdentifierExact] explicitly: with the default,
-	// ListCollections reports "Album" but DescribeCollection("Album") looks for
-	// "album" and answers not found.
+	// IdentifierFoldLower lower-cases a name before looking it up or writing it,
+	// inside quotes. It matches the DDL this package writes (see quoteIdent), which
+	// stores every name lower-cased, so a database this package created is read
+	// back with any spelling of a name: Album, album and ALBUM are one table. It is
+	// the default, so callers that pass no option and create their tables through
+	// this package keep their behaviour. A caller that reads a database it did not
+	// create with this package (mixed-case table names) must choose
+	// [IdentifierExact] explicitly: with the default, ListCollections reports
+	// "Album" but DescribeCollection("Album") looks for "album" and answers not
+	// found, and so does a structured query.
 	IdentifierFoldLower IdentifierMode = iota
 
-	// IdentifierExact looks a table up under exactly the name it is given.
-	// PostgreSQL names are case-sensitive once quoted, so "Album" and "album"
-	// are different tables; choose this mode to read a database whose tables
-	// were created with mixed-case names.
+	// IdentifierExact looks a table up, and writes a name, exactly as it is given.
+	// PostgreSQL names are case-sensitive once quoted, so "Album" and "album" are
+	// different tables; choose this mode to read a database whose tables were
+	// created with mixed-case names.
 	//
-	// The mode affects only the schema reader (ListCollections,
-	// DescribeCollection, ListIndexes, ListConstraints, ListReferrers,
-	// NonDeterministicTextColumns). The DDL this package writes still
-	// lower-cases every name, and record operations address tables as dalgo2sql
-	// renders them, resolved by the connection's search_path.
+	// The mode affects the schema reader (ListCollections, DescribeCollection,
+	// ListIndexes, ListConstraints, ListReferrers, NonDeterministicTextColumns) and
+	// structured queries. It does not affect the DDL this package writes, which
+	// still lower-cases every name, nor key reads and writes (Get, Set, Insert,
+	// Update, Delete and their multi forms), which accept plain names only and
+	// write them unquoted, so PostgreSQL folds them to lower case.
 	IdentifierExact
 )
 
@@ -64,16 +69,21 @@ type Option func(*Database)
 //
 // The option affects only the schema reader (ListCollections,
 // DescribeCollection, ListIndexes, ListConstraints, ListReferrers,
-// NonDeterministicTextColumns). The DDL this package writes and record
-// operations still follow the connection's search_path.
+// NonDeterministicTextColumns). The DDL this package writes, key reads and
+// writes and structured queries still follow the connection's search_path: a
+// structured query reads another schema when its collection reference names it
+// ([dal.NewQualifiedRootCollectionRef]).
 func WithSchema(name string) Option {
 	return func(d *Database) { d.schema = name }
 }
 
-// WithIdentifierMode selects how table names given to the schema reader are
-// matched. See [IdentifierMode].
+// WithIdentifierMode selects how names are matched by the schema reader and
+// written by structured queries. See [IdentifierMode]. Without it the mode is
+// [IdentifierFoldLower], or the one dalgo2sql.DbOptions.IdentifierCase names when
+// the caller passed [NewDatabaseWithOptions] one; the two must not disagree, and
+// a constructor refuses the pair that does.
 func WithIdentifierMode(mode IdentifierMode) Option {
-	return func(d *Database) { d.identifierMode = mode }
+	return func(d *Database) { d.identifierMode, d.identifierModeSet = mode, true }
 }
 
 // schemaFor returns the schema a collection reference addresses: the schema the
@@ -102,15 +112,83 @@ func (d *Database) resolveName(name string) string {
 	return strings.ToLower(name)
 }
 
+// settings is what the constructors need once the caller's options have been
+// checked: the dalgo2sql options this package hands to dalgo2sql, with the dialect
+// forced and the identifier case resolved, and the identifier mode the reader uses.
+// resolveSettings is the only producer, and newDatabaseFromSQL, the only caller of
+// dalgo2sql.NewDatabase, takes nothing else, so no constructor of this package can
+// open a database whose structured queries reach dalgo2sql's legacy text emitter.
+type settings struct {
+	db   dalgo2sql.DbOptions
+	mode IdentifierMode
+}
+
+// resolveSettings checks options against opts, with no server involved, and
+// returns the settings a Database is built from. Constructors call it before they
+// open a connection, so an option set that cannot be honoured is refused first.
+//
+// The identifier mode is one setting with two spellings: the caller's
+// [WithIdentifierMode] and dalgo2sql's DbOptions.IdentifierCase. Either one decides
+// it; both set and different is an error; neither is [IdentifierFoldLower]. An
+// IdentifierCase or an IdentifierMode this package does not define is an error: a
+// caller that meant to fold names must not silently get the exact mode.
+func resolveSettings(opts dalgo2sql.DbOptions, options []Option) (settings, error) {
+	var probe Database
+	applyOptions(&probe, options)
+	mode, err := probe.chooseIdentifierMode(opts.IdentifierCase)
+	if err != nil {
+		return settings{}, err
+	}
+	opts.IdentifierCase = dalgo2sql.IdentifierCaseFoldLower
+	if mode == IdentifierExact {
+		opts.IdentifierCase = dalgo2sql.IdentifierCaseExact
+	}
+	applyPostgresDbOptionDefaults(&opts)
+	return settings{db: opts, mode: mode}, nil
+}
+
+// chooseIdentifierMode is the identifier mode the options of d and the caller's
+// DbOptions.IdentifierCase ask for together. See resolveSettings.
+func (d *Database) chooseIdentifierMode(identifierCase dalgo2sql.IdentifierCase) (IdentifierMode, error) {
+	var fromCase IdentifierMode
+	caseSet := true
+	switch identifierCase {
+	case "":
+		caseSet = false
+	case dalgo2sql.IdentifierCaseExact:
+		fromCase = IdentifierExact
+	case dalgo2sql.IdentifierCaseFoldLower:
+		fromCase = IdentifierFoldLower
+	default:
+		return 0, fmt.Errorf("dalgo2postgres: unknown IdentifierCase %q: use %q or %q",
+			string(identifierCase), string(dalgo2sql.IdentifierCaseExact), string(dalgo2sql.IdentifierCaseFoldLower))
+	}
+	switch {
+	case d.identifierModeSet:
+		if !d.identifierMode.valid() {
+			return 0, fmt.Errorf("dalgo2postgres: unknown IdentifierMode %d", int(d.identifierMode))
+		}
+		if caseSet && fromCase != d.identifierMode {
+			return 0, fmt.Errorf("dalgo2postgres: WithIdentifierMode and DbOptions.IdentifierCase %q disagree: give one of them, or the same mode in both",
+				string(identifierCase))
+		}
+		return d.identifierMode, nil
+	case caseSet:
+		return fromCase, nil
+	}
+	return IdentifierFoldLower, nil
+}
+
 // newDatabaseFromSQL wraps an already open, already verified *sql.DB. It is
 // the part of construction that needs no server, so unit tests reach it with a
-// mocked handle.
-func newDatabaseFromSQL(sqlDB *sql.DB, schema dal.Schema, opts dalgo2sql.DbOptions, options []Option) *Database {
+// mocked handle, and the only place a dalgo2sql database is built.
+func newDatabaseFromSQL(sqlDB *sql.DB, schema dal.Schema, s settings, options []Option) *Database {
 	d := &Database{
-		DB:    dalgo2sql.NewDatabase(sqlDB, schema, opts),
+		DB:    dalgo2sql.NewDatabase(sqlDB, schema, s.db),
 		sqlDB: sqlDB,
 	}
 	applyOptions(d, options)
+	d.identifierMode = s.mode
 	return d
 }
 
@@ -121,15 +199,4 @@ func applyOptions(d *Database, options []Option) {
 			option(d)
 		}
 	}
-}
-
-// checkOptions rejects an option set that cannot be honoured. It needs no
-// server, so constructors call it before opening a connection.
-func checkOptions(options []Option) error {
-	var probe Database
-	applyOptions(&probe, options)
-	if !probe.identifierMode.valid() {
-		return fmt.Errorf("dalgo2postgres: unknown IdentifierMode %d", int(probe.identifierMode))
-	}
-	return nil
 }

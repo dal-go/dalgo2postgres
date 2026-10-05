@@ -44,12 +44,25 @@ func IsAlreadyExists(err error) bool {
 	return pgErr.Code == sqlStateUniqueViolation
 }
 
+// structuredQueryDialect is the dalgo2sql dialect this package always selects.
+// With it dalgo2sql compiles a structured query with its typed PostgreSQL
+// compiler (names quoted, every value a bound argument), runs aggregation and
+// joins on the server and declines the rest with an error DALgo reads as "use the
+// generic engine". It also decides how key reads and writes write names (plain
+// identifiers only, see the README).
+const structuredQueryDialect = "postgres"
+
 // applyPostgresDbOptionDefaults mutates opts in place, filling in the
-// PostgreSQL-specific defaults [NewDatabaseWithOptions] always applies
+// PostgreSQL-specific settings [NewDatabaseWithOptions] always applies
 // regardless of what the caller passed in:
 //
 //   - Placeholder is forced to [dalgo2sql.PlaceholderDollar] ($1/$2/…)
 //     unconditionally, since this package only ever talks to PostgreSQL.
+//   - StructuredQueryDialect is forced to "postgres" unconditionally, like
+//     Placeholder: the empty string, "sqlite", "mysql" and any other value are
+//     replaced. Without a dialect dalgo2sql renders a structured query through
+//     its legacy text emitter, which pastes values into the statement; with this
+//     package's constructors that emitter is never reachable.
 //   - IsAlreadyExists is defaulted to [IsAlreadyExists] only when the
 //     caller left it nil, so Insert/InsertMulti reject a unique-key
 //     violation with record.IsAlreadyExists (see dalgotest's unconditional
@@ -60,6 +73,7 @@ func IsAlreadyExists(err error) bool {
 // unit-tested directly, without needing a live PostgreSQL connection.
 func applyPostgresDbOptionDefaults(opts *dalgo2sql.DbOptions) {
 	opts.Placeholder = dalgo2sql.PlaceholderDollar
+	opts.StructuredQueryDialect = structuredQueryDialect
 	if opts.IsAlreadyExists == nil {
 		opts.IsAlreadyExists = IsAlreadyExists
 	}

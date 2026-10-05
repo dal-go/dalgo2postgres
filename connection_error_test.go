@@ -182,6 +182,7 @@ func TestOpenVerified_PingErrorNamesHostPortAndDatabaseOnly(t *testing.T) {
 }
 
 func TestOpenVerified_Success(t *testing.T) {
+	clearPGEnv(t)
 	mockDB, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
 	if err != nil {
 		t.Fatal(err)
@@ -407,6 +408,10 @@ func TestOpenVerified_KeywordStringWithAPairInAValueIsRefusedBeforeTheDriver(t *
 
 func TestNewDatabase_KeywordStringWithAPairInAValueIsRefused(t *testing.T) {
 	clearPGEnv(t)
+	// A string that was not refused would dial the closed port 1 here, not the
+	// default local socket.
+	t.Setenv("PGHOST", "127.0.0.1")
+	t.Setenv("PGPORT", "1")
 	for name, dsn := range keywordStringsReadWrongly() {
 		t.Run(name, func(t *testing.T) {
 			db, err := NewDatabase(dsn)
@@ -523,9 +528,12 @@ func TestOpenVerified_SeveralEndpointsNameNeitherHostNorPort(t *testing.T) {
 }
 
 // TestNewDatabase_ReviewRound3Strings runs the strings of the third review round
-// through the real constructor and the real driver. Nothing listens on port 1.
-// A name, a host or a database that is not what it was meant to be must not drag
-// the user name or the password along.
+// through the real constructor. Nothing listens on port 1, which is where PGHOST
+// and PGPORT point. All but the last are refused before the driver is asked (a
+// pair swallowed into the host, the user or the database); the last holds its
+// pairs in the password only, is not refused and reaches the real driver, which
+// dials the closed port. A name, a host or a database that is not what it was
+// meant to be must not drag the user name or the password along.
 func TestNewDatabase_ReviewRound3Strings(t *testing.T) {
 	clearPGEnv(t)
 	t.Setenv("PGHOST", "127.0.0.1")
@@ -539,6 +547,9 @@ func TestNewDatabase_ReviewRound3Strings(t *testing.T) {
 		"ampersands":         "host=127.0.0.1&port=1&user=" + secretUser + "&password=" + secretPassword + "&dbname=" + visibleDB,
 		"ampersands comma":   "host=127.0.0.1&user=" + secretUser + "&password=" + secretPassword + ",dbname=" + visibleDB + " port=1 sslmode=disable",
 		"user cut to 63":     "user=" + secretUser + ";password=" + secretPassword + ";host=" + visibleHost + ";port=6432;dbname=" + visibleDB,
+		// The only pair-holding value is the password, which the check does not read:
+		// the string reaches the driver and the host is the one PGHOST names.
+		"pairs in the password": "password=" + secretPassword + ";user=" + secretUser + ";dbname=" + visibleDB,
 	} {
 		t.Run(name, func(t *testing.T) {
 			db, err := NewDatabase(dsn)
@@ -550,6 +561,9 @@ func TestNewDatabase_ReviewRound3Strings(t *testing.T) {
 			if connErr.Database != "" {
 				t.Errorf("error %+v names a database that is a piece of the string", *connErr)
 			}
+			if name == "pairs in the password" && (connErr.Kind != FailureNetwork || connErr.op != "PingContext") {
+				t.Errorf("error %+v: the string should reach the driver and fail to dial the closed port", *connErr)
+			}
 		})
 	}
 }
@@ -559,7 +573,6 @@ func TestOpenVerified_ServerTextCutTo63BytesIsNotCopied(t *testing.T) {
 	// PostgreSQL cuts the user name and the database name of the startup packet
 	// to 63 bytes before it repeats them. A scrubber that knows only whole values
 	// misses the cut form; this package copies no server text at all.
-	tail := secretUser + ";password=" + secretPassword + ";host=" + visibleHost + ";port=6432;dbname=" + visibleDB
 	misSplitDatabase := strings.Repeat("p", 20) + secretPassword + "@" + visibleHost + "/" + visibleDB
 	longUser := strings.Repeat("u", 70) + secretUser
 	for name, tc := range map[string]struct{ dsn, code, served string }{
@@ -573,7 +586,7 @@ func TestOpenVerified_ServerTextCutTo63BytesIsNotCopied(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			served := &pgconn.PgError{Severity: "FATAL", Code: tc.code, Message: tc.served}
 			_, err := openVerified(tc.dsn, func(string, string) (*sql.DB, error) { return nil, served })
-			connErr := assertNoSecrets(t, err, []string{secretUser, secretPassword, visibleHost, tail[:20], misSplitDatabase[:20], "uuuu", tc.served, served.Error()})
+			connErr := assertNoSecrets(t, err, []string{secretUser, secretPassword, visibleHost, misSplitDatabase[:20], "uuuu", tc.served, served.Error()})
 			if connErr.Kind != FailureServer || connErr.SQLState != tc.code {
 				t.Errorf("error = %+v, want a server error with SQLSTATE %s", *connErr, tc.code)
 			}
@@ -601,6 +614,7 @@ func TestNewDatabase_DatabaseEqualToACredentialIsNotNamed(t *testing.T) {
 }
 
 func TestNewDatabase_SeamFailuresAndSuccess(t *testing.T) {
+	clearPGEnv(t) // the two subtests that open a handle parse the string with the driver
 	t.Run("an invalid option is refused before the driver is asked", func(t *testing.T) {
 		asked := false
 		_, err := newDatabase("host=h", dal.NewSchema(nil, nil), dalgo2sql.DbOptions{}, []Option{WithIdentifierMode(IdentifierMode(99))},
@@ -673,6 +687,12 @@ func TestClassify(t *testing.T) {
 		{"hostname mismatch", x509.HostnameError{Certificate: &x509.Certificate{}, Host: secretUser}, FailureTLS, ""},
 		{"invalid certificate", x509.CertificateInvalidError{Cert: &x509.Certificate{}, Reason: x509.Expired}, FailureTLS, ""},
 		{"a dial that failed is not a tls alert", &net.OpError{Op: "dial", Err: errors.New("tls: bad certificate")}, FailureNetwork, ""},
+		{"an operation error with nothing inside it", &net.OpError{Op: "dial"}, FailureNetwork, ""},
+		// The driver joins one error per attempt, in order: ::1 refused, then 127.0.0.1
+		// answered with an alert. errors.As would stop at the first *net.OpError.
+		{"joined: a refused dial before an alert", errors.Join(refused, &net.OpError{Op: "remote error", Err: errors.New("tls: bad certificate")}), FailureTLS, ""},
+		{"joined: an alert before a refused dial", errors.Join(&net.OpError{Op: "local error", Err: errors.New("tls: unexpected message")}, refused), FailureTLS, ""},
+		{"joined and wrapped: an alert in a nested join", fmt.Errorf("connect: %w", errors.Join(refused, errors.Join(noHost, &net.OpError{Op: "remote error", Err: errors.New("tls: bad certificate")}))), FailureTLS, ""},
 		{"connection refused", refused, FailureNetwork, ""},
 		{"no such host", noHost, FailureNetwork, ""},
 		{"joined: the server's answer wins over a failed host", errors.Join(noHost, refused, &pgconn.PgError{Code: "28000"}), FailureServer, "28000"},

@@ -42,8 +42,9 @@ type Database struct {
 	dal.DB         // delegate for the dal.DB surface
 	sqlDB  *sql.DB // direct handle for DDL + introspection queries
 
-	schema         string         // schema the reader inspects; "" means DefaultSchema
-	identifierMode IdentifierMode // how reader table names are matched
+	schema            string         // schema the reader inspects; "" means DefaultSchema
+	identifierMode    IdentifierMode // how names are matched by the reader and written by queries
+	identifierModeSet bool           // WithIdentifierMode was given (the zero mode is a real mode)
 }
 
 // NewDatabase opens a connection to the PostgreSQL server identified by dsn
@@ -92,16 +93,15 @@ func NewDatabaseWithOptions(dsn string, schema dal.Schema, opts dalgo2sql.DbOpti
 // newDatabase is the body of [NewDatabaseWithOptions], taking the function that
 // opens the *sql.DB so tests can make the driver fail in every way a driver does.
 func newDatabase(dsn string, schema dal.Schema, opts dalgo2sql.DbOptions, options []Option, open sqlOpener) (*Database, error) {
-	if err := checkOptions(options); err != nil {
+	resolved, err := resolveSettings(opts, options)
+	if err != nil {
 		return nil, err
 	}
-	applyPostgresDbOptionDefaults(&opts)
-
 	sqlDB, err := openVerified(dsn, open)
 	if err != nil {
 		return nil, err
 	}
-	return newDatabaseFromSQL(sqlDB, schema, opts, options), nil
+	return newDatabaseFromSQL(sqlDB, schema, resolved, options), nil
 }
 
 // sqlOpener is [sql.Open]; it is a seam so tests can make the driver fail.
@@ -112,14 +112,15 @@ type sqlOpener func(driverName, dataSourceName string) (*sql.DB, error)
 // (told from the types in the driver's error, never from its text), plus the
 // host, port and database name of the driver's own parsed configuration, each only
 // when it passes a strict check and repeats neither the user name nor the
-// password. No text of dsn and no message of the driver or the server is copied
-// into it, and the driver's error is not reachable from it: both hold the
+// password. No other text of dsn and no message of the driver or the server is
+// copied into it, and the driver's error is not reachable from it: both hold the
 // credentials, whatever separator a string uses and however long a name is.
 //
 // A string the driver would misread (a quoted URL, a leading space, another
-// scheme, a key=value string whose host, user or database holds an equals sign) is refused before the driver is asked, with a [FailureMisread] error:
-// the text the driver takes for a setting name holds the credentials, and the
-// server it reaches would receive it.
+// scheme, a key=value string whose host, user or database holds an equals sign)
+// is refused before the driver is asked, with a [FailureMisread] error: the text
+// the driver takes for a setting name holds the credentials, and the server it
+// reaches would receive it.
 //
 // The driver is asked even when pgx cannot parse dsn: the string may be a name
 // registered with stdlib.RegisterConnConfig, which only the driver knows.
