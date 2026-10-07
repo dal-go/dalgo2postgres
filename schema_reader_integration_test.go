@@ -150,9 +150,20 @@ func TestSchemaReaderIntegration_MixedCaseUnknownTypesViewsAndReferrers(t *testi
 	if timeDef.SourceDefinition == nil {
 		t.Fatal("TimeKinds SourceDefinition is nil")
 	}
+	if len(timeDef.SourceDefinition.Columns) != len(wantDeclaredTypes) {
+		t.Fatalf("TimeKinds source columns = %+v, want %d columns", timeDef.SourceDefinition.Columns, len(wantDeclaredTypes))
+	}
+	seenTemporalTypes := make(map[string]bool, len(wantDeclaredTypes))
 	for _, column := range timeDef.SourceDefinition.Columns {
 		if want, ok := wantDeclaredTypes[column.Name]; !ok || column.DeclaredType != want {
 			t.Errorf("column %q declared type = %q, want %q (known=%v)", column.Name, column.DeclaredType, want, ok)
+		} else {
+			seenTemporalTypes[column.Name] = true
+		}
+	}
+	for name := range wantDeclaredTypes {
+		if !seenTemporalTypes[name] {
+			t.Errorf("TimeKinds is missing native type metadata for %q", name)
 		}
 	}
 	if len(def.ForeignKeys) != 1 || def.ForeignKeys[0].Name != "fk_artist" || def.ForeignKeys[0].ReferencedCollection != "Artist" ||
