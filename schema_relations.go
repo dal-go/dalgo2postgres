@@ -41,6 +41,22 @@ const listRelationsSQL = `SELECT c.relname::text, c.relkind IN ('v', 'm') AS is_
 	  AND ` + relationVisibleSQL + `
 	ORDER BY c.relname`
 
+// listSourceViewsSQL reads view names, ordered columns and normalized SQL for
+// ordinary and materialized views in one schema. The visibility predicate
+// matches ListCollections so this optional metadata capability describes the
+// same view inventory the adapter exposes as collections.
+const listSourceViewsSQL = `SELECT c.relname::text, a.attname::text,
+	       pg_catalog.pg_get_viewdef(c.oid, true)
+	FROM pg_catalog.pg_class AS c
+	JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+	JOIN pg_catalog.pg_attribute AS a ON a.attrelid = c.oid
+	WHERE n.nspname = $1::text
+	  AND c.relkind IN ('v', 'm')
+	  AND a.attnum > 0 AND NOT a.attisdropped
+	  AND NOT pg_catalog.pg_is_other_temp_schema(n.oid)
+	  AND ` + relationVisibleSQL + `
+	ORDER BY c.relname, a.attnum`
+
 // relationKindSQL reads the kind of one relation: the schema is $1 and the name
 // $2. It answers no row for a name that is not one of the listed kinds.
 const relationKindSQL = `SELECT c.relkind::text
@@ -195,6 +211,42 @@ func (d *Database) ListSchemaCollections(ctx context.Context, schema string) ([]
 // A foreign table and a partitioned table are tables, not views.
 func (d *Database) ListViews(ctx context.Context) ([]dal.CollectionRef, error) {
 	return guarded(d.readRefs(ctx, d.schemaName(), "", true, "ListViews"))
+}
+
+// ListSourceViews returns view and materialized-view metadata for the
+// configured schema. Columns are ordered as PostgreSQL stores them and
+// CreateSQL is the server's normalized view definition; it is metadata only
+// and is never executed by this reader.
+func (d *Database) ListSourceViews(ctx context.Context) ([]dbschema.SourceViewDef, error) {
+	return guarded(d.listSourceViews(ctx))
+}
+
+func (d *Database) listSourceViews(ctx context.Context) ([]dbschema.SourceViewDef, error) {
+	schema := d.schemaName()
+	if err := checkIdentifierLength(positionSchema, schema); err != nil {
+		return nil, err
+	}
+	rows, err := d.sqlDB.QueryContext(ctx, listSourceViewsSQL, schema)
+	if err != nil {
+		return nil, fmt.Errorf("dalgo2postgres: ListSourceViews: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	views := make([]dbschema.SourceViewDef, 0)
+	for rows.Next() {
+		var name, column, createSQL string
+		if scanErr := rows.Scan(&name, &column, &createSQL); scanErr != nil {
+			return nil, fmt.Errorf("dalgo2postgres: ListSourceViews scan: %w", scanErr)
+		}
+		if len(views) == 0 || views[len(views)-1].Name != name {
+			views = append(views, dbschema.SourceViewDef{Name: name, CreateSQL: createSQL})
+		}
+		views[len(views)-1].Columns = append(views[len(views)-1].Columns, column)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, fmt.Errorf("dalgo2postgres: ListSourceViews rows: %w", rowsErr)
+	}
+	return views, nil
 }
 
 // ListSchemaViews returns the views and materialized views of the named schema,

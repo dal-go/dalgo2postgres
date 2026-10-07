@@ -268,6 +268,10 @@ func errorCalls(s standIn) map[string]errorCall {
 			_, err := db.ListViews(ctx)
 			return []error{err}
 		}),
+		"Database.ListSourceViews": onLazyDatabase(func(ctx context.Context, db *Database) []error {
+			_, err := db.ListSourceViews(ctx)
+			return []error{err}
+		}),
 		"Database.NonDeterministicTextColumns": onLazyDatabase(func(ctx context.Context, db *Database) []error {
 			_, err := db.NonDeterministicTextColumns(ctx, &ref)
 			return []error{err}

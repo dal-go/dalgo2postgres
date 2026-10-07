@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/dal-go/dalgo/dal"
@@ -169,6 +170,31 @@ func TestSchemaReaderIntegration_ListsViewsAndMaterializedViewsApartFromTables(t
 	// A schema nobody has is no collections, not an error.
 	if none, err := f.db.ListSchemaCollections(ctx, "no_such_schema_pg05"); err != nil || len(none) != 0 {
 		t.Errorf("ListSchemaCollections(missing) = %v, %v; want none", none, err)
+	}
+}
+
+func TestSchemaReaderIntegration_ListsSourceViewDefinitions(t *testing.T) {
+	f := newPG05Fixture(t)
+	got, err := f.db.ListSourceViews(context.Background())
+	if err != nil {
+		t.Fatalf("ListSourceViews: %v", err)
+	}
+	if len(got) != len(pg05Views) {
+		t.Fatalf("ListSourceViews returned %d views, want %d: %#v", len(got), len(pg05Views), got)
+	}
+	for i, view := range got {
+		if view.Name != pg05Views[i] {
+			t.Errorf("view[%d].Name = %q, want %q", i, view.Name, pg05Views[i])
+		}
+		if len(view.Columns) == 0 {
+			t.Errorf("view %q has no columns", view.Name)
+		}
+		if strings.TrimSpace(view.CreateSQL) == "" {
+			t.Errorf("view %q has no SQL definition", view.Name)
+		}
+	}
+	if got[0].Name == "Open Orders" && !reflect.DeepEqual(got[0].Columns, []string{"Id", "Status"}) {
+		t.Errorf("Open Orders columns = %v, want [Id Status]", got[0].Columns)
 	}
 }
 
