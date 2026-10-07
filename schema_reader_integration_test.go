@@ -10,7 +10,9 @@ import (
 
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/dalgo/dbschema"
+	"github.com/dal-go/dalgo2sql"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 // The tests in this file run against a real PostgreSQL server and skip unless
@@ -389,11 +391,17 @@ func TestSchemaReaderIntegration_SelectOnlyNonOwnerSeesConstraintMetadata(t *tes
 		t.Fatalf("parse admin connection: %v", err)
 	}
 	cfg.User, cfg.Password = role, password
-	reader, err := NewDatabase(cfg.ConnString(), WithSchema(firstSchema), WithIdentifierMode(IdentifierExact))
-	if err != nil {
-		t.Fatalf("open SELECT-only reader: %v", err)
+	readerSQL := stdlib.OpenDB(*cfg)
+	t.Cleanup(func() { _ = readerSQL.Close() })
+	if err := readerSQL.PingContext(ctx); err != nil {
+		t.Fatalf("connect as SELECT-only reader: %v", err)
 	}
-	t.Cleanup(func() { _ = reader.Close() })
+	readerOptions := []Option{WithSchema(firstSchema), WithIdentifierMode(IdentifierExact)}
+	readerSettings, err := resolveSettings(dalgo2sql.DbOptions{}, readerOptions)
+	if err != nil {
+		t.Fatalf("resolve SELECT-only reader settings: %v", err)
+	}
+	reader := newDatabaseFromSQL(readerSQL, dal.NewSchema(nil, nil), readerSettings, readerOptions)
 	var superuser, canCreateRole, canCreateDB, ownsChild bool
 	if err := reader.sqlDB.QueryRowContext(ctx, `
 		SELECT role.rolsuper, role.rolcreaterole, role.rolcreatedb,
