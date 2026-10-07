@@ -154,6 +154,10 @@ connection's `search_path` resolves. `WithSchema` affects only the schema reader
 - A `NUMERIC` column is read as `float64` (pgx delivers it as text), `NaN` included. A
   `float64` holds about 15 significant digits exactly, so a longer `NUMERIC` is
   rounded. Dates and times are `time.Time`.
+- A copy or export caller can set `dalgo2sql.DbOptions.ExactNumericValues` to keep
+  PostgreSQL `NUMERIC` text exact in DALgo records and recordsets. This is opt-in;
+  default reads keep their existing `float64` behavior. The adapter's schema-reader
+  can target a non-public schema with `WithSchema`.
 - A table the database does not have is a `*dalgo2sql.TableNotFoundError` (it matches
   `dalgo2sql.ErrTableNotFound`) that names the table and the nearest one that exists:
   `failed to get SQL reader: table "album" not found; did you mean "Album"? Table names
