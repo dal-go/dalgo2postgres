@@ -2,6 +2,7 @@ package dalgo2postgres
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -9,6 +10,9 @@ import (
 
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/dalgo/dbschema"
+	"github.com/dal-go/dalgo2sql"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 // The tests in this file run against a real PostgreSQL server and skip unless
@@ -318,6 +322,151 @@ func TestSchemaReaderIntegration_SecondSchemaIsKeptApart(t *testing.T) {
 	}
 	if indexes, err := db1.ListIndexes(ctx, &qualifiedTour); err != nil || len(indexes) != 0 {
 		t.Errorf("qualified ListIndexes through the first schema = %+v, %v; want none (primary key excluded)", indexes, err)
+	}
+}
+
+func TestSchemaReaderIntegration_SelectOnlyNonOwnerSeesConstraintMetadata(t *testing.T) {
+	dsn := testDSN(t)
+	admin, err := NewDatabase(dsn, WithIdentifierMode(IdentifierExact))
+	if err != nil {
+		t.Fatalf("open admin database: %v", err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	ctx := context.Background()
+
+	firstSchema := uniqueTable(t, "readonly_meta_a")
+	secondSchema := uniqueTable(t, "readonly_meta_b")
+	firstSQL, secondSQL := exactIdent(firstSchema), exactIdent(secondSchema)
+	execAll(t, admin, "CREATE SCHEMA "+firstSQL, "CREATE SCHEMA "+secondSQL)
+	t.Cleanup(func() {
+		if _, err := admin.sqlDB.ExecContext(context.Background(), "DROP SCHEMA IF EXISTS "+firstSQL+" CASCADE"); err != nil {
+			t.Errorf("drop first test schema: %v", err)
+		}
+		if _, err := admin.sqlDB.ExecContext(context.Background(), "DROP SCHEMA IF EXISTS "+secondSQL+" CASCADE"); err != nil {
+			t.Errorf("drop second test schema: %v", err)
+		}
+	})
+
+	role, password := uniqueName("schema_reader"), uniqueName("schema_reader_password")
+	if _, err := admin.sqlDB.ExecContext(ctx, fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT", quoteIdent(role), password)); err != nil {
+		t.Fatalf("create non-owner reader role: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := admin.sqlDB.ExecContext(context.Background(), "DROP OWNED BY "+quoteIdent(role)); err != nil {
+			t.Errorf("drop grants owned by test reader: %v", err)
+		}
+		if _, err := admin.sqlDB.ExecContext(context.Background(), "DROP ROLE IF EXISTS "+quoteIdent(role)); err != nil {
+			t.Errorf("drop test reader role: %v", err)
+		}
+	})
+
+	execAll(t, admin,
+		`CREATE TABLE `+firstSQL+`."Parent" (
+			"Key Z" integer, "Key A" integer,
+			CONSTRAINT "parent_pk" PRIMARY KEY ("Key Z", "Key A")
+		)`,
+		`CREATE TABLE `+firstSQL+`."Child" (
+			"Child Z" integer, "Child A" integer,
+			"Parent Z" integer, "Parent A" integer, "Unique Value" text,
+			CONSTRAINT "child_pk" PRIMARY KEY ("Child Z", "Child A"),
+			CONSTRAINT "same_fk_name" FOREIGN KEY ("Parent Z", "Parent A")
+				REFERENCES `+firstSQL+`."Parent" ("Key Z", "Key A"),
+			CONSTRAINT "child_uq" UNIQUE ("Unique Value")
+		)`,
+		`CREATE TABLE `+firstSQL+`."Hidden Child" (
+			"Parent Z" integer, "Parent A" integer,
+			CONSTRAINT "hidden_fk" FOREIGN KEY ("Parent Z", "Parent A")
+				REFERENCES `+firstSQL+`."Parent" ("Key Z", "Key A")
+		)`,
+		`CREATE TABLE `+secondSQL+`."Child" (
+			"Other ID" integer,
+			CONSTRAINT "child_pk" PRIMARY KEY ("Other ID")
+		)`,
+		"GRANT USAGE ON SCHEMA "+firstSQL+", "+secondSQL+" TO "+quoteIdent(role),
+		"GRANT SELECT ON "+firstSQL+`."Parent", `+firstSQL+`."Child" TO `+quoteIdent(role),
+	)
+
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse admin connection: %v", err)
+	}
+	cfg.User, cfg.Password = role, password
+	readerSQL := stdlib.OpenDB(*cfg)
+	t.Cleanup(func() { _ = readerSQL.Close() })
+	if err := readerSQL.PingContext(ctx); err != nil {
+		t.Fatalf("connect as SELECT-only reader: %v", err)
+	}
+	readerOptions := []Option{WithSchema(firstSchema), WithIdentifierMode(IdentifierExact)}
+	readerSettings, err := resolveSettings(dalgo2sql.DbOptions{}, readerOptions)
+	if err != nil {
+		t.Fatalf("resolve SELECT-only reader settings: %v", err)
+	}
+	reader := newDatabaseFromSQL(readerSQL, dal.NewSchema(nil, nil), readerSettings, readerOptions)
+	var superuser, canCreateRole, canCreateDB, ownsChild bool
+	if err := reader.sqlDB.QueryRowContext(ctx, `
+		SELECT role.rolsuper, role.rolcreaterole, role.rolcreatedb,
+		       pg_catalog.pg_has_role(collection.relowner, 'USAGE')
+		FROM pg_catalog.pg_roles AS role
+		JOIN pg_catalog.pg_class AS collection ON collection.relname = 'Child'
+		JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = collection.relnamespace
+		WHERE role.rolname = current_user AND namespace.nspname = $1`, firstSchema).
+		Scan(&superuser, &canCreateRole, &canCreateDB, &ownsChild); err != nil {
+		t.Fatalf("verify the reader is unprivileged and does not own the table: %v", err)
+	}
+	if superuser || canCreateRole || canCreateDB || ownsChild {
+		t.Fatalf("reader privilege proof = superuser:%v create-role:%v create-db:%v owner:%v; want all false", superuser, canCreateRole, canCreateDB, ownsChild)
+	}
+
+	child := dal.NewRootCollectionRef("Child", "")
+	definition, err := reader.DescribeCollection(ctx, &child)
+	if err != nil {
+		t.Fatalf("DescribeCollection on SELECT-only role: %v", err)
+	}
+	if got, want := definition.PrimaryKey, []dal.FieldName{"Child Z", "Child A"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("composite PrimaryKey = %v, want ordinal order %v", got, want)
+	}
+	positions := map[string]int{}
+	for _, column := range definition.SourceDefinition.Columns {
+		positions[column.Name] = column.PrimaryKeyPosition
+	}
+	if positions["Child Z"] != 1 || positions["Child A"] != 2 || positions["Parent Z"] != 0 {
+		t.Errorf("source primary-key positions = %v, want Child Z=1, Child A=2, Parent Z=0", positions)
+	}
+	if len(definition.ForeignKeys) != 1 || definition.ForeignKeys[0].Name != "same_fk_name" ||
+		!reflect.DeepEqual(definition.ForeignKeys[0].Fields, []dal.FieldName{"Parent Z", "Parent A"}) ||
+		!reflect.DeepEqual(definition.ForeignKeys[0].ReferencedFields, []dal.FieldName{"Key Z", "Key A"}) {
+		t.Errorf("composite foreign key = %+v, want ordered child and parent fields", definition.ForeignKeys)
+	}
+
+	constraints, err := reader.ListConstraints(ctx, &child)
+	if err != nil {
+		t.Fatalf("ListConstraints on SELECT-only role: %v", err)
+	}
+	if len(constraints) != 3 || constraints[0].Type != "foreign-key" || constraints[0].Name != "same_fk_name" ||
+		constraints[1].Type != "primary-key" || constraints[1].Name != "child_pk" ||
+		constraints[2].Type != "unique" || constraints[2].Name != "child_uq" {
+		t.Errorf("constraints = %+v, want only this schema/table's FK, PK, and UNIQUE constraints", constraints)
+	}
+
+	parent := dal.NewRootCollectionRef("Parent", "")
+	referrers, err := reader.ListReferrers(ctx, &parent)
+	if err != nil {
+		t.Fatalf("ListReferrers on SELECT-only role: %v", err)
+	}
+	if len(referrers) != 1 || referrers[0].Collection.Name() != "Child" ||
+		!reflect.DeepEqual(referrers[0].Fields, []dal.FieldName{"Parent Z", "Parent A"}) {
+		t.Errorf("referrers = %+v, want only the visible Child in FK ordinal order", referrers)
+	}
+
+	hidden := dal.NewQualifiedRootCollectionRef(secondSchema, "Child", "")
+	if got, err := reader.DescribeCollection(ctx, &hidden); err == nil || got != nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("DescribeCollection of same-named ungranted table = %v, %v; want hidden/not found", got, err)
+	}
+	if got, err := reader.ListConstraints(ctx, &hidden); err != nil || len(got) != 0 {
+		t.Errorf("ListConstraints of ungranted same-named table = %+v, %v; want no metadata", got, err)
+	}
+	if got, err := reader.ListIndexes(ctx, &hidden); err != nil || len(got) != 0 {
+		t.Errorf("ListIndexes of ungranted same-named table = %+v, %v; want no metadata", got, err)
 	}
 }
 

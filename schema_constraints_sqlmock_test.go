@@ -14,7 +14,7 @@ import (
 
 func TestListConstraints_ExactNameInSchema(t *testing.T) {
 	d, mock := newSchemaMockDatabase(t, WithSchema("sales"), WithIdentifierMode(IdentifierExact))
-	mock.ExpectQuery(`constraint_type IN \('PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY'\)`).
+	mock.ExpectQuery(`pg_catalog\.pg_constraint`).
 		WithArgs("sales", "Album").
 		WillReturnRows(sqlmock.NewRows([]string{"constraint_name", "constraint_type"}).
 			AddRow("Album_fk", "FOREIGN KEY").
@@ -40,7 +40,7 @@ func TestListConstraints_ExactNameInSchema(t *testing.T) {
 
 func TestListConstraints_FoldLowerDefault(t *testing.T) {
 	d, mock := newSchemaMockDatabase(t)
-	mock.ExpectQuery(`table_constraints`).WithArgs("public", "album").
+	mock.ExpectQuery(`pg_catalog\.pg_constraint`).WithArgs("public", "album").
 		WillReturnRows(sqlmock.NewRows([]string{"constraint_name", "constraint_type"}))
 	ref := dal.NewRootCollectionRef("Album", "")
 	if _, err := d.ListConstraints(context.Background(), &ref); err != nil {
@@ -52,14 +52,14 @@ func TestListConstraints_Errors(t *testing.T) {
 	ref := dal.NewRootCollectionRef("t", "")
 	t.Run("query", func(t *testing.T) {
 		d, mock := newSchemaMockDatabase(t)
-		mock.ExpectQuery(`table_constraints`).WillReturnError(errors.New("boom"))
+		mock.ExpectQuery(`pg_catalog\.pg_constraint`).WillReturnError(errors.New("boom"))
 		if _, err := d.ListConstraints(context.Background(), &ref); err == nil || !strings.Contains(err.Error(), "boom") {
 			t.Fatalf("err = %v", err)
 		}
 	})
 	t.Run("scan", func(t *testing.T) {
 		d, mock := newSchemaMockDatabase(t)
-		mock.ExpectQuery(`table_constraints`).
+		mock.ExpectQuery(`pg_catalog\.pg_constraint`).
 			WillReturnRows(sqlmock.NewRows([]string{"constraint_name", "constraint_type"}).AddRow(nil, "UNIQUE"))
 		if _, err := d.ListConstraints(context.Background(), &ref); err == nil || !strings.Contains(err.Error(), "scan") {
 			t.Fatalf("err = %v", err)
@@ -108,7 +108,7 @@ func TestListReferrers_QuerySelectsSourceNotTarget(t *testing.T) {
 	// The old query selected the referenced table's name as the referrer, and the
 	// current one must order the key columns by their position in the key.
 	d, mock := newSchemaMockDatabase(t)
-	mock.ExpectQuery(`(?s)SELECT c\.oid, source\.relname AS referrer_table, source_column\.attname AS referrer_col.*WITH ORDINALITY.*ORDER BY source\.relname, c\.conname, c\.oid, source_key\.position`).
+	mock.ExpectQuery(`(?s)SELECT constraint_row\.oid, source\.relname AS referrer_table, source_column\.attname AS referrer_col.*WITH ORDINALITY.*ORDER BY source\.relname, constraint_row\.conname, constraint_row\.oid, source_key\.position`).
 		WithArgs("public", "artist").
 		WillReturnRows(sqlmock.NewRows([]string{"oid", "referrer_table", "referrer_col"}))
 	ref := dal.NewRootCollectionRef("Artist", "")
