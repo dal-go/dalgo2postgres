@@ -67,6 +67,13 @@ func TestSchemaReaderIntegration_MixedCaseUnknownTypesViewsAndReferrers(t *testi
 
 	execAll(t, db,
 		`CREATE TYPE `+s+`."Mood" AS ENUM ('happy', 'sad')`,
+		`CREATE TABLE `+s+`."TimeKinds" (
+			"date_value" date,
+			"time_value" time without time zone,
+			"time_tz_value" time with time zone,
+			"timestamp_value" timestamp without time zone,
+			"timestamptz_value" timestamp with time zone
+		)`,
 		`CREATE TABLE `+s+`."Artist" ("ArtistId" integer PRIMARY KEY, "Name" text)`,
 		`CREATE TABLE `+s+`."Album" (
 			"AlbumId" integer PRIMARY KEY,
@@ -90,7 +97,7 @@ func TestSchemaReaderIntegration_MixedCaseUnknownTypesViewsAndReferrers(t *testi
 	if err != nil {
 		t.Fatalf("ListCollections: %v", err)
 	}
-	if got, want := collectionNames(refs), []string{"Album", "AlbumTitles", "Artist"}; !reflect.DeepEqual(got, want) {
+	if got, want := collectionNames(refs), []string{"Album", "AlbumTitles", "Artist", "TimeKinds"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("ListCollections = %v, want %v", got, want)
 	}
 
@@ -115,6 +122,38 @@ func TestSchemaReaderIntegration_MixedCaseUnknownTypesViewsAndReferrers(t *testi
 	}
 	if !reflect.DeepEqual(def.PrimaryKey, []dal.FieldName{"AlbumId"}) {
 		t.Errorf("PrimaryKey = %v", def.PrimaryKey)
+	}
+	if def.SourceDefinition == nil || def.SourceDefinition.Dialect != "postgres" {
+		t.Fatalf("Album SourceDefinition = %+v, want PostgreSQL metadata", def.SourceDefinition)
+	}
+	sourceColumns := make(map[string]dbschema.SourceColumnDef, len(def.SourceDefinition.Columns))
+	for _, column := range def.SourceDefinition.Columns {
+		sourceColumns[column.Name] = column
+	}
+	if got := sourceColumns["Rating"].DeclaredType; got != "numeric" {
+		t.Errorf("Rating declared type = %q, want numeric", got)
+	}
+	if got := sourceColumns["ArtistId"].PrimaryKeyPosition; got != 0 {
+		t.Errorf("ArtistId primary-key position = %d, want 0", got)
+	}
+
+	timeKinds := dal.NewRootCollectionRef("TimeKinds", "")
+	timeDef, err := db.DescribeCollection(ctx, &timeKinds)
+	if err != nil {
+		t.Fatalf("DescribeCollection(TimeKinds): %v", err)
+	}
+	wantDeclaredTypes := map[string]string{
+		"date_value": "date", "time_value": "time without time zone",
+		"time_tz_value": "time with time zone", "timestamp_value": "timestamp without time zone",
+		"timestamptz_value": "timestamp with time zone",
+	}
+	if timeDef.SourceDefinition == nil {
+		t.Fatal("TimeKinds SourceDefinition is nil")
+	}
+	for _, column := range timeDef.SourceDefinition.Columns {
+		if want, ok := wantDeclaredTypes[column.Name]; !ok || column.DeclaredType != want {
+			t.Errorf("column %q declared type = %q, want %q (known=%v)", column.Name, column.DeclaredType, want, ok)
+		}
 	}
 	if len(def.ForeignKeys) != 1 || def.ForeignKeys[0].Name != "fk_artist" || def.ForeignKeys[0].ReferencedCollection != "Artist" ||
 		def.ForeignKeys[0].ReferencedNamespace != "" {
