@@ -6,6 +6,7 @@ PostgreSQL-specific DALgo driver. Wraps `github.com/dal-go/dalgo2sql` to provide
   bound and every name quoted, with filtering, ordering, grouping, aggregation and joins run
   on the server (see "Structured queries")
 - `dbschema.SchemaReader` — schema introspection via `information_schema`, `pg_catalog` and `pg_indexes`: every non-system schema, views told from tables, column defaults
+- `dbschema.SourceViewReader` — ordered view columns and normalized view-definition metadata for the configured schema
 - `ddl.SchemaModifier` and `ddl.Applier` — PostgreSQL-flavored `CREATE TABLE` / `CREATE INDEX` / `DROP TABLE` / `ALTER TABLE`
 - `dal.ConcurrencyAware` — advertises `SupportsConcurrentConnections() = true`
   (PostgreSQL supports concurrent connections from multiple goroutines and processes,
@@ -579,7 +580,10 @@ indexes and composite types are not collections.
 **Views.** `ListViews(ctx)` (the optional interface of the DataTug schema provider) and
 `ListSchemaViews(ctx, schema)` list the views and the materialized views, by the same
 references `ListCollections` and `ListSchemaCollections` give. A foreign table, a
-partitioned table and a partition are tables.
+partitioned table and a partition are tables. `ListSourceViews(ctx)` implements
+`dbschema.SourceViewReader` for the configured schema: it returns each view's ordered
+column names and PostgreSQL's normalized `pg_get_viewdef` text as metadata. It does not
+execute view SQL; views remain separate from physical table-row exports.
 
 **Native column types.** `DescribeCollection` also returns a PostgreSQL
 `dbschema.SourceDefinition` with one `SourceColumnDef` per column. `DeclaredType` keeps
