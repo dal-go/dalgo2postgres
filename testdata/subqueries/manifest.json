@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "sourceModule": "github.com/dal-go/dalgo",
-  "sourceVersion": "v0.89.6",
-  "sourceCommit": "d4bc59f0e887e19136d22e25afe862f1415dba61",
+  "sourceVersion": "v0.93.0",
+  "sourceCommit": "c33f7ef449ea6ec1f65068c1acbd5aa5005008aa",
   "sourcePath": "dtql/testdata/subqueries",
   "files": {
     "README.md": "37cf55ca65749c13563693a6b6787cc1ad623374100b55cd2e56c9624c02a45a",

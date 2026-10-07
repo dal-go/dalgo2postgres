@@ -581,6 +581,13 @@ indexes and composite types are not collections.
 references `ListCollections` and `ListSchemaCollections` give. A foreign table, a
 partitioned table and a partition are tables.
 
+**Native column types.** `DescribeCollection` also returns a PostgreSQL
+`dbschema.SourceDefinition` with one `SourceColumnDef` per column. `DeclaredType` keeps
+the catalog's `data_type` spelling (including the distinction between `date`, `time`
+and `timestamp`, and their timezone variants), while the portable `FieldDef.Type`
+continues to describe the DALgo value category. Exporters can use this metadata to
+preserve temporal meaning instead of guessing from `dbschema.Time` alone.
+
 **Defaults.** `DescribeCollection` sets `FieldDef.Default` to a `dbschema.DefaultLiteral`
 whose `Value` is the *text* of the expression as PostgreSQL prints it, a string:
 `'new'::text`, `now()`, `1`, `nextval('sales.hits_seq'::regclass)`. `dbschema.DefaultExpr`

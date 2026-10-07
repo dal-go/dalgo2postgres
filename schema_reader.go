@@ -95,6 +95,11 @@ func describeCollectionImpl(ctx context.Context, db *sql.DB, schema, name string
 	defer func() { _ = rows.Close() }()
 
 	var fields []dbschema.FieldDef
+	var sourceColumns []dbschema.SourceColumnDef
+	pkPosition := make(map[string]int, len(pkCols))
+	for i, col := range pkCols {
+		pkPosition[col] = i + 1
+	}
 	for rows.Next() {
 		var (
 			colName     string
@@ -147,6 +152,12 @@ func describeCollectionImpl(ctx context.Context, db *sql.DB, schema, name string
 			AutoIncrement: isIdentity == "YES",
 		}
 		fields = append(fields, f)
+		sourceColumns = append(sourceColumns, dbschema.SourceColumnDef{
+			Name:               colName,
+			DeclaredType:       dataType,
+			NotNull:            isNullable == "NO",
+			PrimaryKeyPosition: pkPosition[colName],
+		})
 	}
 	if rowsErr := rows.Err(); rowsErr != nil {
 		return nil, fmt.Errorf("dalgo2postgres: DescribeCollection rows: %w", rowsErr)
@@ -168,11 +179,12 @@ func describeCollectionImpl(ctx context.Context, db *sql.DB, schema, name string
 	}
 
 	return &dbschema.CollectionDef{
-		Name:        name,
-		Fields:      fields,
-		PrimaryKey:  pk,
-		Indexes:     indexes,
-		ForeignKeys: foreignKeys,
+		Name:             name,
+		Fields:           fields,
+		PrimaryKey:       pk,
+		Indexes:          indexes,
+		ForeignKeys:      foreignKeys,
+		SourceDefinition: &dbschema.SourceDefinition{Dialect: "postgres", Columns: sourceColumns},
 	}, nil
 }
 
