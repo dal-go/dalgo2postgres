@@ -17,7 +17,7 @@ import (
 // The stage queries of one DescribeCollection call, in the order they run.
 const (
 	qProbe   = `SELECT c\.relkind::text`
-	qPK      = `tc\.constraint_type = 'PRIMARY KEY'`
+	qPK      = `pg_catalog\.pg_constraint`
 	qColumns = `information_schema\.columns`
 	qIndexes = `pg_indexes`
 	qFKs     = `c\.contype = 'f'`
@@ -487,7 +487,7 @@ func TestQualifiedReference_SchemaOnTheReferenceIsHonoured(t *testing.T) {
 			t.Errorf("ListIndexes: err = %v, want %s", err, want)
 		}
 		d, mock = newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
-		mock.ExpectQuery(`table_constraints`).WillReturnError(boom)
+		mock.ExpectQuery(`pg_catalog\.pg_constraint`).WillReturnError(boom)
 		if _, err = d.ListConstraints(context.Background(), &ref); err == nil || !strings.Contains(err.Error(), "ListConstraints "+want) {
 			t.Errorf("ListConstraints: err = %v, want %s", err, want)
 		}
@@ -507,7 +507,7 @@ func TestQualifiedReference_SchemaOnTheReferenceIsHonoured(t *testing.T) {
 	})
 	t.Run("ListConstraints", func(t *testing.T) {
 		d, mock := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
-		mock.ExpectQuery(`table_constraints`).WithArgs("sales", "Album").
+		mock.ExpectQuery(`pg_catalog\.pg_constraint`).WithArgs("sales", "Album").
 			WillReturnRows(sqlmock.NewRows([]string{"constraint_name", "constraint_type"}))
 		if _, err := d.ListConstraints(context.Background(), &ref); err != nil {
 			t.Fatalf("ListConstraints: %v", err)

@@ -9,8 +9,7 @@ import (
 )
 
 // ListConstraints returns a best-effort survey of constraints on the table via
-// information_schema, in the schema the reference names, else the configured
-// schema:
+// pg_catalog, in the schema the reference names, else the configured schema:
 //   - PRIMARY KEY constraint (one row if any PK columns exist)
 //   - UNIQUE constraints
 //   - FOREIGN KEY constraints
@@ -28,12 +27,18 @@ func (d *Database) listConstraints(ctx context.Context, ref *dal.CollectionRef) 
 		return nil, err
 	}
 	rows, err := d.sqlDB.QueryContext(ctx,
-		`SELECT constraint_name, constraint_type
-		 FROM information_schema.table_constraints
-		 WHERE table_schema = $1::text
-		   AND table_name   = $2::text
-		   AND constraint_type IN ('PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY')
-		 ORDER BY constraint_type, constraint_name`,
+		`SELECT con.conname::text,
+		        CASE con.contype WHEN 'f' THEN 'FOREIGN KEY'
+		                         WHEN 'p' THEN 'PRIMARY KEY'
+		                         WHEN 'u' THEN 'UNIQUE' END
+		 FROM pg_catalog.pg_constraint AS con
+		 JOIN pg_catalog.pg_class AS c ON c.oid = con.conrelid
+		 JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+		 WHERE n.nspname = $1::text
+		   AND c.relname = $2::text
+		   AND con.contype IN ('p', 'u', 'f')
+		   AND `+relationVisibleSQL+`
+		 ORDER BY 2, con.conname`,
 		schema, name,
 	)
 	if err != nil {
@@ -81,20 +86,26 @@ func (d *Database) listReferrers(ctx context.Context, ref *dal.CollectionRef) ([
 		return nil, err
 	}
 	rows, err := d.sqlDB.QueryContext(ctx,
-		`SELECT c.oid, source.relname AS referrer_table, source_column.attname AS referrer_col
-		 FROM pg_catalog.pg_constraint AS c
-		 JOIN pg_catalog.pg_class AS source ON source.oid = c.conrelid
-		 JOIN pg_catalog.pg_namespace AS source_ns ON source_ns.oid = source.relnamespace
-		 JOIN pg_catalog.pg_class AS target ON target.oid = c.confrelid
-		 JOIN pg_catalog.pg_namespace AS target_ns ON target_ns.oid = target.relnamespace
-		 JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS source_key(attnum, position) ON true
-		 JOIN pg_catalog.pg_attribute AS source_column
-		   ON source_column.attrelid = source.oid AND source_column.attnum = source_key.attnum
-		 WHERE c.contype = 'f'
-		   AND source_ns.nspname = $1::text
-		   AND target_ns.nspname = $1::text
-		   AND target.relname    = $2::text
-		 ORDER BY source.relname, c.conname, c.oid, source_key.position`,
+		`SELECT constraint_row.oid, source.relname AS referrer_table, source_column.attname AS referrer_col
+			 FROM pg_catalog.pg_constraint AS constraint_row
+			 JOIN pg_catalog.pg_class AS source ON source.oid = constraint_row.conrelid
+			 JOIN pg_catalog.pg_namespace AS source_ns ON source_ns.oid = source.relnamespace
+			 JOIN pg_catalog.pg_class AS target ON target.oid = constraint_row.confrelid
+			 JOIN pg_catalog.pg_namespace AS target_ns ON target_ns.oid = target.relnamespace
+			 JOIN LATERAL unnest(constraint_row.conkey) WITH ORDINALITY AS source_key(attnum, position) ON true
+			 JOIN pg_catalog.pg_attribute AS source_column
+			   ON source_column.attrelid = source.oid AND source_column.attnum = source_key.attnum
+			 WHERE constraint_row.contype = 'f'
+			   AND source_ns.nspname = $1::text
+			   AND target_ns.nspname = $1::text
+			   AND target.relname    = $2::text
+			   AND (pg_catalog.pg_has_role(source.relowner, 'USAGE')
+			        OR pg_catalog.has_table_privilege(source.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
+			        OR pg_catalog.has_any_column_privilege(source.oid, 'SELECT, INSERT, UPDATE, REFERENCES'))
+			   AND (pg_catalog.pg_has_role(target.relowner, 'USAGE')
+			        OR pg_catalog.has_table_privilege(target.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
+			        OR pg_catalog.has_any_column_privilege(target.oid, 'SELECT, INSERT, UPDATE, REFERENCES'))
+			 ORDER BY source.relname, constraint_row.conname, constraint_row.oid, source_key.position`,
 		schema, name,
 	)
 	if err != nil {

@@ -191,16 +191,18 @@ func describeCollectionImpl(ctx context.Context, db *sql.DB, schema, name string
 // listPrimaryKeyColumns returns the primary key column names in key ordinal order.
 func listPrimaryKeyColumns(ctx context.Context, db *sql.DB, schema, table string) ([]string, error) {
 	rows, err := db.QueryContext(ctx,
-		`SELECT kcu.column_name
-		 FROM information_schema.table_constraints tc
-		 JOIN information_schema.key_column_usage kcu
-		   ON tc.constraint_name = kcu.constraint_name
-		  AND tc.table_schema    = kcu.table_schema
-		  AND tc.table_name      = kcu.table_name
-		 WHERE tc.constraint_type = 'PRIMARY KEY'
-		   AND tc.table_schema    = $1::text
-		   AND tc.table_name      = $2::text
-		 ORDER BY kcu.ordinal_position`,
+		`SELECT a.attname::text
+		 FROM pg_catalog.pg_constraint AS con
+		 JOIN pg_catalog.pg_class AS c ON c.oid = con.conrelid
+		 JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+		 JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS key_column(attnum, position) ON true
+		 JOIN pg_catalog.pg_attribute AS a
+		   ON a.attrelid = c.oid AND a.attnum = key_column.attnum
+		 WHERE con.contype = 'p'
+		   AND n.nspname = $1::text
+		   AND c.relname = $2::text
+		   AND `+relationVisibleSQL+`
+		 ORDER BY key_column.position`,
 		schema, table,
 	)
 	if err != nil {
@@ -230,6 +232,13 @@ func listIndexesImpl(ctx context.Context, db *sql.DB, schema, name string, label
 		 FROM pg_catalog.pg_indexes i
 		 WHERE i.schemaname = $1::text
 		   AND i.tablename  = $2::text
+		   AND EXISTS (
+		       SELECT 1 FROM pg_catalog.pg_class AS c
+		       JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+		       WHERE n.nspname = i.schemaname
+		         AND c.relname = i.tablename
+		         AND `+relationVisibleSQL+`
+		   )
 		   AND NOT EXISTS (
 		       SELECT 1 FROM pg_catalog.pg_constraint c
 		       JOIN pg_catalog.pg_class t ON t.oid = c.conrelid

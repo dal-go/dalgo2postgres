@@ -90,7 +90,7 @@ func TestSchemaReader_EveryNameParameterIsCastToText(t *testing.T) {
 	}
 
 	// ListConstraints.
-	mock.ExpectQuery(`constraint_type IN`).WithArgs("public", "t").WillReturnRows(sqlmock.NewRows([]string{"name", "type"}))
+	mock.ExpectQuery(`pg_catalog\.pg_constraint`).WithArgs("public", "t").WillReturnRows(sqlmock.NewRows([]string{"name", "type"}))
 	if _, err := d.ListConstraints(ctx, &ref); err != nil {
 		t.Errorf("ListConstraints: %v", err)
 	}
