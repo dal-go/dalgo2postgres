@@ -123,6 +123,16 @@ func TestResolveSettings(t *testing.T) {
 	}
 }
 
+func TestResolveSettingsPreservesOptInExactNumericValues(t *testing.T) {
+	got, err := resolveSettings(dalgo2sql.DbOptions{ExactNumericValues: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.db.ExactNumericValues {
+		t.Fatal("the PostgreSQL adapter dropped the caller's exact NUMERIC read option")
+	}
+}
+
 func TestResolveSettings_ForcesTheDialectWhateverTheCallerSets(t *testing.T) {
 	for _, dialect := range []string{"", "sqlite", "mysql", "nonsense", "postgres"} {
 		got, err := resolveSettings(dalgo2sql.DbOptions{StructuredQueryDialect: dialect}, nil)
