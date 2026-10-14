@@ -522,6 +522,7 @@ func errorCalls(s standIn) map[string]errorCall {
 // The stand-in must be able to leak. If it could not, every test below would be green for a
 // reason that has nothing to do with the adapter.
 func TestErrorsHoldNoConfiguration_TheStandInFailureHoldsEveryMarker(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	failure := connectFailure(t, refuseEveryDial)
 	var connectErr *pgconn.ConnectError
 	if !errors.As(failure, &connectErr) {
@@ -584,6 +585,7 @@ func assertCall(t *testing.T, name string, call errorCall) {
 // Every call of the table, against a connection that fails, yields only errors that hold no part
 // of the configuration, and, unless the call never reaches a connection, a classified one.
 func TestErrorsHoldNoConfiguration_EveryCall(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	for _, in := range standIns() {
 		for name, call := range errorCalls(in) {
 			t.Run(in.name+"/"+name, func(t *testing.T) { assertCall(t, name, call) })
@@ -595,6 +597,7 @@ func TestErrorsHoldNoConfiguration_EveryCall(t *testing.T) {
 // the catalog and the rows through the layers under the adapter, which put the text of an error in
 // a message of their own. What comes out holds no part of the configuration either.
 func TestErrorsHoldNoConfiguration_JoinsAndGroupedQueries(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	id := dal.NewFieldRef("", "id")
 	grouped := dal.From(dal.NewRootCollectionRef("orders", "")).NewQuery().GroupBy(id).
 		SelectColumns(dal.Column{Expression: id}, dal.Column{Expression: dal.NewAggregate(dal.COUNT, false, dal.Star()), Alias: "n"})
@@ -666,6 +669,7 @@ func handedOutTypes(t *testing.T) map[string]reflect.Type {
 // to an interface the adapter hands out (or that this package adds) is found here, whether the
 // adapter guards it or not, and fails the test until it is in the table and its stand-in is made.
 func TestErrorsHoldNoConfiguration_TableNamesEveryErrorReturningMethod(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	table := errorCalls(standIns()[0])
 	errorType := reflect.TypeOf((*error)(nil)).Elem()
 	methods := map[string]bool{}
@@ -706,6 +710,7 @@ func TestErrorsHoldNoConfiguration_TableNamesEveryErrorReturningMethod(t *testin
 // The declared interfaces the adapter hands out are covered whole: the types above must have at
 // least their methods, so that a type that stopped implementing one is noticed here and not by a consumer.
 func TestErrorsHoldNoConfiguration_HandedOutValuesHaveTheirInterfacesMethods(t *testing.T) {
+	t.Parallel()
 	declared := map[string]reflect.Type{
 		"DB":                   reflect.TypeOf((*dal.DB)(nil)).Elem(),
 		"Backend":              reflect.TypeOf((*dal.Backend)(nil)).Elem(),

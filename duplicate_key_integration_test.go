@@ -55,6 +55,7 @@ type mockRecordData struct {
 // (see TestConformance) — using a mocked driver error instead of a real
 // PostgreSQL instance.
 func TestDatabase_Insert_DuplicateKey_EndToEnd(t *testing.T) {
+	t.Parallel()
 	const tbl = "widgets"
 
 	t.Run("23505 unique_violation is reported as record.IsAlreadyExists", func(t *testing.T) {

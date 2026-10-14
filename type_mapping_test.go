@@ -7,6 +7,7 @@ import (
 )
 
 func TestDbschemaTypeFromPostgres(t *testing.T) {
+	t.Parallel()
 	intPtr := func(n int) *int { return &n }
 	tests := []struct {
 		name          string
@@ -65,6 +66,7 @@ func TestDbschemaTypeFromPostgres(t *testing.T) {
 }
 
 func TestDbschemaTypeFromPostgres_OverflowingSizesFallBack(t *testing.T) {
+	t.Parallel()
 	// A length or precision too large for int cannot be parsed; the column still reads.
 	huge := "99999999999999999999999999"
 	if got, _, length := dbschemaTypeFromPostgres("VARCHAR("+huge+")", "varchar"); got != dbschema.String || length != nil {
@@ -74,5 +76,41 @@ func TestDbschemaTypeFromPostgres_OverflowingSizesFallBack(t *testing.T) {
 	// from the numeric_precision column instead.
 	if got, precision, _ := dbschemaTypeFromPostgres("NUMERIC("+huge+", 2)", "numeric"); got != dbschema.Decimal || precision != nil {
 		t.Errorf("huge numeric precision: type=%v precision=%v, want Decimal and no precision", got, precision)
+	}
+}
+
+func TestPostgresTypeFor(t *testing.T) {
+	t.Parallel()
+	intPtr := func(n int) *int { return &n }
+	tests := []struct {
+		name    string
+		field   dbschema.FieldDef
+		want    string
+		wantErr bool
+	}{
+		{name: "string default", field: dbschema.FieldDef{Type: dbschema.String}, want: "TEXT"},
+		{name: "string zero length", field: dbschema.FieldDef{Type: dbschema.String, Length: intPtr(0)}, want: "TEXT"},
+		{name: "string with length", field: dbschema.FieldDef{Type: dbschema.String, Length: intPtr(40)}, want: "VARCHAR(40)"},
+		{name: "int", field: dbschema.FieldDef{Type: dbschema.Int}, want: "BIGINT"},
+		{name: "float", field: dbschema.FieldDef{Type: dbschema.Float}, want: "DOUBLE PRECISION"},
+		{name: "bool", field: dbschema.FieldDef{Type: dbschema.Bool}, want: "BOOLEAN"},
+		{name: "time", field: dbschema.FieldDef{Type: dbschema.Time}, want: "TIMESTAMPTZ"},
+		{name: "decimal default", field: dbschema.FieldDef{Type: dbschema.Decimal}, want: "NUMERIC"},
+		{name: "decimal with precision", field: dbschema.FieldDef{Type: dbschema.Decimal, Precision: &dbschema.Precision{Total: 10, Scale: 2}}, want: "NUMERIC(10, 2)"},
+		{name: "bytes", field: dbschema.FieldDef{Type: dbschema.Bytes}, want: "BYTEA"},
+		{name: "null", field: dbschema.FieldDef{Type: dbschema.Null}, wantErr: true},
+		{name: "unknown", field: dbschema.FieldDef{Type: dbschema.Type(99)}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := postgresTypeFor(tt.field)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("postgresTypeFor(%+v) err = %v, wantErr %v", tt.field, err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("postgresTypeFor(%+v) = %q, want %q", tt.field, got, tt.want)
+			}
+		})
 	}
 }

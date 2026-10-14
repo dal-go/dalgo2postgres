@@ -75,6 +75,7 @@ func endingContexts() []endingContext {
 const runsOfAContextThatEnds = 60
 
 func TestATransactionWhoseStatementEndsOnItsContextIsTheContextsError(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
 	for _, ending := range endingContexts() {
 		for _, kind := range transactionKinds() {
@@ -129,6 +130,7 @@ func endedContext(deadline bool) context.Context {
 // database/sql has rolled back (sql.ErrTxDone), or a connection the driver has closed (pgx's "rollback
 // failed: conn closed"), whichever came first, and neither is a failure of the connection.
 func TestLeaveTransaction_AContextThatEndedIsTheWorkersError(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	rollbacks := map[string]error{
 		"the transaction is finished":     sql.ErrTxDone,
 		"the connection is closed":        fmt.Errorf("rollback failed: %w", pgconn.ErrConnClosed),
@@ -177,6 +179,7 @@ func TestLeaveTransaction_AContextThatEndedIsTheWorkersError(t *testing.T) {
 // connection error, whatever the worker returned, and a worker that holds a context error of its
 // own (a context it made itself) does not make the rollback's failure the context's.
 func TestLeaveTransaction_AContextThatHasNotEndedChangesNothing(t *testing.T) {
+	t.Parallel()
 	worker := fmt.Errorf("failed to get SQL reader: %w", context.Canceled)
 	for name, rollback := range map[string]error{
 		"the connection is closed": fmt.Errorf("rollback failed: %w", pgconn.ErrConnClosed),
@@ -201,6 +204,7 @@ func TestLeaveTransaction_AContextThatHasNotEndedChangesNothing(t *testing.T) {
 // What a transaction adds around the worker is guarded whether or not its context has ended, and an
 // error that is no rollback error of a worker is not read as one.
 func TestLeaveTransaction_AContextThatEndedLeavesTheRestAlone(t *testing.T) {
+	t.Parallel()
 	ended := endedContext(false)
 	commit := fmt.Errorf("failed to commit transaction: %w", droppedFailures()[0].err())
 	if _, ok := leaveTransaction(ended, commit).(*ConnectionError); !ok {

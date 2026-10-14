@@ -85,6 +85,7 @@ func shutsDownWith(code string) func(*pgproto3.Backend, net.Conn) {
 // session, or the network resets it) is a connection error at any call: pgx returns the error of
 // the read as it is, and it is not a connect error.
 func TestADroppedConnectionIsAConnectionError(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	ctx := context.Background()
 	t.Run("on the handle", func(t *testing.T) {
 		db := lazyDatabase(t, sessionServer(dropsTheConnection))
@@ -112,6 +113,7 @@ func TestADroppedConnectionIsAConnectionError(t *testing.T) {
 // A statement that ends because its context was canceled is the context's error: a
 // reset or a closed connection is a failure of the connection, and a canceled call is not.
 func TestAStatementThatEndsOnItsContextStaysAContextError(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	met := make(chan struct{})
@@ -140,6 +142,7 @@ func TestAStatementThatEndsOnItsContextStaysAContextError(t *testing.T) {
 // because the connection is gone (it always cannot), is a connection error from both transaction
 // methods, whichever way the connection was lost, and holds nothing of what the worker met.
 func TestATransactionLostInTheMiddleIsAConnectionError(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	ctx := context.Background()
 	for name, onStatement := range map[string]func(*pgproto3.Backend, net.Conn){
 		"the server shuts down": shutsDownWith("57P01"),

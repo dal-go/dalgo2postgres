@@ -63,6 +63,7 @@ func expectPK(mock sqlmock.Sqlmock, schema, name string, cols ...string) {
 }
 
 func TestListCollections_QueriesTablesAndViewsInSchema(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t, WithSchema("sales"), WithIdentifierMode(IdentifierExact))
 	mock.ExpectQuery(listRelationsQuery).WithArgs("sales").
 		WillReturnRows(relationRows().AddRow("Album", false).AddRow("album_view", true))
@@ -81,6 +82,7 @@ func TestListCollections_QueriesTablesAndViewsInSchema(t *testing.T) {
 }
 
 func TestListCollections_DefaultsToPublic(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t)
 	mock.ExpectQuery(listRelationsQuery).WithArgs("public").WillReturnRows(relationRows())
 	got, err := d.ListCollections(context.Background(), nil)
@@ -90,6 +92,7 @@ func TestListCollections_DefaultsToPublic(t *testing.T) {
 }
 
 func TestListCollections_Errors(t *testing.T) {
+	t.Parallel()
 	t.Run("query", func(t *testing.T) {
 		d, mock := newSchemaMockDatabase(t)
 		mock.ExpectQuery(listRelationsQuery).WillReturnError(errors.New("boom"))
@@ -132,6 +135,7 @@ func describeAlbum(mock sqlmock.Sqlmock, schema, name, fkNamespace string) {
 }
 
 func TestDescribeCollection_ExactNameWithUnknownTypes(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
 	describeAlbum(mock, "public", "Album", "public")
 
@@ -195,6 +199,7 @@ func TestDescribeCollection_ExactNameWithUnknownTypes(t *testing.T) {
 }
 
 func TestDescribeCollection_FoldLowerIsTheDefault(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t)
 	describeAlbum(mock, "public", "album", "public")
 
@@ -209,6 +214,7 @@ func TestDescribeCollection_FoldLowerIsTheDefault(t *testing.T) {
 }
 
 func TestDescribeCollection_SecondSchema(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t, WithSchema("sales"), WithIdentifierMode(IdentifierExact))
 	// In schema "sales" a target that is also in "sales" has no namespace.
 	describeAlbum(mock, "sales", "Album", "sales")
@@ -224,6 +230,7 @@ func TestDescribeCollection_SecondSchema(t *testing.T) {
 }
 
 func TestDescribeCollection_ViewHasNoKey(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t)
 	expectProbeFound(mock, "public", "v")
 	expectPK(mock, "public", "v")
@@ -247,6 +254,7 @@ func TestDescribeCollection_ViewHasNoKey(t *testing.T) {
 }
 
 func TestDescribeCollection_MockedMissingTable(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
 	mock.ExpectQuery(qProbe).WithArgs("public", "Nope").WillReturnError(sql.ErrNoRows)
 
@@ -262,6 +270,7 @@ func TestDescribeCollection_MockedMissingTable(t *testing.T) {
 }
 
 func TestDescribeCollection_FailureAtEveryStage(t *testing.T) {
+	t.Parallel()
 	boom := errors.New("boom")
 	badColumn := sqlmock.NewRows(columnHeader).AddRow(nil, "text", "text", nilInt(), nilInt(), nilInt(), "NO", nil, "NO", "NEVER", nil)
 	type stage struct {
@@ -343,6 +352,7 @@ func TestDescribeCollection_FailureAtEveryStage(t *testing.T) {
 }
 
 func TestListIndexes_ExactNameInSchema(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t, WithSchema("sales"), WithIdentifierMode(IdentifierExact))
 	mock.ExpectQuery(`pg_indexes`).WithArgs("sales", "Album").WillReturnRows(
 		sqlmock.NewRows([]string{"indexname", "indexdef"}).
@@ -358,6 +368,7 @@ func TestListIndexes_ExactNameInSchema(t *testing.T) {
 }
 
 func TestListIndexes_QueryScopesPrimaryKeyExclusionToSchema(t *testing.T) {
+	t.Parallel()
 	// A same-named primary key in another schema must not hide an index.
 	d, mock := newSchemaMockDatabase(t)
 	mock.ExpectQuery(`n\.nspname = i\.schemaname`).WillReturnRows(sqlmock.NewRows([]string{"indexname", "indexdef"}))
@@ -368,6 +379,7 @@ func TestListIndexes_QueryScopesPrimaryKeyExclusionToSchema(t *testing.T) {
 }
 
 func TestListIndexes_Errors(t *testing.T) {
+	t.Parallel()
 	ref := dal.NewRootCollectionRef("t", "")
 	t.Run("scan", func(t *testing.T) {
 		d, mock := newSchemaMockDatabase(t)
@@ -386,6 +398,7 @@ func TestListIndexes_Errors(t *testing.T) {
 }
 
 func TestParseIndexDefFields(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		def  string
 		want []dal.FieldName
@@ -404,6 +417,7 @@ func TestParseIndexDefFields(t *testing.T) {
 }
 
 func TestIsUniqueIndexDef(t *testing.T) {
+	t.Parallel()
 	for def, want := range map[string]bool{
 		"CREATE UNIQUE INDEX i ON t (a)": true,
 		"create unique index i on t (a)": true,
@@ -418,6 +432,7 @@ func TestIsUniqueIndexDef(t *testing.T) {
 }
 
 func TestListIndexes_QueryNamesTheCatalogSchema(t *testing.T) {
+	t.Parallel()
 	// Every catalog relation is qualified, so a same-named object earlier on the
 	// search_path cannot stand in for the catalog.
 	d, mock := newSchemaMockDatabase(t)
@@ -432,6 +447,7 @@ func TestListIndexes_QueryNamesTheCatalogSchema(t *testing.T) {
 }
 
 func TestQualifiedReference_SchemaOnTheReferenceIsHonoured(t *testing.T) {
+	t.Parallel()
 	// The database is configured for "public"; the reference names "sales". The
 	// reader must ask the server about "sales", never answer from "public".
 	ref := dal.NewQualifiedRootCollectionRef("sales", "Album", "")
@@ -531,6 +547,7 @@ func TestQualifiedReference_SchemaOnTheReferenceIsHonoured(t *testing.T) {
 }
 
 func TestUnqualifiedReference_UsesTheConfiguredSchema(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t, WithSchema("sales"), WithIdentifierMode(IdentifierExact))
 	mock.ExpectQuery(`pg_indexes`).WithArgs("sales", "Album").
 		WillReturnRows(sqlmock.NewRows([]string{"indexname", "indexdef"}))

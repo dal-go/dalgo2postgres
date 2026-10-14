@@ -55,6 +55,7 @@ func wantProblem(t *testing.T, problems []string, fragment string) {
 }
 
 func TestVendoredProblems(t *testing.T) {
+	t.Parallel()
 	files := map[string]string{"a.yaml": "a: 1\n", "b.json": "{}\n"}
 	t.Run("a directory as its manifest says has no problem", func(t *testing.T) {
 		dir := writeFixtureDir(t, "m", "v1", files)
@@ -112,6 +113,7 @@ func TestVendoredProblems(t *testing.T) {
 }
 
 func TestUpstreamProblems(t *testing.T) {
+	t.Parallel()
 	files := map[string]string{"a.yaml": "a: 1\n", "b.json": "{}\n"}
 	t.Run("the same files have no problem, whatever the vendored manifest adds", func(t *testing.T) {
 		upstream := writeFixtureDir(t, "", "", files)
@@ -165,6 +167,7 @@ func TestUpstreamProblems(t *testing.T) {
 }
 
 func TestModuleVersionIn(t *testing.T) {
+	t.Parallel()
 	goMod := []byte("module x\n\nrequire github.com/dal-go/dalgo v0.89.6\n\nrequire (\n\tgithub.com/dal-go/dalgo2sql v0.26.5\n\tgithub.com/dal-go/dalgo v0.90.0\n)\n")
 	if got, ok := moduleVersionIn(goMod, "github.com/dal-go/dalgo"); !ok || got != "v0.89.6" {
 		t.Errorf("dalgo = %q, %v; want v0.89.6 (the first requirement)", got, ok)
@@ -181,6 +184,7 @@ func TestModuleVersionIn(t *testing.T) {
 }
 
 func TestVendoredFixturesAreTheDalgoModulesAtTheRequiredVersion(t *testing.T) {
+	t.Parallel()
 	// Not a server test, and it runs wherever the module cache holds dalgo: the vendored
 	// fixtures are those of the dalgo this package is built with, and they are as their
 	// manifests say.
@@ -205,6 +209,7 @@ func TestVendoredFixturesAreTheDalgoModulesAtTheRequiredVersion(t *testing.T) {
 }
 
 func TestNormalizeRowsAndSameCell(t *testing.T) {
+	t.Parallel()
 	rows, err := normalizeRows([]map[string]any{{"n": int64(2), "x": 1.5, "s": "a", "none": nil, "ok": true}})
 	if err != nil {
 		t.Fatal(err)
@@ -250,6 +255,7 @@ func TestNormalizeRowsAndSameCell(t *testing.T) {
 }
 
 func TestRowDifference(t *testing.T) {
+	t.Parallel()
 	a := []map[string]any{{"id": 1.0, "name": "x"}, {"id": 2.0, "name": nil}}
 	if d := rowDifference(a, a); d != "" {
 		t.Errorf("the same rows differ: %s", d)
@@ -268,6 +274,7 @@ func TestRowDifference(t *testing.T) {
 }
 
 func TestParseDivergences(t *testing.T) {
+	t.Parallel()
 	valid := `{"schemaVersion":1,"divergences":[{"suite":"joins","case":"a","differs":["rows"],"reason":"because"}]}`
 	listed, err := parseDivergences([]byte(valid))
 	if err != nil || len(listed) != 1 || listed["joins/a"].Reason != "because" {
@@ -307,6 +314,7 @@ func TestParseDivergences(t *testing.T) {
 }
 
 func TestDivergenceDetails(t *testing.T) {
+	t.Parallel()
 	count := func(n int) *int { return &n }
 	refusal := errors.New("join_plan at from: cannot load fields for recent: not supported: source dal.QuerySource")
 	server := fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: "42P01", Message: "not supported: source dal.QuerySource"})
@@ -338,6 +346,7 @@ func TestDivergenceDetails(t *testing.T) {
 }
 
 func TestUnrunFixtures(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	for _, name := range []string{"a.dtql.yaml", "b.dtql.json", "b.rows.json", "manifest.json", "c.error.json"} {
 		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
@@ -360,6 +369,7 @@ func TestUnrunFixtures(t *testing.T) {
 }
 
 func TestUnexpectedInputless(t *testing.T) {
+	t.Parallel()
 	cases := []suiteCase{{Name: "in-not-in-null-table"}, {Name: "runnable", Input: "x.dtql.yaml"}, {Name: "forgotten"}}
 	if got := unexpectedInputless(cases); !reflect.DeepEqual(got, []string{"forgotten"}) {
 		t.Errorf("unexpected = %v, want only the case that is not named in inputlessCases", got)
@@ -370,6 +380,7 @@ func TestUnexpectedInputless(t *testing.T) {
 }
 
 func TestDivergenceFileOfThisRepositoryParses(t *testing.T) {
+	t.Parallel()
 	listed := loadDivergences(t)
 	for key, entry := range listed {
 		if len(entry.Reason) < 20 {
@@ -379,6 +390,7 @@ func TestDivergenceFileOfThisRepositoryParses(t *testing.T) {
 }
 
 func TestDivergenceVerdict(t *testing.T) {
+	t.Parallel()
 	listed := &divergence{Suite: "joins", Case: "a", Differs: []string{"rows", "statements"}, Reason: "the reason"}
 	for _, tc := range []struct {
 		name     string
@@ -406,6 +418,7 @@ func TestDivergenceVerdict(t *testing.T) {
 }
 
 func TestUnusedDivergences(t *testing.T) {
+	t.Parallel()
 	listed := map[string]divergence{
 		"joins/a": {Suite: "joins", Case: "a"},
 		"joins/b": {Suite: "joins", Case: "b"},

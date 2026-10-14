@@ -180,6 +180,7 @@ func countJoins(statement string) int { return strings.Count(statement, " JOIN "
 // runs the same check without a server, for both directories at once; this is the join
 // fixtures' own, kept beside the cases it guards).
 func TestFixturesJoinsAreVendoredWithTheirDigests(t *testing.T) {
+	t.Parallel()
 	for _, problem := range vendoredProblems(filepath.Join("testdata", "joins"), dalgoModule, requiredDalgoVersion(t)) {
 		t.Error(problem)
 	}
@@ -211,6 +212,7 @@ func joinFixtureNames() []string {
 // Every DTQL document in testdata/joins is run by a test: a fixture added by vendoring dalgo
 // again is not left unrun.
 func TestFixturesEveryJoinFixtureIsRunByATest(t *testing.T) {
+	t.Parallel()
 	problems, err := unrunFixtures(filepath.Join("testdata", "joins"), joinFixtureNames())
 	if err != nil {
 		t.Fatal(err)
@@ -224,6 +226,7 @@ func TestFixturesEveryJoinFixtureIsRunByATest(t *testing.T) {
 // no server is involved, and they are the half of the join corpus that is about what is
 // never sent.
 func TestFixturesJoinNegativeCasesAreRefusedWithTheFixturesDiagnostic(t *testing.T) {
+	t.Parallel()
 	for _, name := range joinNegativeFixtures {
 		t.Run(name, func(t *testing.T) {
 			document, err := os.ReadFile(filepath.Join("testdata", "joins", name+".dtql.yaml"))
@@ -306,6 +309,7 @@ func checkAgainstDivergences(t *testing.T, listed map[string]divergence, key str
 // joins. Each runs through both public reads, the records reader and the recordset
 // reader (the path DataTug reads), and must be the same through either.
 func TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "main", IdentifierExact, chinookDDL)
 	listed := loadDivergences(t)
 	nestedRows := fixtureRows(t, filepath.Join("testdata", "joins", "chinook-nested.rows.json"))
@@ -576,6 +580,7 @@ func correlatedCostProblems(name, inner string, outerRows int, statements []stri
 // and no statement of the server shows. Only the first is named in inputlessCases; a case
 // with no input that is not named there fails.
 func TestFixturesIntegration_SubqueriesRunInDALgoOverLeafReads(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_fx_subqueries", IdentifierExact, subqueryDDL())
 	tableRows := loadSubqueryDataset(t, f)
 	listed := loadDivergences(t)

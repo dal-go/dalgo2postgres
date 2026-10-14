@@ -149,6 +149,7 @@ func stripQuoted(statement string) string {
 }
 
 func TestStripQuoted(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ in, want string }{
 		{`SELECT "a" FROM "t" WHERE "a" = $1`, `SELECT  FROM  WHERE  = $1`},
 		{`SELECT "x; DROP TABLE canary; --" FROM "t"`, `SELECT  FROM `},
@@ -266,6 +267,7 @@ var probeSlots = []slot{
 func (w probeWorld) quotedIn(text string) string { return exactIdent(w.stored(text)) }
 
 func TestProbesIntegration_NothingACallerWritesBecomesSQL(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	testDSN(t) // a skip shows on this test, not only on its subtests
 	for _, mode := range []struct {
 		name string
@@ -791,6 +793,7 @@ func assertTheNamesOfNoRecordsetAreHeldToo(t *testing.T, f *queryFixture) {
 // nested key whose short collections join into a name of 64 bytes. No statement of any of them
 // holds a marker.
 func TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	testDSN(t) // a skip shows on this test, not only on its subtests
 	for _, mode := range []struct {
 		name string

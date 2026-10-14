@@ -168,6 +168,7 @@ func (f schemaNameFixture) calls(t *testing.T, table, schema string) []schemaNam
 }
 
 func TestSchemaReaderIntegration_NameOf64BytesAgainstAnObjectOf63(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := newSchemaNameFixture(t)
 	ctx := context.Background()
 

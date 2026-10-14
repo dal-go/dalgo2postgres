@@ -38,6 +38,7 @@ func textCastMatcher(expected, actual string) error {
 }
 
 func TestSchemaReader_EveryNameParameterIsCastToText(t *testing.T) {
+	t.Parallel()
 	sqlDB, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherFunc(textCastMatcher)))
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)

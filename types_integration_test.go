@@ -427,6 +427,7 @@ func filterQuery(table, column string, operator dal.Operator, constant any) dal.
 // type than its column is refused by the server, or compared as numbers, and is never a
 // match on the wrong row.
 func TestTypeMatrixIntegration_FilterByColumnTypeAndConstantType(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openTypeFixture(t, "test_tm_filter", "UTC", typeMatrixDDL...)
 	type tally struct {
 		matched, empty int
@@ -501,6 +502,7 @@ func TestTypeMatrixIntegration_FilterByColumnTypeAndConstantType(t *testing.T) {
 // as numeric text of its own shortest decimal. Each runs against a column of the type
 // that matches it best and finds the row whose value is 2.
 func TestTypeMatrixIntegration_EveryIntegerAndFloatType(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openTypeFixture(t, "test_tm_sizes", "UTC", typeMatrixDDL...)
 	for _, tc := range []struct {
 		column   string
@@ -547,6 +549,7 @@ func TestTypeMatrixIntegration_EveryIntegerAndFloatType(t *testing.T) {
 // is bound as bytea; against a bytea column it is the positive control of that rule: the
 // bytes are handed over as they are and the row that holds them is found.
 func TestTypeMatrixIntegration_ByteStringAgainstBytea(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openTypeFixture(t, "test_tm_bytes", "UTC",
 		`CREATE TABLE tm_bytes (id integer PRIMARY KEY, bin bytea)`,
 		`INSERT INTO tm_bytes VALUES (1, '\x01'), (2, '\x02')`,
@@ -574,6 +577,7 @@ func TestTypeMatrixIntegration_ByteStringAgainstBytea(t *testing.T) {
 // row first ascending and last descending, as DALgo does, the NULLS clause written
 // because no column of tm but the key is NOT NULL.
 func TestTypeMatrixIntegration_ProjectionAndOrderBy(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openTypeFixture(t, "test_tm_project", "UTC", typeMatrixDDL...)
 	sameValue := func(got, want any) bool {
 		if wantTime, ok := want.(time.Time); ok {
@@ -750,6 +754,7 @@ func checkEdgeCells(t *testing.T, f *queryFixture, cells []edgeCell) {
 // row that stores 0.1, which a numeric 0.1 did not (dalgo2sql v0.26.5). Every cell asserts
 // the statement and the argument as well as the answer.
 func TestTypeMatrixIntegration_ValuesAtTheEdges(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openTypeFixture(t, "test_tm_edge", "UTC", edgeDDL...)
 	t.Run("a bigint above 2^53 is matched exactly", func(t *testing.T) {
 		const above = int64(9007199254740993) // 2^53 + 1
@@ -864,6 +869,7 @@ func TestTypeMatrixIntegration_ValuesAtTheEdges(t *testing.T) {
 // the range of its integer type is a number and not the server's error 22003, and a
 // bigint beyond 2^53 loses its last digits, as a float64 does. This pins what a caller sees.
 func TestTypeMatrixIntegration_ArithmeticOnDoublePrecision(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openTypeFixture(t, "test_tm_arithmetic", "UTC", edgeDDL...)
 	ctx := context.Background()
 	// The control: without the cast the server refuses an int4 product past its range.
@@ -931,6 +937,7 @@ func TestTypeMatrixIntegration_ArithmeticOnDoublePrecision(t *testing.T) {
 // A whole NUMERIC can. (With dalgo2sql v0.26.0 the error also named the
 // value; since v0.26.3 it does not.)
 func TestTypeMatrixIntegration_NumericWithAFractionIntoAnIntegerField(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openTypeFixture(t, "test_tm_numeric_int", "UTC", edgeDDL...)
 	type numRow struct {
 		ID     int64
@@ -977,6 +984,7 @@ func TestTypeMatrixIntegration_NumericWithAFractionIntoAnIntegerField(t *testing
 // 00:00. A caller that filters a timestamp or a date by an instant must know the zone of
 // its session.
 func TestTypeMatrixIntegration_TimestampWithoutZoneFollowsTheSessionTimeZone(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openTypeFixture(t, "test_tm_zone", "Asia/Tokyo",
 		`CREATE TABLE tm_zone (id integer PRIMARY KEY, d date, ts timestamp)`,
 		`INSERT INTO tm_zone VALUES (1, '2021-06-15', '2021-06-15 12:30:00')`)

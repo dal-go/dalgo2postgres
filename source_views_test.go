@@ -14,6 +14,7 @@ import (
 const listSourceViewsQuery = `pg_catalog\.pg_get_viewdef\(c\.oid, true\)`
 
 func TestListSourceViewsReturnsOrderedViewMetadata(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t, WithSchema("sales"), WithIdentifierMode(IdentifierExact))
 	mock.ExpectQuery(listSourceViewsQuery).WithArgs("sales").WillReturnRows(
 		sqlmock.NewRows([]string{"relname", "attname", "definition"}).
@@ -39,6 +40,7 @@ func TestListSourceViewsReturnsOrderedViewMetadata(t *testing.T) {
 }
 
 func TestListSourceViewsReturnsEmptyInventory(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t)
 	mock.ExpectQuery(listSourceViewsQuery).WithArgs("public").WillReturnRows(
 		sqlmock.NewRows([]string{"relname", "attname", "definition"}),
@@ -53,6 +55,7 @@ func TestListSourceViewsReturnsEmptyInventory(t *testing.T) {
 }
 
 func TestListSourceViewsReportsQueryScanAndRowErrors(t *testing.T) {
+	t.Parallel()
 	t.Run("query", func(t *testing.T) {
 		d, mock := newSchemaMockDatabase(t)
 		mock.ExpectQuery(listSourceViewsQuery).WithArgs("public").WillReturnError(errors.New("query failed"))

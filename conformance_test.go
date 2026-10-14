@@ -18,6 +18,7 @@ import (
 // so the suite is exercised on every pull request rather than only wherever a
 // developer happened to have a DSN exported.
 func TestConformance(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	tbl := uniqueTable(t, "conformance")
 	opts := dalgo2sql.DbOptions{
 		Recordsets: map[string]*dalgo2sql.Recordset{

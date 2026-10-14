@@ -81,6 +81,7 @@ func dropTable(t *testing.T, db *Database, table string) {
 }
 
 func TestNewDatabase_Connects(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	dsn := testDSN(t)
 	db, err := NewDatabase(dsn)
 	if err != nil {
@@ -93,6 +94,7 @@ func TestNewDatabase_Connects(t *testing.T) {
 }
 
 func TestNewDatabase_RejectsBadDSN(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	db, err := NewDatabase("postgres://nobody:wrong@127.0.0.1:15432/noexist?sslmode=disable")
 	if err == nil {
@@ -117,6 +119,7 @@ func TestNewDatabase_RejectsBadDSN(t *testing.T) {
 }
 
 func TestDatabase_SupportsConcurrentConnections_True(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	db := openTestDB(t)
 	if !db.SupportsConcurrentConnections() {
 		t.Error("expected SupportsConcurrentConnections() == true for Postgres, got false")

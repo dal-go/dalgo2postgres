@@ -51,7 +51,7 @@ jobs:
       # coverage can fall unnoticed while a pull request still has room to add
       # code only a live server tests. Must rise with the PostgreSQL wave; never
       # lower it.
-      min_test_coverage_percent: 97
+      min_test_coverage_percent: 100
 
   # Runs the shared dalgotest conformance suite against a real PostgreSQL.
   #

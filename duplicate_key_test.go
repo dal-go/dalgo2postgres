@@ -17,6 +17,7 @@ import (
 // check_violation) is not, and an unrelated error is not either. These run
 // against a synthetic *pgconn.PgError and need no live PostgreSQL server.
 func TestIsAlreadyExists(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		err  error
@@ -78,6 +79,7 @@ func TestIsAlreadyExists(t *testing.T) {
 // overridden. This calls the real helper directly — not a re-implementation
 // — so it needs no live PostgreSQL connection.
 func TestApplyPostgresDbOptionDefaults(t *testing.T) {
+	t.Parallel()
 	t.Run("nil hook is defaulted to the package classifier", func(t *testing.T) {
 		opts := dalgo2sql.DbOptions{}
 		applyPostgresDbOptionDefaults(&opts)

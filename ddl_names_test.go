@@ -218,6 +218,7 @@ var refusedDDLNames = []struct {
 }
 
 func TestDDLNames_EveryPositionRefusesAnUnsafeNameBeforeAnyStatement(t *testing.T) {
+	t.Parallel()
 	for _, p := range ddlPositions() {
 		for _, r := range refusedDDLNames {
 			t.Run(p.entry+"/"+p.op+"/"+p.where+"/"+r.what, func(t *testing.T) {
@@ -238,6 +239,7 @@ func TestDDLNames_EveryPositionRefusesAnUnsafeNameBeforeAnyStatement(t *testing.
 }
 
 func TestDDLNames_EveryPositionAcceptsAName63BytesLongAndWritesIt(t *testing.T) {
+	t.Parallel()
 	for _, p := range ddlPositions() {
 		// The statement carries the name lower-cased, whatever its case.
 		for _, name := range []string{strings.Repeat("n", 63), strings.Repeat("N", 63)} {
@@ -257,6 +259,7 @@ func TestDDLNames_EveryPositionAcceptsAName63BytesLongAndWritesIt(t *testing.T) 
 }
 
 func TestDDLNames_AnOperationRefusedRefusesTheWholeCallBeforeItsFirstOperation(t *testing.T) {
+	t.Parallel()
 	// The operations of a call are all built before the transaction begins, so a
 	// valid operation ahead of a refused one is not sent either: the handle has no
 	// expectation, and only the refusal is an answer of the call.
@@ -290,6 +293,7 @@ func TestDDLNames_AnOperationRefusedRefusesTheWholeCallBeforeItsFirstOperation(t
 }
 
 func TestDDLNames_EveryEntryAndOperationOfDDLHasItsPositionsRun(t *testing.T) {
+	t.Parallel()
 	// A method added to ddl.SchemaModifier or to ddl.Applier (a new entry or a new
 	// operation), or to Database under a name that creates, alters or drops, fails
 	// here until the table above holds its positions.
@@ -322,6 +326,7 @@ func TestDDLNames_EveryEntryAndOperationOfDDLHasItsPositionsRun(t *testing.T) {
 }
 
 func TestDDLNames_AColumnTypeIsFromAClosedListOrRefused(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for _, typ := range []dbschema.Type{dbschema.Null, dbschema.Type(99), dbschema.Type(-1)} {
 		field := dbschema.FieldDef{Name: "f", Type: typ}
@@ -344,6 +349,7 @@ func TestDDLNames_AColumnTypeIsFromAClosedListOrRefused(t *testing.T) {
 }
 
 func TestDDLNames_ADefaultAndAutoIncrementAreNotWrittenIntoAStatement(t *testing.T) {
+	t.Parallel()
 	// A column's default is not read by this package's DDL: whatever a caller sets
 	// as Default (or AutoIncrement) is not part of the statement, so no text of a
 	// caller's becomes a default.
@@ -361,6 +367,7 @@ func TestDDLNames_ADefaultAndAutoIncrementAreNotWrittenIntoAStatement(t *testing
 }
 
 func TestDDLNames_OptionsAndFlagsAreWrittenAsTheirKeywords(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	id := dbschema.FieldDef{Name: "id", Type: dbschema.Int}
 	for _, tc := range []struct {
@@ -402,6 +409,7 @@ func TestDDLNames_OptionsAndFlagsAreWrittenAsTheirKeywords(t *testing.T) {
 }
 
 func TestDDLNames_AnIndexWithNoFieldIsRefused(t *testing.T) {
+	t.Parallel()
 	d, _ := newDDLMock(t)
 	err := d.CreateCollection(context.Background(), dbschema.CollectionDef{Name: "t",
 		Fields:  []dbschema.FieldDef{{Name: "id", Type: dbschema.Int}},
@@ -412,6 +420,7 @@ func TestDDLNames_AnIndexWithNoFieldIsRefused(t *testing.T) {
 }
 
 func TestDDLNames_AFailingStatementRollsBackAndIsReportedUnderItsOperation(t *testing.T) {
+	t.Parallel()
 	d, mock := newDDLMock(t)
 	boom := errors.New("boom")
 	mock.ExpectBegin()
@@ -425,6 +434,7 @@ func TestDDLNames_AFailingStatementRollsBackAndIsReportedUnderItsOperation(t *te
 }
 
 func TestQuoteIdent_WritesOneIdentifierWhateverItIsGiven(t *testing.T) {
+	t.Parallel()
 	// quoteIdent is safe on its own, without its caller's check: a double quote in
 	// a name is doubled, so the result is one quoted identifier in any case.
 	for name, want := range map[string]string{

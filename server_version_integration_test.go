@@ -18,6 +18,7 @@ const envExpectedMajor = "DALGO2POSTGRES_EXPECT_SERVER_MAJOR"
 // The server's own version string goes to the output of every run, so the evidence of the
 // type matrix, the pins and the catalog tests names the server it comes from.
 func TestServerVersionIntegration_IsTheOneTheJobNames(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	cfg, err := pgx.ParseConfig(testDSN(t))
 	if err != nil {
 		t.Fatalf("ParseConfig: %v", err)

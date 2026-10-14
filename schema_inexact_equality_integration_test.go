@@ -12,6 +12,7 @@ import (
 // Runs against a real PostgreSQL server and skips unless DALGO2POSTGRES_TEST_DSN
 // is set (see testDSN); CI sets it.
 func TestNonDeterministicTextColumnsIntegration(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	schemaName := uniqueTable(t, "pg04")
 	db := openSchemaTestDB(t, schemaName, IdentifierExact)
 	s := exactIdent(schemaName)

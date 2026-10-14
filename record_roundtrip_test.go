@@ -20,6 +20,7 @@ func buildOpts(table, pkCol string) dalgo2sql.DbOptions {
 }
 
 func TestRecord_MapRoundTrip(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	ctx := context.Background()
 	tbl := uniqueTable(t, "rr")
 
@@ -96,6 +97,7 @@ func TestRecord_MapRoundTrip(t *testing.T) {
 }
 
 func TestRecord_WhereFieldQuery(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	ctx := context.Background()
 	tbl := uniqueTable(t, "wfq")
 
@@ -148,6 +150,7 @@ func TestRecord_WhereFieldQuery(t *testing.T) {
 }
 
 func TestRunReadwriteTransaction(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	ctx := context.Background()
 	tbl := uniqueTable(t, "rwtx")
 

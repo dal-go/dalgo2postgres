@@ -155,6 +155,7 @@ var bothReaders = []struct {
 // A GROUP BY with 150,000 groups and a HAVING over 200,000 rows is one statement on the
 // server, and its answer has more groups than DALgo's engine holds.
 func TestPushdownIntegration_GroupByOver150000GroupsRunsOnTheServer(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_pd_group", IdentifierFoldLower, pushdownDDL())
 	for _, reader := range bothReaders {
 		t.Run(reader.name, func(t *testing.T) {
@@ -198,6 +199,7 @@ func TestPushdownIntegration_GroupByOver150000GroupsRunsOnTheServer(t *testing.T
 // A join over 50,000 rows is one statement on the server, and its answer has more rows than
 // DALgo's engine joins (10,000) and more bytes than it holds (16 MiB).
 func TestPushdownIntegration_JoinOver50000RowsRunsOnTheServer(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_pd_join", IdentifierFoldLower, pushdownDDL())
 	for _, reader := range bothReaders {
 		t.Run(reader.name, func(t *testing.T) {
@@ -234,6 +236,7 @@ func TestPushdownIntegration_JoinOver50000RowsRunsOnTheServer(t *testing.T) {
 // server with the same rows: the refusal at scale is the bound, not the shape of the query
 // and not the leaf reads.
 func TestPushdownIntegration_WithoutTheNativeRouteTheSameQueriesAreRefused(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_pd_control", IdentifierFoldLower, pushdownDDL())
 	ctx := context.Background()
 	inMemory := dalgo2sql.NewDatabase(f.sqlDB, dal.NewSchema(nil, nil), dalgo2sql.DbOptions{})

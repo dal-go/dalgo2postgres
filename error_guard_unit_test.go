@@ -31,6 +31,7 @@ func serverError(code string) *pgconn.PgError {
 // *ConnectionError that holds nothing of the cause; every other error comes back as the very
 // same value.
 func TestLeaveAdapter(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	connectErr := connectFailure(t, refuseEveryDial)
 	parseErr := pgconn.NewParseConfigError("postgres://"+markUser+":"+markPassword+"@"+markHost+"/"+markDatabase, "cannot parse "+markUser, errors.New(markPassword))
 	statement := &pgconn.PgError{Code: "23505", Message: "duplicate key value violates unique constraint", Detail: "Key (id)=(1) already exists."}
@@ -98,6 +99,7 @@ func TestLeaveAdapter(t *testing.T) {
 // stream, a connection the driver has already closed) is a failure of the connection, with the kind
 // of what happened and nothing of the error: the address a socket error names is the peer's.
 func TestLeaveAdapter_ALostConnection(t *testing.T) {
+	t.Parallel()
 	for _, dropped := range droppedFailures() {
 		for how, in := range map[string]error{
 			"as it is":                   dropped.err(),
@@ -133,6 +135,7 @@ func (timeoutOfItsOwn) Temporary() bool { return true }
 // is not one (context.DeadlineExceeded answers it), so a statement that ends on its context stays
 // a context error; and the end of a result, which is io.EOF in some layers, is not one either.
 func TestLeaveAdapter_WhatIsNotALostConnectionStays(t *testing.T) {
+	t.Parallel()
 	for name, in := range map[string]error{
 		"a deadline that passed":           context.DeadlineExceeded,
 		"a deadline that passed, wrapped":  fmt.Errorf("timeout: %w", context.DeadlineExceeded),
@@ -153,6 +156,7 @@ func TestLeaveAdapter_WhatIsNotALostConnectionStays(t *testing.T) {
 // server's message and detail, which name a role or a database, are not kept. An answer of any
 // other class is the server's, unchanged.
 func TestLeaveAdapter_ServerAnswersByClass(t *testing.T) {
+	t.Parallel()
 	for _, code := range []string{
 		"08000", "08001", "08003", "08004", "08006", "08007", "08P01", // class 08 whole
 		"28000", "28P01", // class 28 whole
@@ -219,6 +223,7 @@ func TestLeaveAdapter_ServerAnswersByClass(t *testing.T) {
 // A connection that ends because its context ended still answers errors.Is for the context's
 // error, and only for that one.
 func TestLeaveAdapter_ContextErrorsStayFindable(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	for name, tc := range map[string]struct {
 		cause              error
 		canceled, deadline bool
@@ -257,6 +262,7 @@ func TestLeaveAdapter_ContextErrorsStayFindable(t *testing.T) {
 // The error of a connection that fails at the open is built the same way, so it answers
 // errors.Is for its context's error too, and its text, fields and unwrapping are the open's own.
 func TestDescribe_ContextErrorsAreFindableAtTheOpenToo(t *testing.T) {
+	t.Parallel()
 	failure := dsnInfo{}.describe("PingContext", fmt.Errorf("ping: %w", context.DeadlineExceeded))
 	if !errors.Is(failure, context.DeadlineExceeded) || errors.Is(failure, context.Canceled) {
 		t.Errorf("errors.Is: deadline %v, canceled %v; want true and false",
@@ -274,6 +280,7 @@ func TestDescribe_ContextErrorsAreFindableAtTheOpenToo(t *testing.T) {
 // the server refused, over an in-memory pipe), are classified at any call, name nothing and keep
 // their SQLSTATE.
 func TestServerAnswersToAConnectionAreClassifiedAtAnyCall(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	for _, tc := range []struct {
 		code string
 		text string
@@ -306,6 +313,7 @@ func TestServerAnswersToAConnectionAreClassifiedAtAnyCall(t *testing.T) {
 
 // A connection that ends mid-session (the server was shut down) is a connection error at any call.
 func TestAServerShutdownAtACallIsAConnectionError(t *testing.T) {
+	t.Parallel()
 	db, mock := mockedDatabase(t)
 	mock.ExpectQuery("").WillReturnError(serverError("57P01"))
 	_, err := db.ListSchemas(context.Background())
@@ -319,6 +327,7 @@ func TestAServerShutdownAtACallIsAConnectionError(t *testing.T) {
 // A statement error is the server's answer to the statement: it is not changed, its message and
 // detail are the server's, and the code and the type still tell what it is.
 func TestStatementErrorsAreNotChanged(t *testing.T) {
+	t.Parallel()
 	violation := &pgconn.PgError{
 		Severity: "ERROR", Code: "23505",
 		Message:        `duplicate key value violates unique constraint "orders_pkey"`,
@@ -360,6 +369,7 @@ func TestStatementErrorsAreNotChanged(t *testing.T) {
 // record in its place, so that printing the record's error, or the panic of Data on a record that
 // has one, holds no configuration.
 func TestRecordErrors(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	t.Run("a failure of the connection is replaced on every record", func(t *testing.T) {
 		db := lazyDatabase(t, refuseEveryDial)
 		records := []dalrecord.Record{unreadRecord(), dalrecord.NewRecordWithData(dalrecord.NewKeyWithID("orders", "2"), map[string]any{})}
@@ -420,6 +430,7 @@ var errPlainFailure = errors.New("a plain failure")
 // What a worker is given keeps what the transaction under it has: its options, its ID, the legacy
 // read method and the end of a result.
 func TestGuardedTransactionsKeepWhatTheyHad(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	t.Run("read transaction", func(t *testing.T) {
 		db, mock := mockedDatabase(t)
@@ -487,6 +498,7 @@ func TestGuardedTransactionsKeepWhatTheyHad(t *testing.T) {
 
 // The readers keep the end of a result and the recordset, and a successful close is nil.
 func TestGuardedReadersKeepWhatTheyHad(t *testing.T) {
+	t.Parallel()
 	db, mock := mockedDatabase(t)
 	mock.ExpectQuery("").WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
 	mock.ExpectQuery("").WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow([]byte("1")))
@@ -523,6 +535,7 @@ func TestGuardedReadersKeepWhatTheyHad(t *testing.T) {
 
 // The error of a call that takes no connection to fail is the one it had.
 func TestGuardedCallsThatNeverReachAConnectionKeepTheirErrors(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	var zero Database
 	if err := zero.Close(); err != nil {
@@ -563,6 +576,7 @@ func (v *cutShortValue) Scan(src any) error {
 // connection error of the kind FailureOther, which names neither the column nor the decoder. The
 // direction is the safe one: more is classified, and nothing of the error is shown.
 func TestLeaveAdapter_ADecodersEndOfStreamIsReadAsALostConnection(t *testing.T) {
+	t.Parallel()
 	sqlDB, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
@@ -596,6 +610,7 @@ func TestLeaveAdapter_ADecodersEndOfStreamIsReadAsALostConnection(t *testing.T) 
 // and the sentence of 3D000 says that the server refused the connection: the code is what to branch
 // on, as the README says.
 func TestAStatementsOwnAnswerOfAConnectionClassIsClassified(t *testing.T) {
+	t.Parallel()
 	for code, sentence := range map[string]string{
 		"08P01": "dalgo2postgres: the server rejected the connection (SQLSTATE 08P01)",
 		"3D000": "dalgo2postgres: the server refused the connection: the database does not exist (SQLSTATE 3D000)",

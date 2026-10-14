@@ -13,6 +13,7 @@ import (
 )
 
 func TestListConstraints_ExactNameInSchema(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t, WithSchema("sales"), WithIdentifierMode(IdentifierExact))
 	mock.ExpectQuery(`pg_catalog\.pg_constraint`).
 		WithArgs("sales", "Album").
@@ -39,6 +40,7 @@ func TestListConstraints_ExactNameInSchema(t *testing.T) {
 }
 
 func TestListConstraints_FoldLowerDefault(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t)
 	mock.ExpectQuery(`pg_catalog\.pg_constraint`).WithArgs("public", "album").
 		WillReturnRows(sqlmock.NewRows([]string{"constraint_name", "constraint_type"}))
@@ -49,6 +51,7 @@ func TestListConstraints_FoldLowerDefault(t *testing.T) {
 }
 
 func TestListConstraints_Errors(t *testing.T) {
+	t.Parallel()
 	ref := dal.NewRootCollectionRef("t", "")
 	t.Run("query", func(t *testing.T) {
 		d, mock := newSchemaMockDatabase(t)
@@ -68,6 +71,7 @@ func TestListConstraints_Errors(t *testing.T) {
 }
 
 func TestListReferrers_OneReferrerPerConstraintInKeyOrder(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t, WithSchema("sales"), WithIdentifierMode(IdentifierExact))
 	// Artist is referenced by two separate foreign keys of Album and by a
 	// composite one of Tour whose columns are not in alphabetical order.
@@ -105,6 +109,7 @@ func TestListReferrers_OneReferrerPerConstraintInKeyOrder(t *testing.T) {
 }
 
 func TestListReferrers_QuerySelectsSourceNotTarget(t *testing.T) {
+	t.Parallel()
 	// The old query selected the referenced table's name as the referrer, and the
 	// current one must order the key columns by their position in the key.
 	d, mock := newSchemaMockDatabase(t)
@@ -119,6 +124,7 @@ func TestListReferrers_QuerySelectsSourceNotTarget(t *testing.T) {
 }
 
 func TestListReferrers_Errors(t *testing.T) {
+	t.Parallel()
 	ref := dal.NewRootCollectionRef("t", "")
 	t.Run("query", func(t *testing.T) {
 		d, mock := newSchemaMockDatabase(t)

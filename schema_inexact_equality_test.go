@@ -27,6 +27,7 @@ func inexactQualifiedRef(schema, name string) *dal.CollectionRef {
 }
 
 func TestNonDeterministicTextColumns_ReturnsColumnsInCatalogOrder(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t, WithSchema("sales"), WithIdentifierMode(IdentifierExact))
 	mock.ExpectQuery(qInexact).WithArgs("sales", "Customer").
 		WillReturnRows(sqlmock.NewRows([]string{"attname"}).AddRow("Email").AddRow("Name"))
@@ -40,6 +41,7 @@ func TestNonDeterministicTextColumns_ReturnsColumnsInCatalogOrder(t *testing.T) 
 }
 
 func TestNonDeterministicTextColumns_QualifiedReferenceWinsOverConfiguredSchema(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
 	mock.ExpectQuery(qInexact).WithArgs("sales", "Customer").
 		WillReturnRows(sqlmock.NewRows([]string{"attname"}).AddRow("Email"))
@@ -53,6 +55,7 @@ func TestNonDeterministicTextColumns_QualifiedReferenceWinsOverConfiguredSchema(
 }
 
 func TestNonDeterministicTextColumns_QualifiedReferenceWinsOverWithSchema(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t, WithSchema("other"), WithIdentifierMode(IdentifierExact))
 	mock.ExpectQuery(qInexact).WithArgs("sales", "Customer").
 		WillReturnRows(sqlmock.NewRows([]string{"attname"}).AddRow(nil))
@@ -62,6 +65,7 @@ func TestNonDeterministicTextColumns_QualifiedReferenceWinsOverWithSchema(t *tes
 }
 
 func TestNonDeterministicTextColumns_PlainTableYieldsEmptyNonNilSlice(t *testing.T) {
+	t.Parallel()
 	// An existing table with no such column still produces one row, whose
 	// column name is NULL: that row is how the table's existence is known.
 	d, mock := newSchemaMockDatabase(t)
@@ -77,6 +81,7 @@ func TestNonDeterministicTextColumns_PlainTableYieldsEmptyNonNilSlice(t *testing
 }
 
 func TestNonDeterministicTextColumns_MissingTableIsNotFound(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
 	mock.ExpectQuery(qInexact).WithArgs("public", "Nope").
 		WillReturnRows(sqlmock.NewRows([]string{"attname"}))
@@ -90,6 +95,7 @@ func TestNonDeterministicTextColumns_MissingTableIsNotFound(t *testing.T) {
 }
 
 func TestNonDeterministicTextColumns_MissingQualifiedTableNamesItsSchema(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
 	mock.ExpectQuery(qInexact).WithArgs("sales", "Nope").
 		WillReturnRows(sqlmock.NewRows([]string{"attname"}))
@@ -103,6 +109,7 @@ func TestNonDeterministicTextColumns_MissingQualifiedTableNamesItsSchema(t *test
 }
 
 func TestNonDeterministicTextColumns_FoldsTableNameByDefault(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t)
 	mock.ExpectQuery(qInexact).WithArgs("public", "customer").
 		WillReturnRows(sqlmock.NewRows([]string{"attname"}).AddRow("email"))
@@ -112,6 +119,7 @@ func TestNonDeterministicTextColumns_FoldsTableNameByDefault(t *testing.T) {
 }
 
 func TestNonDeterministicTextColumns_TableNameIsBoundNeverSQLText(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
 	hostile := `x'; DROP TABLE users; --`
 	// qInexact is anchored to the constant statement, so a name appended to the
@@ -124,6 +132,7 @@ func TestNonDeterministicTextColumns_TableNameIsBoundNeverSQLText(t *testing.T) 
 }
 
 func TestNonDeterministicTextColumns_Errors(t *testing.T) {
+	t.Parallel()
 	boom := errors.New("boom")
 	cases := map[string]struct {
 		arrange func(sqlmock.Sqlmock)

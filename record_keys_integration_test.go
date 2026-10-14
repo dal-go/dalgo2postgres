@@ -114,6 +114,7 @@ func catalogAnswer(t *testing.T, f *queryFixture) (primaryKey []string) {
 // recordset the caller declared keys its source under any case of the name the query
 // spells it in, in fold-lower mode, and wins over the catalog.
 func TestStructuredQueryIntegration_RecordKeysFromTheCatalog(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	ddl := []string{
 		// Rows are inserted out of the order of their keys, so an order by the key is seen.
 		`CREATE TABLE ck_single (id integer PRIMARY KEY, payload text, other text)`,
@@ -334,6 +335,7 @@ func TestStructuredQueryIntegration_RecordKeysFromTheCatalog(t *testing.T) {
 // the collection of every key in lower case, or register the recordset under the spelling the
 // keys use (README, "How a recordset is found").
 func TestStructuredQueryIntegration_KeyReadFindsItsRecordsetOnlyUnderTheCollectionAsSpelled(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	options := dalgo2sql.DbOptions{Recordsets: map[string]*dalgo2sql.Recordset{
 		"ck_decl": dalgo2sql.NewRecordset("ck_decl", dalgo2sql.Table, []dal.FieldRef{dal.Field("code")}),
 	}}

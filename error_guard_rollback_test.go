@@ -60,6 +60,7 @@ type rollbackShape interface {
 }
 
 func TestARollbackThatFailsOnTheConnection(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	rollbackConnectFailure := func(t *testing.T) error { return connectFailure(t, refuseEveryDial) }
 	for _, kind := range transactionKinds() {
 		t.Run(kind.name, func(t *testing.T) {
@@ -95,6 +96,7 @@ func TestARollbackThatFailsOnTheConnection(t *testing.T) {
 // DALgo's rollback error, naming both errors: the worker's error is the very value the
 // worker returned.
 func TestARollbackThatFailsForAnotherReasonIsKept(t *testing.T) {
+	t.Parallel()
 	for _, kind := range transactionKinds() {
 		t.Run(kind.name, func(t *testing.T) {
 			own, rollback := errors.New("the worker's own error"), errors.New("the transaction was already closed")
@@ -118,6 +120,7 @@ func TestARollbackThatFailsForAnotherReasonIsKept(t *testing.T) {
 // is found by errors.Is. What the transaction adds around it (the begin, the commit, the rollback)
 // is guarded.
 func TestTheErrorAWorkerReturnsIsItsOwn(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	sentinel := errors.New("the caller's own sentinel")
 	for _, kind := range transactionKinds() {
 		t.Run(kind.name, func(t *testing.T) {
@@ -170,6 +173,7 @@ func (e uncomparableError) Unwrap() []error { return e }
 
 // A failure of the commit, and of the begin, is the adapter's own and is guarded.
 func TestWhatATransactionAddsAroundTheWorkerIsGuarded(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	for _, kind := range transactionKinds() {
 		t.Run(kind.name+" commit", func(t *testing.T) {
 			db := transactionalDatabase(t, connectFailure(t, refuseEveryDial))
@@ -187,6 +191,7 @@ func TestWhatATransactionAddsAroundTheWorkerIsGuarded(t *testing.T) {
 // stands for the whole, and the error marked as the worker's own is read only for a
 // *ConnectionError it holds already.
 func TestConnectionFailureOf_ATransactionThatCouldNotBeRolledBack(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	plain := errors.New("a plain error")
 	classified := &ConnectionError{Kind: FailureServer, SQLState: "57P01"}
 	connectErr := connectFailure(t, refuseEveryDial)
@@ -238,6 +243,7 @@ func TestConnectionFailureOf_ATransactionThatCouldNotBeRolledBack(t *testing.T) 
 // leaveTransaction returns the worker's error as it is, guards the rest, and keeps DALgo's rollback
 // error (with the worker's error unmarked) when neither error it names is a failure of the connection.
 func TestLeaveTransaction(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	plain, rollback := errors.New("a plain error"), errors.New("the rollback failed")
 	if got := leaveTransaction(context.Background(), nil); got != nil {
 		t.Errorf("leaveTransaction(nil) = %v", got)
@@ -269,6 +275,7 @@ func TestLeaveTransaction(t *testing.T) {
 
 // The mark on the worker's error says what the error says, whatever shows it.
 func TestWorkerErrorSaysWhatTheWorkersErrorSays(t *testing.T) {
+	t.Parallel()
 	if got := markOwn(errors.New("the worker's text")).Error(); got != "the worker's text" {
 		t.Errorf("text = %q", got)
 	}

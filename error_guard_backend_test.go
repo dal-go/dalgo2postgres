@@ -42,6 +42,7 @@ var (
 // A write in a transaction is validated once, by DALgo's framework layer, and its hooks run once;
 // dal.WithoutValidation reaches the statement.
 func TestGuardedBackend_KeepsValidationAndWithoutValidation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	registerCounts.Do(func() {
 		dal.AddBeforeSaveHook(func(context.Context, dalrecord.Record) error { countedSaves.Add(1); return nil })
@@ -86,6 +87,7 @@ func TestGuardedBackend_KeepsValidationAndWithoutValidation(t *testing.T) {
 
 // The backend answers what the backend under it answers.
 func TestGuardedBackend_AnswersAsTheBackendUnderIt(t *testing.T) {
+	t.Parallel()
 	db, _ := mockedDatabase(t)
 	if name := db.DB.Adapter().Name(); name != "dalgo2sql" {
 		t.Errorf("adapter of the delegate = %q, want dalgo2sql", name)
@@ -102,6 +104,7 @@ func TestGuardedBackend_AnswersAsTheBackendUnderIt(t *testing.T) {
 // writes outside a transaction through its own pipeline: the writes of the Database outside a
 // transaction go straight to the statement.
 func TestGuardedBackend_IsNotAWriteSession(t *testing.T) {
+	t.Parallel()
 	if _, ok := any(newGuardedBackend(nil)).(dal.WriteSession); ok {
 		t.Error("the guarded backend is a dal.WriteSession: DALgo would put a validation pipeline on the writes outside a transaction")
 	}
@@ -121,6 +124,7 @@ type (
 // What the backend under the guard does not say, the guard does not say either: it declares no
 // capability, declines a join, supplies no fields and has no write outside a transaction.
 func TestGuardedBackend_DeclinesWhatTheBackendUnderItDoesNotSay(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	backend := newGuardedBackend(bareBackend{})
 	if got := backend.QueryCapabilities(); got != (dal.QueryCapabilities{}) {
@@ -172,6 +176,7 @@ func (j joiningInner) JoinFields(context.Context, dal.RecordsetSource) ([]string
 
 // The questions about a join are the answers of the value under the guard, with their errors guarded.
 func TestGuardedJoins_ForwardTheAnswersOfTheValueUnderThem(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	ctx := context.Background()
 	source := dal.NewRootCollectionRef("orders", "a")
 	answers := guardedJoins{joiningInner{fields: []string{"id", "status"}}}

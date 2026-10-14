@@ -500,6 +500,7 @@ func safeToDial(dsn string) bool {
 }
 
 func TestSafeToDial(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	for _, tc := range []struct {
 		name string
@@ -528,6 +529,7 @@ func TestSafeToDial(t *testing.T) {
 }
 
 func TestConnectionErrorLeaksNothing_Property(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	allowed := allowedText()
 	var stats propertyStats
@@ -605,6 +607,7 @@ func TestConnectionErrorLeaksNothing_Property(t *testing.T) {
 }
 
 func TestPropertyGenerator_ProducesWhatItClaims(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	// Spot checks on the generator itself, so that a change to it cannot quietly
 	// empty the property of its meaning.

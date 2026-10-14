@@ -101,6 +101,7 @@ var (
 )
 
 func TestSchemaReaderIntegration_ListsEverySchemaButTheSystemOnes(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := newPG05Fixture(t)
 	got, err := f.db.ListSchemas(context.Background())
 	if err != nil {
@@ -114,6 +115,7 @@ func TestSchemaReaderIntegration_ListsEverySchemaButTheSystemOnes(t *testing.T) 
 }
 
 func TestSchemaReaderIntegration_ListsViewsAndMaterializedViewsApartFromTables(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := newPG05Fixture(t)
 	ctx := context.Background()
 
@@ -174,6 +176,7 @@ func TestSchemaReaderIntegration_ListsViewsAndMaterializedViewsApartFromTables(t
 }
 
 func TestSchemaReaderIntegration_ListsSourceViewDefinitions(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := newPG05Fixture(t)
 	got, err := f.db.ListSourceViews(context.Background())
 	if err != nil {
@@ -207,6 +210,7 @@ func prefix(p string, names []string) []string {
 }
 
 func TestSchemaReaderIntegration_DescribesEveryListedCollectionOfEverySchema(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := newPG05Fixture(t)
 	ctx := context.Background()
 	for _, schema := range []string{f.first, f.second} {
@@ -260,6 +264,7 @@ func TestSchemaReaderIntegration_DescribesEveryListedCollectionOfEverySchema(t *
 }
 
 func TestSchemaReaderIntegration_ReadsDefaultsIdentityAndGeneratedColumns(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := newPG05Fixture(t)
 	ref := dal.NewRootCollectionRef("Order Items", "")
 	def, err := f.db.DescribeCollection(context.Background(), &ref)

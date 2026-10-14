@@ -46,6 +46,7 @@ func indexNames(indexes []dbschema.IndexDef) []string {
 // still there with its rows and its columns, and the names of 63 bytes then work in
 // every entry.
 func TestDDLNamesIntegration_RefusedNamesLeaveEveryObjectAsItWas(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	objects := ddlObjects{table: nameOf63("ddl09_t_"), column: nameOf63("ddl09_c_"), index: nameOf63("ddl09_ix_")}
 	const other = "ddl09_other"
 	f := openQueryFixture(t, uniqueTable(t, "ddl09"), IdentifierFoldLower, []string{
@@ -157,6 +158,7 @@ func TestDDLNamesIntegration_RefusedNamesLeaveEveryObjectAsItWas(t *testing.T) {
 // 26 of the same letter, which passes the check of 63 bytes in Go and so reaches the
 // server, is not the table's.
 func TestSchemaReaderIntegration_NamesAreComparedWholeInAnyDatabaseEncoding(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	cfg, err := pgx.ParseConfig(testDSN(t))
 	if err != nil {
 		t.Fatalf("ParseConfig: %v", err)

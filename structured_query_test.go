@@ -135,6 +135,7 @@ const hostile = "O'Brien'; DROP TABLE album; --"
 // text emitter: whatever the caller sets, the statement is the typed compiler's,
 // names are quoted, and the value is a bound argument.
 func TestNewDatabase_StructuredQueryNeverReachesTheLegacyEmitter(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	for _, dialect := range []string{"", "sqlite", "mysql", "nonsense", "postgres"} {
 		t.Run(fmt.Sprintf("StructuredQueryDialect %q", dialect), func(t *testing.T) {
 			sqlDB, mock := newStructuredMock(t)
@@ -163,6 +164,7 @@ func TestNewDatabase_StructuredQueryNeverReachesTheLegacyEmitter(t *testing.T) {
 // the exact mode writes them as the query spells them, and DbOptions.IdentifierCase
 // reaches the compiler as well as the option does.
 func TestNewDatabase_IdentifierModesDecideHowNamesAreWritten(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	for _, tc := range []struct {
 		name      string
 		opts      dalgo2sql.DbOptions
@@ -204,6 +206,7 @@ func TestNewDatabase_IdentifierModesDecideHowNamesAreWritten(t *testing.T) {
 // *dalgo2sql.TableNotFoundError that names the nearest table and, in the exact
 // mode, says names are case-sensitive; no statement is sent for it.
 func TestNewDatabase_UnknownTableIsATableNotFoundErrorWithASuggestion(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	sqlDB, mock := newStructuredMock(t)
 	db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{}, WithIdentifierMode(IdentifierExact))
 	mock.ExpectQuery(catalogStatement).WithArgs(`"album"`).WillReturnRows(catalogRows(`"album"`))
@@ -233,6 +236,7 @@ func TestNewDatabase_UnknownTableIsATableNotFoundErrorWithASuggestion(t *testing
 // AVG cast to double precision, COUNT, MIN and MAX native) instead of reading every
 // row and aggregating in memory.
 func TestNewDatabase_AggregationRunsOnTheServer(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	sqlDB, mock := newStructuredMock(t)
 	db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
 	mock.ExpectQuery(catalogStatement).WithArgs(`"album"`).WillReturnRows(albumCatalog(`"album"`))
@@ -264,6 +268,7 @@ func TestNewDatabase_AggregationRunsOnTheServer(t *testing.T) {
 // which PostgreSQL does not promise and this adapter does not declare, so DALgo
 // refuses the query itself and sends nothing to the server.
 func TestNewDatabase_FirstAndLastAreRefusedBeforeAnythingIsSent(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	for name, column := range map[string]dal.Column{
 		"FIRST": dal.FirstAs(dal.NewFieldRef("", "Title"), "x"),
 		"LAST":  dal.LastAs(dal.NewFieldRef("", "Title"), "x"),
@@ -284,6 +289,7 @@ func TestNewDatabase_FirstAndLastAreRefusedBeforeAnythingIsSent(t *testing.T) {
 // with the dialect too (it used the legacy emitter before), and the catalog lookup
 // runs on the transaction, so the two statements see one session.
 func TestNewDatabase_ReadInATransactionUsesTheTypedCompiler(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	sqlDB, mock := newStructuredMock(t)
 	db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
 	mock.ExpectBegin()
@@ -311,6 +317,7 @@ func TestNewDatabase_ReadInATransactionUsesTheTypedCompiler(t *testing.T) {
 // Behaviour change (dalgo2sql v0.26.0): a NUMERIC column, which pgx delivers as
 // text, reaches the caller as a float64.
 func TestNewDatabase_NumericTextIsReadAsFloat64(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	sqlDB, mock := newStructuredMock(t)
 	db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
 	mock.ExpectQuery(catalogStatement).WithArgs(`"album"`).WillReturnRows(albumCatalog(`"album"`))
@@ -334,6 +341,7 @@ func TestNewDatabase_NumericTextIsReadAsFloat64(t *testing.T) {
 // Behaviour change (dalgo2sql v0.26.0): a text query's arguments are bound
 // (dal.QueryArg used to be handed to the driver as a struct and failed every call).
 func TestNewDatabase_TextQueryArgumentsAreBound(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	sqlDB, mock := newStructuredMock(t)
 	db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
 	mock.ExpectQuery(`SELECT title FROM album WHERE albumid = $1 AND title = $2`).WithArgs(int64(7), hostile).
@@ -365,6 +373,7 @@ func keyOptions(tables ...string) dalgo2sql.DbOptions {
 // checked for a collection and a primary key; a map record's read names no field, so a
 // field name never reaches one.
 func TestNewDatabase_KeyWritesAndReadsRefuseUnsafeNames(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	const evil = `x"; DROP TABLE widgets; --`
 	for _, tc := range []struct {
 		name       string
@@ -432,6 +441,7 @@ func TestNewDatabase_KeyWritesAndReadsRefuseUnsafeNames(t *testing.T) {
 // written as given: unquoted and not folded, so PostgreSQL folds it to lower case
 // itself. (The structured compiler quotes; the key paths do not.)
 func TestNewDatabase_KeyPathsWritePlainNamesUnquoted(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	sqlDB, mock := newStructuredMock(t)
 	db := openMockedDatabase(t, sqlDB, keyOptions("Widgets"))
 	ctx := context.Background()
@@ -457,6 +467,7 @@ func TestNewDatabase_KeyPathsWritePlainNamesUnquoted(t *testing.T) {
 // statement (it was the key's own collection before), and its primary key is looked
 // up in the recordset of that name.
 func TestNewDatabase_NestedKeyUsesOneJoinedTableName(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	sqlDB, mock := newStructuredMock(t)
 	db := openMockedDatabase(t, sqlDB, keyOptions("pets_owners"))
 	ctx := context.Background()
@@ -478,6 +489,7 @@ func TestNewDatabase_NestedKeyUsesOneJoinedTableName(t *testing.T) {
 // end, when its statement fails, and when its context ends. (The integration test
 // pins the same with pgx under it.)
 func TestNewDatabase_StructuredReadLeasesOneConnection(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	query := func() dal.StructuredQuery { return albumFrom().NewQuery().SelectColumns(titleColumn()) }
 	expectRead := func(mock sqlmock.Sqlmock) {
 		mock.ExpectQuery(catalogStatement).WithArgs(`"album"`).WillReturnRows(albumCatalog(`"album"`))
@@ -579,6 +591,7 @@ func TestNewDatabase_StructuredReadLeasesOneConnection(t *testing.T) {
 // on Close and at the end of the rows, back when the read fails. (The integration test
 // pins the same with pgx under it, and the types pgx reports for each column.)
 func TestNewDatabase_RecordsetReaderLeasesOneConnection(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	query := func() dal.StructuredQuery {
 		return albumFrom().NewQuery().SelectColumns(dal.Column{Expression: dal.NewFieldRef("", "AlbumId")}, titleColumn())
 	}
@@ -674,6 +687,7 @@ func TestNewDatabase_RecordsetReaderLeasesOneConnection(t *testing.T) {
 // holds (dal.As on a *Database does not reach the dal.DB it embeds), and of the dal.DB
 // under it, which is where DALgo plans a query; the two must agree.
 func TestNewDatabase_DeclaresWhatItRunsOnTheServer(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	sqlDB, _ := newStructuredMock(t)
 	db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
 	want := dal.QueryCapabilities{
@@ -710,6 +724,7 @@ func TestNewDatabase_DeclaresWhatItRunsOnTheServer(t *testing.T) {
 // with a method of the right name: a join of one type category is accepted, one across
 // categories is declined, and a wildcard's columns come back in table order.
 func TestNewDatabase_ForwardsTheJoinAnswers(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	sqlDB, mock := newStructuredMock(t)
 	db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
 	ctx := context.Background()
@@ -755,6 +770,7 @@ func TestNewDatabase_ForwardsTheJoinAnswers(t *testing.T) {
 // declares nothing and says so without panicking: no capabilities, a join declined with
 // dal.ErrNotSupported, and no fields for a wildcard.
 func TestZeroValueDatabaseDeclaresNothing(t *testing.T) {
+	t.Parallel()
 	var db Database
 	capabilities, ok := dal.As[dal.QueryCapabilitiesProvider](&db)
 	if !ok {
@@ -783,6 +799,7 @@ func TestZeroValueDatabaseDeclaresNothing(t *testing.T) {
 // Behaviour change (dalgo2sql v0.26.0): a keys-only query that names no order is
 // ordered ascending by the primary key (it had no defined order before).
 func TestNewDatabase_KeysOnlyQueryIsOrderedByThePrimaryKey(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	sqlDB, mock := newStructuredMock(t)
 	db := openMockedDatabase(t, sqlDB, keyOptions("widgets"))
 	mock.ExpectQuery(catalogStatement).WithArgs(`"widgets"`).WillReturnRows(catalogRows(`"widgets"`, textColumn("id"), textColumn("name")))
@@ -824,6 +841,7 @@ type widgetRow struct {
 // and an empty ID. A query that reads into a record of its own (SelectIntoRecord) fills
 // that record, which is keyed the same way.
 func TestNewDatabase_RecordsCarryTheirKey(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	widgets := func() dal.IQueryBuilder { return dal.From(dal.NewRootCollectionRef("widgets", "")).NewQuery() }
 	nameColumn := dal.Column{Expression: dal.NewFieldRef("", "Name")}
 	run := func(t *testing.T, opts dalgo2sql.DbOptions, catalog []catalogColumn, statement string, answer *sqlmock.Rows, q dal.StructuredQuery) []dalrecord.Record {
@@ -994,6 +1012,7 @@ func TestNewDatabase_RecordsCarryTheirKey(t *testing.T) {
 // without regard to case and underscores (first_name reaches FirstName), and a column
 // that no field matches is an error that names it (scany used to decide).
 func TestNewDatabase_GetIntoAStructMatchesColumnsLeniently(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	get := func(t *testing.T, columns ...string) (*widgetRow, error) {
 		sqlDB, mock := newStructuredMock(t)
 		db := openMockedDatabase(t, sqlDB, keyOptions("widgets"))
@@ -1024,6 +1043,7 @@ func TestNewDatabase_GetIntoAStructMatchesColumnsLeniently(t *testing.T) {
 // Behaviour change (dalgo2sql v0.26.0): an Insert whose key has an ID and whose
 // recordset has no primary key is an error, not a panic.
 func TestNewDatabase_InsertWithoutAPrimaryKeyIsAnErrorNotAPanic(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	sqlDB, _ := newStructuredMock(t) // no expectation: nothing may be sent
 	db := openMockedDatabase(t, sqlDB, dalgo2sql.DbOptions{})
 	record := dalrecord.NewRecordWithData(dalrecord.NewKeyWithID("widgets", "w1"), map[string]any{"Name": "x"})
@@ -1036,6 +1056,7 @@ func TestNewDatabase_InsertWithoutAPrimaryKeyIsAnErrorNotAPanic(t *testing.T) {
 // A batch with one record whose name is refused sends nothing at all: the whole batch
 // is checked before its first statement (the good record would otherwise be written).
 func TestNewDatabase_BatchesWithAnUnsafeNameSendNothing(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	sqlDB, mock := newStructuredMock(t) // only the begin and the rollback of a transaction are expected
 	db := openMockedDatabase(t, sqlDB, keyOptions("widgets"))
 	ctx := context.Background()

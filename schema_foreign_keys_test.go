@@ -9,6 +9,7 @@ import (
 )
 
 func TestDescribeCollection_ForeignKeys(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	db := openTestDB(t)
 	ctx := context.Background()
 	parent := uniqueTable(t, "fk_parent")

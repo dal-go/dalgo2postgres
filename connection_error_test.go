@@ -119,6 +119,7 @@ func echoing(dsn string, more ...string) error {
 }
 
 func TestOpenVerified_OpenErrorNamesHostPortAndDatabaseOnly(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	for name, tc := range dsnCases() {
 		t.Run(name, func(t *testing.T) {
@@ -150,6 +151,7 @@ func TestOpenVerified_OpenErrorNamesHostPortAndDatabaseOnly(t *testing.T) {
 }
 
 func TestOpenVerified_PingErrorNamesHostPortAndDatabaseOnly(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	for name, tc := range dsnCases() {
 		t.Run(name, func(t *testing.T) {
@@ -182,6 +184,7 @@ func TestOpenVerified_PingErrorNamesHostPortAndDatabaseOnly(t *testing.T) {
 }
 
 func TestOpenVerified_Success(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	mockDB, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
 	if err != nil {
@@ -203,6 +206,7 @@ func TestOpenVerified_Success(t *testing.T) {
 }
 
 func TestOpenVerified_UnparsableDSNNamesNothingFromIt(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	for name, dsn := range map[string]string{
 		"url bad port":     "postgres://" + secretUser + ":" + secretPassword + "@" + visibleHost + ":notaport/" + visibleDB,
@@ -229,6 +233,7 @@ func TestOpenVerified_UnparsableDSNNamesNothingFromIt(t *testing.T) {
 }
 
 func TestNewDatabase_UnparsableDSNErrorLeaksNothing(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	// Through the real constructors and the real driver, with no server involved:
 	// parsing fails before any connection is attempted.
@@ -262,6 +267,7 @@ func misSplitURLs(host string) map[string]string {
 }
 
 func TestOpenVerified_MisSplitURLNamesNothing(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	for name, dsn := range misSplitURLs("zelda-admin.invalid") {
 		t.Run(name, func(t *testing.T) {
@@ -280,6 +286,7 @@ func TestOpenVerified_MisSplitURLNamesNothing(t *testing.T) {
 }
 
 func TestNewDatabase_MisSplitURLLeaksNothing(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	// The real constructor and the real driver, against a closed port on this
 	// machine: nothing listens there, so no server is involved.
@@ -313,6 +320,7 @@ func misreadStrings() map[string]string {
 }
 
 func TestOpenVerified_MisreadStringIsRefusedBeforeTheDriver(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	for name, dsn := range misreadStrings() {
 		t.Run(name, func(t *testing.T) {
@@ -345,6 +353,7 @@ func TestOpenVerified_MisreadStringIsRefusedBeforeTheDriver(t *testing.T) {
 }
 
 func TestNewDatabase_MisreadStringLeaksNothing(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	// The real constructor and the real driver. The string is refused before any
 	// connection is attempted, so no server (and no default local socket) is tried.
@@ -383,6 +392,7 @@ func keywordStringsReadWrongly() map[string]string {
 }
 
 func TestOpenVerified_KeywordStringWithAPairInAValueIsRefusedBeforeTheDriver(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	for name, dsn := range keywordStringsReadWrongly() {
 		t.Run(name, func(t *testing.T) {
@@ -407,6 +417,7 @@ func TestOpenVerified_KeywordStringWithAPairInAValueIsRefusedBeforeTheDriver(t *
 }
 
 func TestNewDatabase_KeywordStringWithAPairInAValueIsRefused(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	// A string that was not refused would dial the closed port 1 here, not the
 	// default local socket.
@@ -428,6 +439,7 @@ func TestNewDatabase_KeywordStringWithAPairInAValueIsRefused(t *testing.T) {
 }
 
 func TestOpenVerified_KeywordStringsTheDriverReadsAsMeantAreNotRefused(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	for name, dsn := range map[string]string{
 		"a password with an equals sign":        "host=" + visibleHost + " user=" + secretUser + " password='pa=ss;w0rd,x&y' dbname=" + visibleDB,
@@ -450,6 +462,7 @@ func TestOpenVerified_KeywordStringsTheDriverReadsAsMeantAreNotRefused(t *testin
 }
 
 func TestOpenVerified_ParsedStringWithAnUnreadableFileOrServiceSaysSo(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	// The string is well formed; something it names is missing. The real driver
 	// refuses it when asked, and the text says a file or service may be the cause.
@@ -472,6 +485,7 @@ func TestOpenVerified_ParsedStringWithAnUnreadableFileOrServiceSaysSo(t *testing
 }
 
 func TestNewDatabase_RegisteredConnConfigIsNotRefused(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	// A programmatic pgx config, registered with the driver, is not a string pgx
 	// can parse. It must reach the driver, which knows it; the host, port and
@@ -500,6 +514,7 @@ func TestNewDatabase_RegisteredConnConfigIsNotRefused(t *testing.T) {
 }
 
 func TestOpenVerified_CredentialsFromTheEnvironmentAreNeverNamed(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	// The driver takes the user and the password from PGUSER and PGPASSWORD when
 	// the string has none. Neither is in the string, so only what the driver
@@ -516,6 +531,7 @@ func TestOpenVerified_CredentialsFromTheEnvironmentAreNeverNamed(t *testing.T) {
 }
 
 func TestOpenVerified_SeveralEndpointsNameNeitherHostNorPort(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	// A failure cannot be pinned to one of several servers, and a string that was
 	// read wrongly can fill the list with pieces of itself.
@@ -535,6 +551,7 @@ func TestOpenVerified_SeveralEndpointsNameNeitherHostNorPort(t *testing.T) {
 // dials the closed port. A name, a host or a database that is not what it was
 // meant to be must not drag the user name or the password along.
 func TestNewDatabase_ReviewRound3Strings(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	t.Setenv("PGHOST", "127.0.0.1")
 	t.Setenv("PGPORT", "1")
@@ -569,6 +586,7 @@ func TestNewDatabase_ReviewRound3Strings(t *testing.T) {
 }
 
 func TestOpenVerified_ServerTextCutTo63BytesIsNotCopied(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	// PostgreSQL cuts the user name and the database name of the startup packet
 	// to 63 bytes before it repeats them. A scrubber that knows only whole values
@@ -595,6 +613,7 @@ func TestOpenVerified_ServerTextCutTo63BytesIsNotCopied(t *testing.T) {
 }
 
 func TestNewDatabase_DatabaseEqualToACredentialIsNotNamed(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t)
 	// postgres:postgres@.../postgres: the database repeats the password, and
 	// naming it would show the reader the password and that it equals the database.
@@ -614,6 +633,7 @@ func TestNewDatabase_DatabaseEqualToACredentialIsNotNamed(t *testing.T) {
 }
 
 func TestNewDatabase_SeamFailuresAndSuccess(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	clearPGEnv(t) // the two subtests that open a handle parse the string with the driver
 	t.Run("an invalid option is refused before the driver is asked", func(t *testing.T) {
 		asked := false
@@ -657,6 +677,7 @@ func (timeoutError) Timeout() bool   { return true }
 func (timeoutError) Temporary() bool { return true }
 
 func TestClassify(t *testing.T) {
+	t.Parallel()
 	echo := errors.New("echo " + secretUser + " " + secretPassword)
 	refused := &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
 	noHost := &net.DNSError{Err: "no such host", Name: secretUser, IsNotFound: true}
@@ -710,6 +731,7 @@ func TestClassify(t *testing.T) {
 }
 
 func TestSentences(t *testing.T) {
+	t.Parallel()
 	seen := map[string]string{}
 	record := func(name, sentence string) {
 		t.Helper()
@@ -749,6 +771,7 @@ func TestSentences(t *testing.T) {
 }
 
 func TestConnectionError_Error(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		err  ConnectionError
@@ -779,6 +802,7 @@ func TestConnectionError_Error(t *testing.T) {
 }
 
 func TestNameParts(t *testing.T) {
+	t.Parallel()
 	endpoint := func(host string, port uint16, database string) pgconn.Config {
 		return pgconn.Config{Host: host, Port: port, Database: database}
 	}
@@ -844,6 +868,7 @@ func TestNameParts(t *testing.T) {
 }
 
 func TestDescribe_ConnectErrorWithoutConfigNamesNothing(t *testing.T) {
+	t.Parallel()
 	// A *pgconn.ConnectError built by hand has no configuration to read.
 	err := (dsnInfo{}).describe("PingContext", &pgconn.ConnectError{})
 	if err.Host != "" || err.Port != "" || err.Database != "" || err.Kind != FailureOther {
@@ -852,6 +877,7 @@ func TestDescribe_ConnectErrorWithoutConfigNamesNothing(t *testing.T) {
 }
 
 func TestDescribe_RegisteredConfigFromTheDriversOwnError(t *testing.T) {
+	t.Parallel()
 	// A string pgx could not parse is described from the configuration in the
 	// driver's own connect error.
 	cfg := &pgconn.Config{Host: visibleHost, Port: 6432, Database: visibleDB, User: secretUser, Password: secretPassword}
@@ -869,6 +895,7 @@ func TestDescribe_RegisteredConfigFromTheDriversOwnError(t *testing.T) {
 }
 
 func TestIsSettingName(t *testing.T) {
+	t.Parallel()
 	for name, want := range map[string]bool{
 		"application_name": true, "search_path": true, "_x": true, "my.setting": true, "A1": true,
 		"": false, "1a": false, "a-b": false, "a b": false, "a@b": false, "a/b": false, "a:b": false, `"postgres://u:p@h/d?sslmode`: false,
@@ -880,6 +907,7 @@ func TestIsSettingName(t *testing.T) {
 }
 
 func TestIsMisSplitURL(t *testing.T) {
+	t.Parallel()
 	for name, tc := range map[string]struct {
 		dsn  string
 		want bool
@@ -900,6 +928,7 @@ func TestIsMisSplitURL(t *testing.T) {
 }
 
 func TestCollectionNotFoundErrors(t *testing.T) {
+	t.Parallel()
 	// A bare name is quoted: the helper that reads NonDeterministicTextColumns
 	// passes the table name it was given.
 	for _, tc := range []struct{ name, want string }{

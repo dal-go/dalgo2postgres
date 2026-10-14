@@ -10,6 +10,7 @@ import (
 )
 
 func TestListCollections_Basic(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -43,6 +44,7 @@ func TestListCollections_Basic(t *testing.T) {
 }
 
 func TestDescribeCollection_NotFound(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	db := openTestDB(t)
 	ctx := context.Background()
 	ref := dal.NewRootCollectionRef("no_such_table_xyz_123", "")
@@ -59,6 +61,7 @@ func TestDescribeCollection_NotFound(t *testing.T) {
 }
 
 func TestDescribeCollection_BasicRoundTrip(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	db := openTestDB(t)
 	ctx := context.Background()
 	tbl := uniqueTable(t, "desc")
@@ -143,6 +146,7 @@ func TestDescribeCollection_BasicRoundTrip(t *testing.T) {
 }
 
 func TestListIndexes_ExcludesPK(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	db := openTestDB(t)
 	ctx := context.Background()
 	tbl := uniqueTable(t, "lidx")

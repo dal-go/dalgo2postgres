@@ -109,6 +109,7 @@ func assertClassified(t *testing.T, open func(t *testing.T) *Database, code stri
 }
 
 func TestConnectionFailureIntegration_WrongPasswordAtTheFirstCall(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	testDSN(t) // skips the test, and not only its calls, when no server is given
 	role := uniqueName("pw")
 	createRole(t, role, "LOGIN PASSWORD 'the-right-password'")
@@ -118,6 +119,7 @@ func TestConnectionFailureIntegration_WrongPasswordAtTheFirstCall(t *testing.T) 
 }
 
 func TestConnectionFailureIntegration_MissingDatabaseAtTheFirstCall(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	testDSN(t)
 	database := uniqueName("nodb")
 	assertClassified(t, func(t *testing.T) *Database {
@@ -126,6 +128,7 @@ func TestConnectionFailureIntegration_MissingDatabaseAtTheFirstCall(t *testing.T
 }
 
 func TestConnectionFailureIntegration_RoleThatMayNotLogInAtTheFirstCall(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	testDSN(t)
 	role := uniqueName("nologin")
 	createRole(t, role, "NOLOGIN PASSWORD 'the-password'")
@@ -138,6 +141,7 @@ func TestConnectionFailureIntegration_RoleThatMayNotLogInAtTheFirstCall(t *testi
 // type and a syntax error each reach the caller as the server's *pgconn.PgError, whose message
 // and detail are what the caller prints. The README says so.
 func TestConnectionFailureIntegration_StatementErrorsKeepTheServersMessageAndDetail(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	table := uniqueName("stmt") // short enough that the server does not cut the name of the key it derives from it
 	db := openTestDBWithOpts(t, dalgo2sql.DbOptions{Recordsets: map[string]*dalgo2sql.Recordset{
 		table: dalgo2sql.NewRecordset(table, dalgo2sql.Table, []dal.FieldRef{dal.Field("id")}),
@@ -191,6 +195,7 @@ func TestConnectionFailureIntegration_StatementErrorsKeepTheServersMessageAndDet
 // finds the connection closed), and whether the worker returns the statement's error or not, and
 // the rollback that follows cannot succeed. The worker here ends its own session.
 func TestConnectionFailureIntegration_ASessionTheServerEndsInATransaction(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	testDSN(t)
 	for _, kind := range transactionKinds() {
 		t.Run(kind.name, func(t *testing.T) {

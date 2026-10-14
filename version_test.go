@@ -6,6 +6,7 @@ import (
 )
 
 func TestResolveVersion(t *testing.T) {
+	t.Parallel()
 	reader := func(info *debug.BuildInfo, ok bool) func() (*debug.BuildInfo, bool) {
 		return func() (*debug.BuildInfo, bool) { return info, ok }
 	}
@@ -49,6 +50,7 @@ func TestResolveVersion(t *testing.T) {
 // TestAdapterReportsVersion ties the adapter identity to Version, the only
 // place the variable is used, so hard-coding a string in Adapter() fails here.
 func TestAdapterReportsVersion(t *testing.T) {
+	t.Parallel()
 	adapter := (&Database{}).Adapter()
 	if adapter.Name() != "dalgo2postgres" || adapter.Version() != Version || adapter.Version() == "" {
 		t.Fatalf("Adapter() = %s %s, want dalgo2postgres %q", adapter.Name(), adapter.Version(), Version)

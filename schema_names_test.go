@@ -29,6 +29,7 @@ func schemaReaderEntries(d *Database, table, schema string) map[string]func(ctx 
 	return map[string]func(ctx context.Context) error{
 		"ListCollections": func(ctx context.Context) error { _, err := d.ListCollections(ctx, nil); return err },
 		"ListViews":       func(ctx context.Context) error { _, err := d.ListViews(ctx); return err },
+		"ListSourceViews": func(ctx context.Context) error { _, err := d.ListSourceViews(ctx); return err },
 		"ListSchemaCollections": func(ctx context.Context) error {
 			_, err := d.ListSchemaCollections(ctx, schema)
 			return err
@@ -71,6 +72,7 @@ func refusesName(err error) bool {
 }
 
 func TestSchemaReader_RefusesANameOver63BytesBeforeAnyStatement(t *testing.T) {
+	t.Parallel()
 	long := strings.Repeat("n", 64)
 	twoBytes := strings.Repeat("é", 32) // 32 characters, 64 bytes
 	for _, tc := range []struct {
@@ -87,6 +89,7 @@ func TestSchemaReader_RefusesANameOver63BytesBeforeAnyStatement(t *testing.T) {
 		{"a configured schema of 64 bytes, by reference", "t", "public", long, "(table)"},
 		{"a configured schema of 64 bytes", "t", "public", long, "ListCollections"},
 		{"a configured schema of 64 bytes, views", "t", "public", long, "ListViews"},
+		{"a configured schema of 64 bytes, source views", "t", "public", long, "ListSourceViews"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var options []Option
@@ -112,6 +115,7 @@ func TestSchemaReader_RefusesANameOver63BytesBeforeAnyStatement(t *testing.T) {
 }
 
 func TestSchemaReader_RefusalIsTheErrorOfTheKeyPaths(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	// The wording is dalgo2sql's: the schema reader's refusal of a table is the
 	// text a key path gives for the same name as a collection, including the part
 	// of a long name it shows.
@@ -133,6 +137,7 @@ func TestSchemaReader_RefusalIsTheErrorOfTheKeyPaths(t *testing.T) {
 }
 
 func TestSchemaReader_RefusalNamesTheSchemaAndShowsLittleOfTheName(t *testing.T) {
+	t.Parallel()
 	d, _ := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
 	_, err := d.ListSchemaCollections(context.Background(), strings.Repeat("s", 100))
 	want := `unsafe SQL name: schema name "` + strings.Repeat("s", 32) + `" (truncated) is too long for PostgreSQL: it keeps 63 bytes`
@@ -142,6 +147,7 @@ func TestSchemaReader_RefusalNamesTheSchemaAndShowsLittleOfTheName(t *testing.T)
 }
 
 func TestSchemaReader_AcceptsANameOfExactly63Bytes(t *testing.T) {
+	t.Parallel()
 	name := strings.Repeat("n", 63)
 	d, mock := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
 	mock.ExpectQuery(listRelationsQuery).WithArgs(name).WillReturnRows(relationRows().AddRow("t", false))
@@ -165,6 +171,7 @@ func TestSchemaReader_AcceptsANameOfExactly63Bytes(t *testing.T) {
 }
 
 func TestSchemaReader_CountsTheNameThatIsLookedUp(t *testing.T) {
+	t.Parallel()
 	// Fold-lower mode looks up the lower-cased table name, so that is the name the
 	// server would cut: 31 capital A with a stroke (2 bytes) and an "a" are 63
 	// bytes as given and 94 once lower-cased (U+2C65 is 3 bytes).

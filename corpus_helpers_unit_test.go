@@ -19,6 +19,7 @@ import (
 // tests, so that a check that never fails is noticed here and not only on a server.
 
 func TestCellOf(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		value   any
@@ -41,6 +42,7 @@ func TestCellOf(t *testing.T) {
 }
 
 func TestDiagnosticOfAndMatchesDiagnostic(t *testing.T) {
+	t.Parallel()
 	query := fmt.Errorf("wrapped: %w", &dal.QueryValidationError{Category: "scope", Path: "columns[0]", Message: "m"})
 	join := &dal.JoinValidationError{Category: "join_scope", Path: "from.joins[0]", Message: "j"}
 	if got, ok := diagnosticOf(query); !ok || got.Category != "scope" || got.Path != "columns[0]" || got.Message != "m" {
@@ -66,6 +68,7 @@ func TestDiagnosticOfAndMatchesDiagnostic(t *testing.T) {
 }
 
 func TestStatementHelpers(t *testing.T) {
+	t.Parallel()
 	if got := countJoins(`SELECT * FROM "a" INNER JOIN "b" ON 1 LEFT JOIN "c" ON 1`); got != 2 {
 		t.Errorf("countJoins = %d, want 2", got)
 	}
@@ -82,6 +85,7 @@ func TestStatementHelpers(t *testing.T) {
 }
 
 func TestNamesInAndContainsArgument(t *testing.T) {
+	t.Parallel()
 	rows := []map[string]any{{"n": "b"}, {"n": "a"}, {"n": 3}}
 	if got := namesIn(rows, "n"); strings.Join(got, ",") != "3,a,b" {
 		t.Errorf("namesIn = %v, want the values sorted", got)
@@ -96,6 +100,7 @@ func TestNamesInAndContainsArgument(t *testing.T) {
 }
 
 func TestClassifyProbe(t *testing.T) {
+	t.Parallel()
 	server := fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: "22021"})
 	for name, tc := range map[string]struct {
 		run  adapterRun
@@ -114,6 +119,7 @@ func TestClassifyProbe(t *testing.T) {
 }
 
 func TestProbeWorldNames(t *testing.T) {
+	t.Parallel()
 	exact, fold := probeWorld{mode: IdentifierExact}, probeWorld{mode: IdentifierFoldLower}
 	if exact.stored("Naïve") != "Naïve" || fold.stored("Naïve") != "naïve" {
 		t.Errorf("stored = %q and %q", exact.stored("Naïve"), fold.stored("Naïve"))
@@ -132,6 +138,7 @@ func TestProbeWorldNames(t *testing.T) {
 }
 
 func TestExpectedGroupsAndJoinRows(t *testing.T) {
+	t.Parallel()
 	// 200,000 rows in 150,000 groups; a group of one row whose v is 1 fails the HAVING
 	// (SUM(v) > 1): the ids from 50,001 to 149,999 that are multiples of 7, 14,286 of them.
 	groups := expectedGroups(factRows)
@@ -164,6 +171,7 @@ func TestExpectedGroupsAndJoinRows(t *testing.T) {
 }
 
 func TestCompareJoinRun(t *testing.T) {
+	t.Parallel()
 	want := []map[string]any{{"id": 1.0, "name": "Ada"}}
 	one := []string{`SELECT * FROM "a" INNER JOIN "b" ON 1`}
 	for _, tc := range []struct {
@@ -190,6 +198,7 @@ func TestCompareJoinRun(t *testing.T) {
 }
 
 func TestCorrelatedCostProblems(t *testing.T) {
+	t.Parallel()
 	outer := `SELECT * FROM "Truth" AS "t"`
 	inner := `SELECT * FROM "Membership" AS "m"`
 	if problems := correlatedCostProblems("case", "Membership", 2, []string{outer, inner, inner}); len(problems) != 0 {
@@ -202,6 +211,7 @@ func TestCorrelatedCostProblems(t *testing.T) {
 
 // The recordset reader's rows are read into maps by column name, as the records reader's are.
 func TestReadRecordsetRows(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	open := func(t *testing.T, rows *sqlmock.Rows) dal.RecordsetReader {
 		t.Helper()
 		sqlDB, mock := newStructuredMock(t)
@@ -244,6 +254,7 @@ func TestReadRecordsetRows(t *testing.T) {
 }
 
 func TestPlainNamesAndKeyPathProblems(t *testing.T) {
+	t.Parallel()
 	for text, want := range map[string]bool{
 		"canary": true, "_x9": true, "Mixed_Case": true, strings.Repeat("n", 63): true,
 		strings.Repeat("n", 64): false, strings.Repeat("n", 255): false, strings.Repeat("n", 256): false,
@@ -281,6 +292,7 @@ func TestPlainNamesAndKeyPathProblems(t *testing.T) {
 // column: it is a plain identifier, and it is the only probe that is, so the only text whose
 // refusal is a matter of length. The fixture's names are what is left of it.
 func TestTheProbeOf64BytesIsTheOnePlainNameTheServerWouldCut(t *testing.T) {
+	t.Parallel()
 	var long []string
 	for _, probe := range probes {
 		if plainName.MatchString(probe.text) {
@@ -299,6 +311,7 @@ func TestTheProbeOf64BytesIsTheOnePlainNameTheServerWouldCut(t *testing.T) {
 // parent's of 30 and of 31, and the first 63 bytes of the longer are the shorter: the table the
 // longer would reach once cut. The other names the fixture writes through are 63 bytes.
 func TestTheNamesTheKeyPathFixtureWritesThroughHaveTheLengthsTheyAreMeantFor(t *testing.T) {
+	t.Parallel()
 	for name, want := range map[string]int{
 		nestedTable63: 63, nestedTable64: 64, undeclaredTable: 63, truncatedName: 63,
 		nestedChild: 32, nestedParent63: 30, nestedParent64: 31,

@@ -256,6 +256,7 @@ func titlesOf(rows []map[string]any) []any { return column(rows, "Title") }
 // a domain over a domain and a NOT NULL column. Every one of them answers with its
 // columns, in table order, so the statement the compiler writes lists them.
 func TestStructuredQueryIntegration_CatalogOverEverySourceKind(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_sq_catalog", IdentifierFoldLower, albumDDL)
 	for _, tc := range []struct {
 		name          string
@@ -298,6 +299,7 @@ func TestStructuredQueryIntegration_CatalogOverEverySourceKind(t *testing.T) {
 // travelling as a bound argument: a statement of every case has no value in its text,
 // and the injection string is compared as text and leaves the table in place.
 func TestStructuredQueryIntegration_FilterWithEachConstantType(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_sq_filters", IdentifierFoldLower, albumDDL)
 	for _, tc := range []struct {
 		name       string
@@ -347,6 +349,7 @@ func TestStructuredQueryIntegration_FilterWithEachConstantType(t *testing.T) {
 // NULLS clause written only for a column that can hold one; LIMIT and OFFSET are
 // bound.
 func TestStructuredQueryIntegration_OrderByLimitOffset(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_sq_order", IdentifierFoldLower, albumDDL)
 	order := func(orders ...dal.OrderExpression) dal.IQueryBuilder {
 		return albumFrom().NewQuery().OrderBy(orders...)
@@ -396,6 +399,7 @@ func TestStructuredQueryIntegration_OrderByLimitOffset(t *testing.T) {
 // GROUP BY with HAVING and every aggregate runs as one statement on the server;
 // SUM and AVG come back as float64, COUNT, MIN and MAX as integers.
 func TestStructuredQueryIntegration_GroupByHavingAndAggregates(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_sq_groups", IdentifierFoldLower, albumDDL)
 	columns := []dal.Column{
 		{Expression: field("ArtistId")},
@@ -430,6 +434,7 @@ func TestStructuredQueryIntegration_GroupByHavingAndAggregates(t *testing.T) {
 
 // A two-table join is one statement on the server.
 func TestStructuredQueryIntegration_Join(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_sq_join", IdentifierFoldLower, albumDDL)
 	on := dal.NewComparison(dal.NewFieldRef("a", "ArtistId"), dal.Equal, dal.NewFieldRef("r", "ArtistId"))
 	q := dal.From(dal.NewRootCollectionRef("Album", "a")).
@@ -464,6 +469,7 @@ func TestStructuredQueryIntegration_Join(t *testing.T) {
 // Arithmetic reads both operands as double precision: 3 / 2 is 1.5, not 1, and a
 // division by zero is NULL, not an error; a NULL operand gives NULL.
 func TestStructuredQueryIntegration_ArithmeticWithTheCast(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_sq_arithmetic", IdentifierFoldLower, albumDDL)
 	columns := []dal.Column{
 		{Expression: dal.Binary(field("Price"), dal.Multiply, dal.NewConstant(2)), Alias: "double"},
@@ -487,6 +493,7 @@ func TestStructuredQueryIntegration_ArithmeticWithTheCast(t *testing.T) {
 // DISTINCT: COUNT(DISTINCT x) is counted by the server too, in the same statement
 // as the other aggregates (see the group test above for the plain forms).
 func TestStructuredQueryIntegration_CountDistinct(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_sq_distinct", IdentifierFoldLower, albumDDL)
 	f.trace.reset()
 	rows := f.rows(t, albumFrom().NewQuery().GroupBy(field("ArtistId")).OrderBy(dal.AscendingField("ArtistId")).
@@ -507,6 +514,7 @@ func TestStructuredQueryIntegration_CountDistinct(t *testing.T) {
 // with numbers) and is left to DALgo's own engine when the types differ (text with
 // an integer): the plan DALgo makes from the database's answer.
 func TestStructuredQueryIntegration_PlansJoinsOnTheServerOrInDALgo(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_sq_plans", IdentifierFoldLower, albumDDL)
 	joiner, ok := dal.As[dal.NativeJoinProvider](f.db)
 	if !ok {
@@ -546,6 +554,7 @@ func TestStructuredQueryIntegration_PlansJoinsOnTheServerOrInDALgo(t *testing.T)
 // of this test spelled them as Title and AlbumId and DALgo answered
 // `field "Title" is unavailable in "a"`; the native path accepts any case.)
 func TestStructuredQueryIntegration_SubqueryRunsInDALgoOverPlainReads(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_sq_subquery", IdentifierFoldLower, albumDDL)
 	alice := dal.From(dal.NewRootCollectionRef("artist", "r")).NewQuery().
 		Where(
@@ -573,6 +582,7 @@ func TestStructuredQueryIntegration_SubqueryRunsInDALgoOverPlainReads(t *testing
 // result: a number against a text column is refused by the server (SQLSTATE 42883,
 // no such operator), and the connection goes back to the pool.
 func TestStructuredQueryIntegration_ConstantOfAnotherTypeThanItsColumnIsAServerError(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_sq_mismatch", IdentifierFoldLower, albumDDL)
 	_, err := f.db.ExecuteQueryToRecordsReader(context.Background(),
 		albumQuery().Where(dal.WhereField("Title", dal.Equal, 42)).SelectColumns(titleColumn()))
@@ -588,6 +598,7 @@ func TestStructuredQueryIntegration_ConstantOfAnotherTypeThanItsColumnIsAServerE
 // A select-all with an exclusion lists the columns of the table, in table order,
 // minus the excluded ones in any case, in the mode that folds names.
 func TestStructuredQueryIntegration_SelectAllWithAnExclusionFoldLower(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_sq_exclusion", IdentifierFoldLower, albumDDL)
 	f.trace.reset()
 	q := albumFrom().NewQuery().Where(dal.WhereField("AlbumId", dal.Equal, 1)).SelectColumns(dal.AllColumnsExcept("Note", "COVER"))
@@ -614,6 +625,7 @@ func TestStructuredQueryIntegration_SelectAllWithAnExclusionFoldLower(t *testing
 // nearest table: the suggestion query ran on the server, in the mode that folds
 // names and in the exact mode, where it says names are case-sensitive.
 func TestStructuredQueryIntegration_UnknownTableIsNotFoundWithASuggestion(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	testDSN(t) // a skip shows on this test, not only on its subtests
 	notFound := func(t *testing.T, f *queryFixture, name string) (*dalgo2sql.TableNotFoundError, error) {
 		t.Helper()
@@ -657,6 +669,7 @@ func TestStructuredQueryIntegration_UnknownTableIsNotFoundWithASuggestion(t *tes
 // The exact mode reads a database whose tables were created with mixed-case names,
 // and a collection reference that names its schema reads that schema.
 func TestStructuredQueryIntegration_ExactModeAndQualifiedSchema(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	const schema, other = "test_sq_exact", "test_sq_exact_other"
 	f := openQueryFixture(t, schema, IdentifierExact, []string{
 		`CREATE TABLE "Album" ("AlbumId" integer PRIMARY KEY, "Title" text NOT NULL)`,
@@ -689,6 +702,7 @@ func TestStructuredQueryIntegration_ExactModeAndQualifiedSchema(t *testing.T) {
 // and its statement, keeps it while its reader is open, and gives it back when the
 // reader is closed or read to its end, even when the caller never reads a row.
 func TestStructuredQueryIntegration_ReadsRunOnOneLeasedConnection(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_sq_lease", IdentifierFoldLower, albumDDL)
 	f.sqlDB.SetMaxOpenConns(2)
 	query := func() dal.StructuredQuery { return albumQuery().SelectColumns(titleColumn()) }
@@ -843,6 +857,7 @@ func TestStructuredQueryIntegration_ReadsRunOnOneLeasedConnection(t *testing.T) 
 // lease release of its own. Its rows come back as asked, and its connection goes back
 // when the reader is closed and when the rows are read to their end with no Close.
 func TestStructuredQueryIntegration_RecordsetReader(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_sq_recordset", IdentifierFoldLower, albumDDL)
 	ctx := context.Background()
 	columns := []string{"AlbumId", "Title", "Price", "Released", "InStock", "Cover"}
@@ -946,6 +961,7 @@ func TestStructuredQueryIntegration_RecordsetReader(t *testing.T) {
 // TestNewDatabase_RecordsCarryTheirKey): the statement the compiler writes for the
 // hidden column is accepted by the server, and its value, an integer here, is the ID.
 func TestStructuredQueryIntegration_RecordsCarryTheirKey(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	recordsets := map[string]*dalgo2sql.Recordset{
 		// The key of the map is the name the query spells for its source.
 		"Album": dalgo2sql.NewRecordset("Album", dalgo2sql.Table, []dal.FieldRef{dal.Field("AlbumId")}),
@@ -1011,6 +1027,7 @@ func TestStructuredQueryIntegration_RecordsCarryTheirKey(t *testing.T) {
 // statement. A caller must check its own context (ctx.Err()) rather than rely on
 // errors.Is(err, ctx.Err()).
 func TestStructuredQueryIntegration_ContextEndsBetweenAndDuringTheStatements(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	testDSN(t) // a skip shows on this test, not only on its subtests
 	query := func() dal.StructuredQuery { return albumQuery().SelectColumns(titleColumn()) }
 	endedReadError := func(err error) bool {

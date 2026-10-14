@@ -33,6 +33,7 @@ func refNames(refs []dal.CollectionRef) []string {
 }
 
 func TestListSchemas(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	t.Run("in name order, as the server answers", func(t *testing.T) {
 		d, mock := newSchemaMockDatabase(t)
@@ -76,6 +77,7 @@ func TestListSchemas(t *testing.T) {
 }
 
 func TestListSchemaCollectionsAndViews(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	rows := func() *sqlmock.Rows {
 		return relationRows().AddRow("Album", false).AddRow("AlbumTitles", true).AddRow("Sold", true).AddRow("Remote", false)
@@ -146,6 +148,7 @@ func TestListSchemaCollectionsAndViews(t *testing.T) {
 }
 
 func TestListRelationsStatementListsTheKindsAndNoName(t *testing.T) {
+	t.Parallel()
 	// The kinds are the listed ones, the schema is the only parameter, and the
 	// privilege test is the one information_schema.tables applies.
 	for _, fragment := range []string{
@@ -162,6 +165,7 @@ func TestListRelationsStatementListsTheKindsAndNoName(t *testing.T) {
 }
 
 func TestDescribeCollection_MaterializedViewIsReadFromPgAttribute(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
 	ref := dal.NewQualifiedRootCollectionRef("sales", "Sold", "")
 	mock.ExpectQuery(qProbe).WithArgs("sales", "Sold").WillReturnRows(sqlmock.NewRows([]string{"relkind"}).AddRow("m"))
@@ -189,6 +193,7 @@ func TestDescribeCollection_MaterializedViewIsReadFromPgAttribute(t *testing.T) 
 }
 
 func TestDescribeCollection_ReadsDefaultsIdentityAndGeneration(t *testing.T) {
+	t.Parallel()
 	d, mock := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact))
 	ref := dal.NewRootCollectionRef("t", "")
 	expectProbeFound(mock, "public", "t")
@@ -231,6 +236,7 @@ func TestDescribeCollection_ReadsDefaultsIdentityAndGeneration(t *testing.T) {
 }
 
 func TestColumnDefaultOf(t *testing.T) {
+	t.Parallel()
 	text := func(s string) sql.NullString { return sql.NullString{String: s, Valid: true} }
 	none := sql.NullString{}
 	tests := []struct {
@@ -257,6 +263,7 @@ func TestColumnDefaultOf(t *testing.T) {
 }
 
 func TestMaterializedViewColumnsStatementAnswersTheShapeOfInformationSchema(t *testing.T) {
+	t.Parallel()
 	// Eleven columns in the order informationSchemaColumnsSQL answers them; the
 	// last four are the constants of a column with no default, identity or
 	// generation. Schema and name are the only parameters, sent as text.

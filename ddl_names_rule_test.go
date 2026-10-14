@@ -15,6 +15,7 @@ import (
 // drops writes: a plain identifier of at most 63 bytes after lower-casing.
 
 func TestCheckName_AcceptsAPlainIdentifierOfUpTo63Bytes(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{
 		"a", "_", "_a", "A", "a1", "A1_b", "Orders", "select", "table",
 		strings.Repeat("n", 63), strings.Repeat("N", 63), "a" + strings.Repeat("_", 62),
@@ -34,6 +35,7 @@ func TestCheckName_AcceptsAPlainIdentifierOfUpTo63Bytes(t *testing.T) {
 }
 
 func TestCheckName_RefusesWhatIsNotAPlainIdentifierOrIsOver63Bytes(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		what, name, says string
 	}{
@@ -71,6 +73,7 @@ func TestCheckName_RefusesWhatIsNotAPlainIdentifierOrIsOver63Bytes(t *testing.T)
 }
 
 func TestCheckName_ReadsAsTheErrorOfTheKeyPaths(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	// The wording is dalgo2sql's: the refusal of a name is the text a key path gives
 	// for the same name as a collection, both for a name that is not a plain
 	// identifier and for one that is too long, including the part of a long name it
@@ -93,6 +96,7 @@ func TestCheckName_ReadsAsTheErrorOfTheKeyPaths(t *testing.T) {
 }
 
 func TestCheckName_ShowsLittleOfTheName(t *testing.T) {
+	t.Parallel()
 	_, err := checkName(positionPrimaryKey, strings.Repeat(`x"`, 50))
 	want := `unsafe SQL name: primary key name ` + strconv.Quote(strings.Repeat(`x"`, 16)) + ` (truncated) is too long for PostgreSQL: it keeps 63 bytes`
 	if err == nil || err.Error() != want {

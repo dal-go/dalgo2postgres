@@ -64,6 +64,7 @@ func collectionNames(refs []dal.CollectionRef) []string {
 }
 
 func TestSchemaReaderIntegration_MixedCaseUnknownTypesViewsAndReferrers(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	schemaName := uniqueTable(t, "pg01")
 	db := openSchemaTestDB(t, schemaName, IdentifierExact)
 	ctx := context.Background()
@@ -223,6 +224,7 @@ func TestSchemaReaderIntegration_MixedCaseUnknownTypesViewsAndReferrers(t *testi
 }
 
 func TestSchemaReaderIntegration_FoldLowerFindsLowerCaseTables(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	schemaName := uniqueTable(t, "pg01fold")
 	db := openSchemaTestDB(t, schemaName, IdentifierFoldLower)
 	s := exactIdent(schemaName)
@@ -240,6 +242,7 @@ func TestSchemaReaderIntegration_FoldLowerFindsLowerCaseTables(t *testing.T) {
 }
 
 func TestSchemaReaderIntegration_SecondSchemaIsKeptApart(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	first := uniqueTable(t, "pg01a")
 	second := uniqueTable(t, "pg01b")
 	db1 := openSchemaTestDB(t, first, IdentifierExact)
@@ -326,6 +329,7 @@ func TestSchemaReaderIntegration_SecondSchemaIsKeptApart(t *testing.T) {
 }
 
 func TestSchemaReaderIntegration_SelectOnlyNonOwnerSeesConstraintMetadata(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	dsn := testDSN(t)
 	admin, err := NewDatabase(dsn, WithIdentifierMode(IdentifierExact))
 	if err != nil {
@@ -473,6 +477,7 @@ func TestSchemaReaderIntegration_SelectOnlyNonOwnerSeesConstraintMetadata(t *tes
 // A primary key in one schema must not hide a same-named index of a same-named
 // table in another schema.
 func TestSchemaReaderIntegration_PrimaryKeyExclusionStaysInItsSchema(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	first := uniqueTable(t, "pg01pka")
 	second := uniqueTable(t, "pg01pkb")
 	db1 := openSchemaTestDB(t, first, IdentifierExact)
@@ -508,6 +513,7 @@ func TestSchemaReaderIntegration_PrimaryKeyExclusionStaysInItsSchema(t *testing.
 // Each foreign key of a table is one Referrer, and a composite key lists its
 // columns in key order, not alphabetically.
 func TestSchemaReaderIntegration_ReferrersPerForeignKeyInKeyOrder(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	schemaName := uniqueTable(t, "pg01ref")
 	db := openSchemaTestDB(t, schemaName, IdentifierExact)
 	s := exactIdent(schemaName)

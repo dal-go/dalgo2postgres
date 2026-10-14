@@ -40,6 +40,7 @@ func statementsSent(f *queryFixture) []string {
 // alias and no column is the whole row to the server (the control below), and the
 // compiler refuses it before the server: the catalog says what the columns are.
 func TestServerPinsIntegration_ColumnNamedLikeItsAliasIsTheColumn(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_pin_alias", IdentifierFoldLower, []string{
 		`CREATE TABLE t_alias (x integer, y text)`,
 		`INSERT INTO t_alias VALUES (1, 'one'), (2, 'two')`,
@@ -92,6 +93,7 @@ func TestServerPinsIntegration_ColumnNamedLikeItsAliasIsTheColumn(t *testing.T) 
 // column is the whole row inside one value, the control below, and the compiler refuses it
 // before the server.
 func TestServerPinsIntegration_QualifiedColumnWinsOverAFunctionOfTheRow(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_pin_function", IdentifierFoldLower, []string{
 		`CREATE TABLE t_fn (id integer PRIMARY KEY, to_json text, row_to_json text, count integer)`,
 		`INSERT INTO t_fn VALUES (1, 'tj', 'rtj', 7)`,
@@ -141,6 +143,7 @@ func TestServerPinsIntegration_QualifiedColumnWinsOverAFunctionOfTheRow(t *testi
 // a record by name, would keep one of them. The exact mode writes them as two names and the
 // server returns both.
 func TestServerPinsIntegration_AliasesThatFoldTogetherAreRefusedBeforeTheServer(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	ddl := []string{
 		`CREATE TABLE t_fold (id integer PRIMARY KEY, a text, b text)`,
 		`INSERT INTO t_fold VALUES (1, 'x', 'y')`,
@@ -180,6 +183,7 @@ func TestServerPinsIntegration_AliasesThatFoldTogetherAreRefusedBeforeTheServer(
 // clause and not by name: the base's columns are zid and zval, and a column of the joined
 // table that sorts before them (aid) comes after.
 func TestServerPinsIntegration_SelectAllOverAJoinListsTheBasesColumnsFirst(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_pin_join_star", IdentifierFoldLower, []string{
 		`CREATE TABLE j_z (zid integer PRIMARY KEY, zval text)`,
 		`CREATE TABLE j_a (aid integer PRIMARY KEY, aval text, zref integer)`,
@@ -231,6 +235,7 @@ func TestServerPinsIntegration_SelectAllOverAJoinListsTheBasesColumnsFirst(t *te
 // states the server's refusal of the statement the compiler no longer sends, so the reason
 // for the plan is a fact about the server and not only about the compiler.
 func TestServerPinsIntegration_TextJoinKeysWithDifferentCollations(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_pin_collation", IdentifierFoldLower, []string{
 		`CREATE TABLE c_c (id integer PRIMARY KEY, k text COLLATE "C")`,
 		`CREATE TABLE c_p (id integer PRIMARY KEY, k text COLLATE "POSIX")`,
@@ -304,6 +309,7 @@ func TestServerPinsIntegration_TextJoinKeysWithDifferentCollations(t *testing.T)
 // three rows, then the server's 22P02, row by row, through the read-all helper, and out of
 // a read transaction.
 func TestServerPinsIntegration_RuntimeErrorAtRowN(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_pin_runtime", IdentifierFoldLower, []string{
 		`CREATE TABLE rt (id integer PRIMARY KEY, v text)`,
 		`INSERT INTO rt VALUES (1, '1'), (2, '2'), (3, '3'), (4, 'x'), (5, '5')`,
@@ -415,6 +421,7 @@ func TestServerPinsIntegration_RuntimeErrorAtRowN(t *testing.T) {
 // NOT NULL column on the nullable side of a LEFT JOIN keeps its NULLS clause too, because
 // the join makes it NULL for a row with no partner, and those rows sort first.
 func TestServerPinsIntegration_NotNullColumnKeepsItsOrderByWithoutANullsClause(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_pin_not_null", IdentifierFoldLower, []string{
 		`CREATE TABLE nn (id integer PRIMARY KEY, rank integer NOT NULL, label text)`,
 		`CREATE TABLE nn_b (id integer PRIMARY KEY, nnid integer NOT NULL, bonus integer NOT NULL)`,
@@ -473,6 +480,7 @@ func TestServerPinsIntegration_NotNullColumnKeepsItsOrderByWithoutANullsClause(t
 // equals sort.Strings. If the database's collation orders like C the pin shows nothing, and
 // the test fails and says so rather than skipping.
 func TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	rows := `('Shanghai_Shanghai'), ('Sindh_Karachi'), ('São Paulo_São Paulo')`
 	f := openQueryFixture(t, "test_pin_keys_collation", IdentifierFoldLower, []string{
 		`CREATE TABLE kc_default (id text PRIMARY KEY)`,
@@ -542,6 +550,7 @@ func TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation(t *testi
 // On PostgreSQL 17 the syntax does not exist, and the control asserts that it is refused (a
 // syntax error), so the test runs and passes on both legs of the job and says which it is.
 func TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimit(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	f := openQueryFixture(t, "test_pin_not_valid", IdentifierFoldLower, []string{
 		`CREATE TABLE nv (id integer PRIMARY KEY, v integer)`,
 		`INSERT INTO nv VALUES (1, 3), (2, NULL), (3, 1), (4, NULL), (5, 2)`,

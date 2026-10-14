@@ -35,6 +35,7 @@ func newSchemaMockDatabase(t *testing.T, options ...Option) (*Database, sqlmock.
 }
 
 func TestNewDatabaseFromSQL_Defaults(t *testing.T) {
+	t.Parallel()
 	d, _ := newSchemaMockDatabase(t)
 	if got := d.schemaName(); got != "public" {
 		t.Errorf("schemaName() = %q, want %q", got, "public")
@@ -45,9 +46,22 @@ func TestNewDatabaseFromSQL_Defaults(t *testing.T) {
 	if d.DB == nil {
 		t.Error("embedded dal.DB must be set")
 	}
+	if !d.SupportsConcurrentConnections() {
+		t.Error("SupportsConcurrentConnections() = false, want true")
+	}
+	if !d.SupportsTransactionalDDL() {
+		t.Error("SupportsTransactionalDDL() = false, want true")
+	}
+	if got := d.ID(); got != d.DB.ID() {
+		t.Errorf("ID() = %q, want %q", got, d.DB.ID())
+	}
+	if got := d.Schema(); got == nil || got != d.DB.Schema() {
+		t.Errorf("Schema() = %v, want %v", got, d.DB.Schema())
+	}
 }
 
 func TestNewDatabaseFromSQL_Options(t *testing.T) {
+	t.Parallel()
 	d, _ := newSchemaMockDatabase(t, WithSchema("sales"), WithIdentifierMode(IdentifierExact))
 	if got := d.schemaName(); got != "sales" {
 		t.Errorf("schemaName() = %q, want %q", got, "sales")
@@ -58,6 +72,7 @@ func TestNewDatabaseFromSQL_Options(t *testing.T) {
 }
 
 func TestWithSchema_EmptyKeepsDefault(t *testing.T) {
+	t.Parallel()
 	d, _ := newSchemaMockDatabase(t, WithSchema("sales"), WithSchema(""))
 	if got := d.schemaName(); got != "public" {
 		t.Errorf("schemaName() = %q, want %q after WithSchema(\"\")", got, "public")
@@ -65,6 +80,7 @@ func TestWithSchema_EmptyKeepsDefault(t *testing.T) {
 }
 
 func TestWithIdentifierMode_FoldLowerExplicit(t *testing.T) {
+	t.Parallel()
 	d, _ := newSchemaMockDatabase(t, WithIdentifierMode(IdentifierExact), WithIdentifierMode(IdentifierFoldLower))
 	if got := d.resolveName("Album"); got != "album" {
 		t.Errorf("resolveName(Album) = %q, want %q", got, "album")
@@ -72,6 +88,7 @@ func TestWithIdentifierMode_FoldLowerExplicit(t *testing.T) {
 }
 
 func TestZeroValueDatabaseUsesDefaults(t *testing.T) {
+	t.Parallel()
 	var d Database
 	if got := d.schemaName(); got != "public" {
 		t.Errorf("zero Database schemaName() = %q, want public", got)
@@ -79,6 +96,7 @@ func TestZeroValueDatabaseUsesDefaults(t *testing.T) {
 }
 
 func TestNilOptionIsIgnored(t *testing.T) {
+	t.Parallel()
 	d, _ := newSchemaMockDatabase(t, nil, WithSchema("sales"), nil)
 	if got := d.schemaName(); got != "sales" {
 		t.Errorf("schemaName() = %q, want sales (nil options skipped, the rest applied)", got)
@@ -86,6 +104,7 @@ func TestNilOptionIsIgnored(t *testing.T) {
 }
 
 func TestResolveSettings(t *testing.T) {
+	t.Parallel()
 	const (
 		exact = dalgo2sql.IdentifierCaseExact
 		fold  = dalgo2sql.IdentifierCaseFoldLower
@@ -124,6 +143,7 @@ func TestResolveSettings(t *testing.T) {
 }
 
 func TestResolveSettingsPreservesOptInExactNumericValues(t *testing.T) {
+	t.Parallel()
 	got, err := resolveSettings(dalgo2sql.DbOptions{ExactNumericValues: true}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -134,6 +154,7 @@ func TestResolveSettingsPreservesOptInExactNumericValues(t *testing.T) {
 }
 
 func TestResolveSettings_ForcesTheDialectWhateverTheCallerSets(t *testing.T) {
+	t.Parallel()
 	for _, dialect := range []string{"", "sqlite", "mysql", "nonsense", "postgres"} {
 		got, err := resolveSettings(dalgo2sql.DbOptions{StructuredQueryDialect: dialect}, nil)
 		if err != nil || got.db.StructuredQueryDialect != "postgres" {
@@ -162,6 +183,7 @@ func (fakeHintTranslator) TranslateNativeJoinHints(dal.FromSource) (dalgo2sql.Na
 // together, and a caller's own compiler beside them would be sent whole grouped queries
 // and joins the dialect promised and it never did.
 func TestResolveSettings_Refusals(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		opts    dalgo2sql.DbOptions
@@ -199,6 +221,7 @@ func TestResolveSettings_Refusals(t *testing.T) {
 }
 
 func TestIdentifierModeFollowsTheResolvedSetting(t *testing.T) {
+	t.Parallel()
 	// DbOptions.IdentifierCase alone decides how the schema reader matches names too,
 	// so the two never disagree about a name.
 	d, _ := func() (*Database, sqlmock.Sqlmock) {
@@ -227,6 +250,7 @@ func TestIdentifierModeFollowsTheResolvedSetting(t *testing.T) {
 // options applied last, the first statement the database sends would be the legacy
 // emitter's and not the typed compiler's catalog query.
 func TestNewDatabaseFromSQL_AnOptionCannotSwapTheHandlesTheConstructorAssigns(t *testing.T) {
+	// Not parallel: mutates process PG* environment variables via t.Setenv.
 	sqlDB, mock := newStructuredMock(t)
 	otherDB, otherMock, err := sqlmock.New()
 	if err != nil {
@@ -268,6 +292,7 @@ func TestNewDatabaseFromSQL_AnOptionCannotSwapTheHandlesTheConstructorAssigns(t 
 }
 
 func TestNewDatabaseWithOptions_RejectsUnknownIdentifierModeBeforeConnecting(t *testing.T) {
+	t.Parallel()
 	// The DSN is unusable on purpose: the error must come from the option check,
 	// before any connection is attempted.
 	db, err := NewDatabaseWithOptions("not-a-dsn", dal.NewSchema(nil, nil), dalgo2sql.DbOptions{}, WithIdentifierMode(IdentifierMode(-1)))
@@ -281,6 +306,7 @@ func TestNewDatabaseWithOptions_RejectsUnknownIdentifierModeBeforeConnecting(t *
 
 // A refused option set never reaches the driver: the opener is not called.
 func TestNewDatabase_NativeHooksAreRefusedBeforeConnecting(t *testing.T) {
+	t.Parallel()
 	opener := func(string, string) (*sql.DB, error) {
 		t.Error("the opener was called for an option set the constructor refuses")
 		return nil, errors.New("unreachable")
@@ -297,6 +323,7 @@ func TestNewDatabase_NativeHooksAreRefusedBeforeConnecting(t *testing.T) {
 }
 
 func TestSchemaFor(t *testing.T) {
+	t.Parallel()
 	d, _ := newSchemaMockDatabase(t, WithSchema("sales"))
 	plain := dal.NewRootCollectionRef("Album", "")
 	qualified := dal.NewQualifiedRootCollectionRef("archive", "Album", "")

@@ -75,6 +75,7 @@ var notRunInFoldLowerMode = []struct{ name, reason, pinnedBy string }{
 // reports them as skips that give the reason. Every other sub-test runs, and the job
 // fails when any skips that is not in its allow-list.
 func TestEndToEnd(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	testDSN(t) // a skip shows on this test, not only on its subtests
 	recordsets := map[string]*dalgo2sql.Recordset{}
 	for _, collection := range []string{end2end.E2ETestKind1, end2end.E2ETestKind2, "NonExistingKind", models.CitiesCollection} {
@@ -103,6 +104,7 @@ func TestEndToEnd(t *testing.T) {
 // suite cannot run here (notRunInFoldLowerMode); the README says to fold the names an
 // access check compares. The same condition spelled as stored is satisfied.
 func TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	testDSN(t)
 	recordsets := map[string]*dalgo2sql.Recordset{
 		models.CitiesCollection: dalgo2sql.NewRecordset(models.CitiesCollection, dalgo2sql.Table, []dal.FieldRef{dal.Field("ID")}),
@@ -174,6 +176,7 @@ func TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames(t *testing.T) 
 // and then allows without one is decided by the wider rule: the README says so, and
 // TestAccessIntegration_UnconditionalAllowBehindAConditionDecidesTheRow asserts it.
 func TestEndToEndIntegration_UpdateUnderRowConditionsFailsClosedOnStoredNames(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	testDSN(t)
 	recordsets := map[string]*dalgo2sql.Recordset{
 		models.CitiesCollection: dalgo2sql.NewRecordset(models.CitiesCollection, dalgo2sql.Table, []dal.FieldRef{dal.Field("ID")}),

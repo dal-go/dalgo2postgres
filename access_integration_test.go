@@ -137,6 +137,7 @@ func forEachMode(t *testing.T, run func(t *testing.T, w accessWorld)) {
 // value holds, the table is whole afterwards, and a caller's own condition with a quote is
 // compared as text too.
 func TestAccessIntegration_RowConditionWithAQuoteReturnsExactlyThePermittedRows(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	forEachMode(t, func(t *testing.T, w accessWorld) {
 		f := w.f
 		byCountry := dal.WhereField(w.name("Country"), dal.Equal, dal.NewParam("country"))
@@ -219,6 +220,7 @@ func (w accessWorld) fieldListSession() dal.ReadSession {
 // refused, with no statement sent. The positive control is the same policy reading an allowed
 // column; an allowed column under the hidden field's own name never returns the stored field.
 func TestAccessIntegration_HiddenFieldUnderAnAliasAndAnEmptyProjectionAreDenied(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	forEachMode(t, func(t *testing.T, w accessWorld) {
 		f := w.f
 		session := w.fieldListSession()
@@ -278,6 +280,7 @@ func TestAccessIntegration_HiddenFieldUnderAnAliasAndAnEmptyProjectionAreDenied(
 // The last five cases pin a limit of dal-go/dalgo, not a leak: a field of the joined source is
 // held to the listed source's list in the select list, WHERE, GROUP BY, HAVING and ORDER BY.
 func TestAccessIntegration_HiddenFieldInAJoinOrAScanOrderIsDeniedWithNoStatement(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	forEachMode(t, func(t *testing.T, w accessWorld) {
 		f := w.f
 		session := w.fieldListSession()
@@ -414,6 +417,7 @@ func TestAccessIntegration_HiddenFieldInAJoinOrAScanOrderIsDeniedWithNoStatement
 // InvoiceId and PersonId. When dal-go/dalgo supports field rules on a joined source the second
 // case FAILS and says what to assert instead.
 func TestAccessIntegration_AFieldListOnAJoinedSourceIsRefusedWithNoStatement(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	forEachMode(t, func(t *testing.T, w accessWorld) {
 		f := w.f
 		ctx := context.Background()
@@ -466,6 +470,7 @@ func TestAccessIntegration_AFieldListOnAJoinedSourceIsRefusedWithNoStatement(t *
 // check, and none reaches the server. The same for a list whose only policy is nil. The
 // control is a session with a policy that allows the read.
 func TestAccessIntegration_SessionWithNoPolicyIsDenied(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	forEachMode(t, func(t *testing.T, w accessWorld) {
 		f := w.f
 		ctx := context.Background()
@@ -509,6 +514,7 @@ func TestAccessIntegration_SessionWithNoPolicyIsDenied(t *testing.T) {
 // narrows with a condition not to leave a wider allow behind it. The control is the same
 // condition alone, which narrows.
 func TestAccessIntegration_UnconditionalAllowBehindAConditionDecidesTheRow(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	forEachMode(t, func(t *testing.T, w accessWorld) {
 		f := w.f
 		byCountry := dal.WhereField(w.name("Country"), dal.Equal, dal.NewParam("country"))
