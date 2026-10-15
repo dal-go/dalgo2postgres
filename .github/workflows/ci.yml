@@ -167,6 +167,7 @@ jobs:
             RecordsetReader \
             RecordsCarryTheirKey \
             RecordKeysFromTheCatalog \
+            EveryReadKeepsItsKeysUnique \
             KeyReadFindsItsRecordsetOnlyUnderTheCollectionAsSpelled \
             ContextEndsBetweenAndDuringTheStatements; do
             if ! grep -qE "^\s*--- PASS: TestStructuredQueryIntegration_${name} \(" /tmp/gotest.log; then
