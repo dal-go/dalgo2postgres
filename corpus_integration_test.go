@@ -13,10 +13,10 @@ import (
 	"testing"
 
 	"github.com/dal-go/dalgo/dal"
-	"github.com/dal-go/dalgo/dtql"
+	"github.com/dal-go/dalgo/tugql"
 )
 
-// The query corpus on a real server: the DTQL fixtures of dal-go/dalgo that DataTug and OVDB
+// The query corpus on a real server: the TugQL fixtures of dal-go/dalgo that DataTug and OVDB
 // send (joins, grouping, subqueries), vendored under testdata/joins and testdata/subqueries
 // with their digests, run through this adapter against PostgreSQL. Each case is compared
 // with its fixture, and a case that differs is listed in testdata/postgres-divergences.json
@@ -107,14 +107,14 @@ func runThroughRecordsetReader(f *queryFixture, q dal.Query) adapterRun {
 	return run
 }
 
-// parseFixtureQuery reads a DTQL document of a fixture directory.
+// parseFixtureQuery reads a TugQL document of a fixture directory.
 func parseFixtureQuery(t *testing.T, path string) dal.StructuredQuery {
 	t.Helper()
 	document, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	query, err := dtql.Deserialize(document)
+	query, err := tugql.Deserialize(document)
 	if err != nil {
 		t.Fatalf("%s: %v", path, err)
 	}
@@ -209,7 +209,7 @@ func joinFixtureNames() []string {
 	return names
 }
 
-// Every DTQL document in testdata/joins is run by a test: a fixture added by vendoring dalgo
+// Every TugQL document in testdata/joins is run by a test: a fixture added by vendoring dalgo
 // again is not left unrun.
 func TestFixturesEveryJoinFixtureIsRunByATest(t *testing.T) {
 	t.Parallel()
@@ -229,12 +229,12 @@ func TestFixturesJoinNegativeCasesAreRefusedWithTheFixturesDiagnostic(t *testing
 	t.Parallel()
 	for _, name := range joinNegativeFixtures {
 		t.Run(name, func(t *testing.T) {
-			document, err := os.ReadFile(filepath.Join("testdata", "joins", name+".dtql.yaml"))
+			document, err := os.ReadFile(filepath.Join("testdata", "joins", name+".tugql.yaml"))
 			if err != nil {
 				t.Fatal(err)
 			}
 			want := readFixtureDiagnostic(t, filepath.Join("testdata", "joins", name+".error.json"))
-			_, err = dtql.Deserialize(document)
+			_, err = tugql.Deserialize(document)
 			if !matchesDiagnostic(err, want) {
 				got, _ := diagnosticOf(err)
 				t.Errorf("error = %v (%+v), want the diagnostic %s at %s", err, got, want.Category, want.Path)
@@ -329,7 +329,7 @@ func TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer(t *testing.T) {
 		if !known {
 			t.Fatalf("%s: no rows are expected of it: add them", tc.name)
 		}
-		query := parseFixtureQuery(t, filepath.Join("testdata", "joins", tc.name+".dtql.yaml"))
+		query := parseFixtureQuery(t, filepath.Join("testdata", "joins", tc.name+".tugql.yaml"))
 		for _, reader := range []struct {
 			label string
 			run   func(*queryFixture, dal.Query) adapterRun
@@ -602,7 +602,7 @@ func TestFixturesIntegration_SubqueriesRunInDALgoOverLeafReads(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			query, err := dtql.Deserialize(document)
+			query, err := tugql.Deserialize(document)
 			var run adapterRun
 			if err == nil {
 				run = runThroughAdapter(f, query)

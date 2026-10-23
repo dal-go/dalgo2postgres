@@ -18,7 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// The helpers of the query corpus: the DTQL fixtures of dal-go/dalgo that this package
+// The helpers of the query corpus: the TugQL fixtures of dal-go/dalgo that this package
 // vendors under testdata/joins and testdata/subqueries, the file that lists where
 // PostgreSQL's answer differs from the fixture's, and the comparison of rows. The tests
 // that run the corpus against a server are in corpus_integration_test.go; the helpers
@@ -444,7 +444,7 @@ func divergenceDetails(entry divergence, err error, statements []string) []strin
 }
 
 // unrunFixtures lists the problems of a directory of fixtures against the names the tests
-// run: a DTQL document in dir (name.dtql.yaml or name.dtql.json) that no test runs, which
+// run: a TugQL document in dir (name.tugql.yaml or name.tugql.json) that no test runs, which
 // would pass unnoticed, and a name that is run and has no document.
 func unrunFixtures(dir string, ran []string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
@@ -455,7 +455,7 @@ func unrunFixtures(dir string, ran []string) ([]string, error) {
 	present := map[string]bool{}
 	for _, entry := range entries {
 		name := entry.Name()
-		for _, suffix := range []string{".dtql.yaml", ".dtql.json"} {
+		for _, suffix := range []string{".tugql.yaml", ".tugql.json"} {
 			if base, found := strings.CutSuffix(name, suffix); found {
 				present[base] = true
 				if !contains(ran, base) {

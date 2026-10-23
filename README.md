@@ -290,7 +290,7 @@ bytes in a key path, which PostgreSQL cut to 63 bytes so that the statement reac
 or column. The tests now assert the fixed behaviour on both servers (see "What the integration tests
 prove about queries").
 
-- **A derived source** (a query in `FROM` or in a join, DTQL's `from: {query: ...}`) is refused:
+- **A derived source** (a query in `FROM` or in a join, TugQL's `from: {query: ...}`) is refused:
   DALgo's engine asks the adapter for the columns of each source, and dalgo2sql answers for a
   table and refuses for a derived source with `not supported: source dal.QuerySource`. Four
   cases of the subquery fixtures are listed in `testdata/postgres-divergences.json` for it, the
@@ -343,7 +343,7 @@ Limits of this combination that are not defects of one library:
 Every one runs in the Conformance job on PostgreSQL 17 and 18, and the job fails when one is
 skipped, missing or not passing.
 
-- **The corpus.** The DTQL fixtures of dal-go/dalgo under `testdata/joins` and
+- **The corpus.** The TugQL fixtures of dal-go/dalgo under `testdata/joins` and
   `testdata/subqueries` are vendored with their SHA-256 digests and the module version they come
   from, and a test fails when a file or a digest changes, when the files are not those of the
   dalgo the module requires, and when a bump of dalgo has not been followed by vendoring them

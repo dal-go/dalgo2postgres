@@ -199,7 +199,7 @@ func TestVendoredFixturesAreTheDalgoModulesAtTheRequiredVersion(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if want := "dtql/testdata/" + name; manifest.SourcePath != want || manifest.SourceCommit == "" {
+		if want := "tugql/testdata/" + name; manifest.SourcePath != want || manifest.SourceCommit == "" {
 			t.Errorf("%s: sourcePath %q and sourceCommit %q, want %q and a commit", dir, manifest.SourcePath, manifest.SourceCommit, want)
 		}
 		for _, problem := range upstreamProblems(dir, filepath.Join(upstream, filepath.FromSlash(manifest.SourcePath))) {
@@ -348,7 +348,7 @@ func TestDivergenceDetails(t *testing.T) {
 func TestUnrunFixtures(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	for _, name := range []string{"a.dtql.yaml", "b.dtql.json", "b.rows.json", "manifest.json", "c.error.json"} {
+	for _, name := range []string{"a.tugql.yaml", "b.tugql.json", "b.rows.json", "manifest.json", "c.error.json"} {
 		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -361,7 +361,7 @@ func TestUnrunFixtures(t *testing.T) {
 	if err != nil || len(problems) != 2 {
 		t.Fatalf("problems = %q, %v; want two", problems, err)
 	}
-	wantProblem(t, problems, "b.dtql.json is a fixture that no test runs")
+	wantProblem(t, problems, "b.tugql.json is a fixture that no test runs")
 	wantProblem(t, problems, "a test runs ghost and there is no such fixture")
 	if _, err := unrunFixtures(filepath.Join(dir, "nope"), nil); err == nil {
 		t.Error("a directory that does not exist was listed, want the error")
@@ -370,7 +370,7 @@ func TestUnrunFixtures(t *testing.T) {
 
 func TestUnexpectedInputless(t *testing.T) {
 	t.Parallel()
-	cases := []suiteCase{{Name: "in-not-in-null-table"}, {Name: "runnable", Input: "x.dtql.yaml"}, {Name: "forgotten"}}
+	cases := []suiteCase{{Name: "in-not-in-null-table"}, {Name: "runnable", Input: "x.tugql.yaml"}, {Name: "forgotten"}}
 	if got := unexpectedInputless(cases); !reflect.DeepEqual(got, []string{"forgotten"}) {
 		t.Errorf("unexpected = %v, want only the case that is not named in inputlessCases", got)
 	}
