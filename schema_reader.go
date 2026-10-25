@@ -8,66 +8,75 @@ import (
 
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/dalgo/dbschema"
+	dalrecord "github.com/dal-go/record"
 )
 
-// ListCollections returns user-defined tables in the current schema ('public')
-// in alphabetical order. The parent *dal.Key is ignored — Postgres has a flat
-// table namespace within a schema.
-func (d *Database) ListCollections(ctx context.Context, parent *dal.Key) ([]dal.CollectionRef, error) {
+// ListCollections returns the tables, views, materialized views, partitioned
+// tables and foreign tables of the configured schema ([DefaultSchema] unless
+// [WithSchema] says otherwise) in alphabetical order, under the names PostgreSQL
+// reports, each by a reference that names no schema. The parent *dalrecord.Key is
+// ignored: it does not choose a schema. [Database.ListSchemas] and
+// [Database.ListSchemaCollections] read the others.
+func (d *Database) ListCollections(ctx context.Context, parent *dalrecord.Key) ([]dal.CollectionRef, error) {
 	_ = parent // ignored
-	rows, err := d.sqlDB.QueryContext(ctx,
-		`SELECT table_name
-		 FROM information_schema.tables
-		 WHERE table_schema = 'public'
-		   AND table_type = 'BASE TABLE'
-		 ORDER BY table_name`,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("dalgo2postgres: ListCollections: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	var out []dal.CollectionRef
-	for rows.Next() {
-		var name string
-		if scanErr := rows.Scan(&name); scanErr != nil {
-			return nil, fmt.Errorf("dalgo2postgres: ListCollections scan: %w", scanErr)
-		}
-		out = append(out, dal.NewRootCollectionRef(name, ""))
-	}
-	return out, rows.Err()
+	return guarded(d.readRefs(ctx, d.schemaName(), "", false, "ListCollections"))
 }
 
-// DescribeCollection returns the full schema definition for the named table.
-// It queries information_schema for columns and primary-key membership.
+// DescribeCollection returns the full schema definition for the named table,
+// view, materialized view, partitioned table or foreign table. It queries
+// information_schema for columns and primary-key membership (a materialized
+// view, which information_schema does not list, from pg_attribute). The
+// collection is read from the schema the reference names, else from the
+// configured schema.
+//
+// A column's default is recorded as [dbschema.DefaultLiteral] whose Value is the
+// text of the expression as PostgreSQL stores it (`'new'::text`, `now()`,
+// `nextval('t_id_seq'::regclass)`); a generated column's is the text
+// `GENERATED ALWAYS AS (<expression>)`, and an identity column has
+// AutoIncrement set and no default. See the README for what each reads as.
+// A column whose PostgreSQL type has no dbschema counterpart (uuid, json,
+// jsonb, arrays, enums, interval, inet, money, ...) is reported as a String
+// field rather than failing the whole table.
 func (d *Database) DescribeCollection(ctx context.Context, ref *dal.CollectionRef) (*dbschema.CollectionDef, error) {
-	return describeCollectionImpl(ctx, d.sqlDB, ref.Name())
+	schema, name, err := d.lookupNames(ref)
+	if err != nil {
+		return nil, leaveAdapter(err)
+	}
+	return guarded(describeCollectionImpl(ctx, d.sqlDB, schema, name, collectionLabel(ref.Schema(), name)))
 }
 
-// ListIndexes returns the non-primary-key indexes on the named table via pg_indexes.
+// ListIndexes returns the non-primary-key indexes on the named table via
+// pg_indexes, from the schema the reference names, else the configured schema.
 func (d *Database) ListIndexes(ctx context.Context, ref *dal.CollectionRef) ([]dbschema.IndexDef, error) {
-	return listIndexesImpl(ctx, d.sqlDB, ref.Name())
+	schema, name, err := d.lookupNames(ref)
+	if err != nil {
+		return nil, leaveAdapter(err)
+	}
+	return guarded(listIndexesImpl(ctx, d.sqlDB, schema, name, collectionLabel(ref.Schema(), name)))
 }
 
 // ---- DescribeCollection impl ----
 
 // describeCollectionImpl is the inner reader, factored so tests can reuse it.
-func describeCollectionImpl(ctx context.Context, db *sql.DB, name string) (*dbschema.CollectionDef, error) {
-	// 1. Confirm the table exists.
-	var found string
-	probeErr := db.QueryRowContext(ctx,
-		`SELECT table_name FROM information_schema.tables
-		 WHERE table_schema = 'public' AND table_type = 'BASE TABLE' AND table_name = $1`,
-		name,
-	).Scan(&found)
+// label names the collection in error messages (see [collectionLabel]).
+func describeCollectionImpl(ctx context.Context, db *sql.DB, schema, name string, label quotedCollection) (*dbschema.CollectionDef, error) {
+	// 1. Confirm the table or view exists, and learn whether it is a materialized
+	//    view: information_schema.columns does not list those.
+	var kind string
+	probeErr := db.QueryRowContext(ctx, relationKindSQL, schema, name).Scan(&kind)
 	if probeErr == sql.ErrNoRows {
-		return nil, newCollectionNotFoundError(name)
+		return nil, newQualifiedCollectionNotFoundError(label)
 	}
 	if probeErr != nil {
-		return nil, fmt.Errorf("dalgo2postgres: DescribeCollection probe %q: %w", name, probeErr)
+		return nil, fmt.Errorf("dalgo2postgres: DescribeCollection probe %s: %w", label, probeErr)
+	}
+	columnsSQL := informationSchemaColumnsSQL
+	if kind == relkindMaterializedView {
+		columnsSQL = materializedViewColumnsSQL
 	}
 
 	// 2. Enumerate primary key columns.
-	pkCols, err := listPrimaryKeyColumns(ctx, db, name)
+	pkCols, err := listPrimaryKeyColumns(ctx, db, schema, name)
 	if err != nil {
 		return nil, err
 	}
@@ -76,45 +85,41 @@ func describeCollectionImpl(ctx context.Context, db *sql.DB, name string) (*dbsc
 		pkSet[c] = true
 	}
 
-	// 3. Enumerate columns from information_schema (including numeric precision/scale
-	//    and character max length for proper type round-trip).
-	rows, err := db.QueryContext(ctx,
-		`SELECT column_name, data_type, udt_name,
-		        character_maximum_length, numeric_precision, numeric_scale,
-		        is_nullable
-		 FROM information_schema.columns
-		 WHERE table_schema = 'public' AND table_name = $1
-		 ORDER BY ordinal_position`,
-		name,
-	)
+	// 3. Enumerate columns (including numeric precision/scale and character max
+	//    length for proper type round-trip, and the default, identity and
+	//    generation of each).
+	rows, err := db.QueryContext(ctx, columnsSQL, schema, name)
 	if err != nil {
 		return nil, fmt.Errorf("dalgo2postgres: DescribeCollection columns %q: %w", name, err)
 	}
 	defer func() { _ = rows.Close() }()
 
 	var fields []dbschema.FieldDef
+	var sourceColumns []dbschema.SourceColumnDef
+	pkPosition := make(map[string]int, len(pkCols))
+	for i, col := range pkCols {
+		pkPosition[col] = i + 1
+	}
 	for rows.Next() {
 		var (
-			colName    string
-			dataType   string
-			udtName    string
-			charMaxLen sql.NullInt64
-			numPrec    sql.NullInt64
-			numScale   sql.NullInt64
-			isNullable string
+			colName     string
+			dataType    string
+			udtName     string
+			charMaxLen  sql.NullInt64
+			numPrec     sql.NullInt64
+			numScale    sql.NullInt64
+			isNullable  string
+			colDefault  sql.NullString
+			isIdentity  string
+			isGenerated string
+			generation  sql.NullString
 		)
-		if scanErr := rows.Scan(&colName, &dataType, &udtName, &charMaxLen, &numPrec, &numScale, &isNullable); scanErr != nil {
+		if scanErr := rows.Scan(&colName, &dataType, &udtName, &charMaxLen, &numPrec, &numScale, &isNullable,
+			&colDefault, &isIdentity, &isGenerated, &generation); scanErr != nil {
 			return nil, fmt.Errorf("dalgo2postgres: DescribeCollection column scan: %w", scanErr)
 		}
 
-		t, _, length, ok := dbschemaTypeFromPostgres(dataType, udtName)
-		if !ok {
-			return nil, &dbschema.NotSupportedError{
-				Op:      "DescribeCollection",
-				Backend: "dalgo2postgres",
-				Reason:  fmt.Sprintf("column %q has unrecognized Postgres type %q (udt_name=%q)", colName, dataType, udtName),
-			}
-		}
+		t, _, length := dbschemaTypeFromPostgres(dataType, udtName)
 
 		// Derive precision from numeric_precision/scale columns — more reliable than
 		// parsing data_type strings which may omit the (p,s) suffix for NUMERIC.
@@ -141,8 +146,18 @@ func describeCollectionImpl(ctx context.Context, db *sql.DB, name string) (*dbsc
 			Precision: precision,
 			Length:    fieldLength,
 			Nullable:  nullable,
+			Default:   columnDefaultOf(colDefault, isGenerated, generation),
+			// An identity column is told by the catalog; a column that only defaults
+			// to nextval() is a plain default and is not marked.
+			AutoIncrement: isIdentity == "YES",
 		}
 		fields = append(fields, f)
+		sourceColumns = append(sourceColumns, dbschema.SourceColumnDef{
+			Name:               colName,
+			DeclaredType:       dataType,
+			NotNull:            isNullable == "NO",
+			PrimaryKeyPosition: pkPosition[colName],
+		})
 	}
 	if rowsErr := rows.Err(); rowsErr != nil {
 		return nil, fmt.Errorf("dalgo2postgres: DescribeCollection rows: %w", rowsErr)
@@ -154,33 +169,41 @@ func describeCollectionImpl(ctx context.Context, db *sql.DB, name string) (*dbsc
 		pk[i] = dal.FieldName(c)
 	}
 
-	indexes, err := listIndexesImpl(ctx, db, name)
+	indexes, err := listIndexesImpl(ctx, db, schema, name, label)
+	if err != nil {
+		return nil, err
+	}
+	foreignKeys, err := readForeignKeys(ctx, db, schema, name)
 	if err != nil {
 		return nil, err
 	}
 
 	return &dbschema.CollectionDef{
-		Name:       name,
-		Fields:     fields,
-		PrimaryKey: pk,
-		Indexes:    indexes,
+		Name:             name,
+		Fields:           fields,
+		PrimaryKey:       pk,
+		Indexes:          indexes,
+		ForeignKeys:      foreignKeys,
+		SourceDefinition: &dbschema.SourceDefinition{Dialect: "postgres", Columns: sourceColumns},
 	}, nil
 }
 
 // listPrimaryKeyColumns returns the primary key column names in key ordinal order.
-func listPrimaryKeyColumns(ctx context.Context, db *sql.DB, table string) ([]string, error) {
+func listPrimaryKeyColumns(ctx context.Context, db *sql.DB, schema, table string) ([]string, error) {
 	rows, err := db.QueryContext(ctx,
-		`SELECT kcu.column_name
-		 FROM information_schema.table_constraints tc
-		 JOIN information_schema.key_column_usage kcu
-		   ON tc.constraint_name = kcu.constraint_name
-		  AND tc.table_schema    = kcu.table_schema
-		  AND tc.table_name      = kcu.table_name
-		 WHERE tc.constraint_type = 'PRIMARY KEY'
-		   AND tc.table_schema    = 'public'
-		   AND tc.table_name      = $1
-		 ORDER BY kcu.ordinal_position`,
-		table,
+		`SELECT a.attname::text
+		 FROM pg_catalog.pg_constraint AS con
+		 JOIN pg_catalog.pg_class AS c ON c.oid = con.conrelid
+		 JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+		 JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS key_column(attnum, position) ON true
+		 JOIN pg_catalog.pg_attribute AS a
+		   ON a.attrelid = c.oid AND a.attnum = key_column.attnum
+		 WHERE con.contype = 'p'
+		   AND n.nspname = $1::text
+		   AND c.relname = $2::text
+		   AND `+relationVisibleSQL+`
+		 ORDER BY key_column.position`,
+		schema, table,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dalgo2postgres: listPrimaryKeyColumns %q: %w", table, err)
@@ -200,26 +223,37 @@ func listPrimaryKeyColumns(ctx context.Context, db *sql.DB, table string) ([]str
 // ---- ListIndexes impl ----
 
 // listIndexesImpl returns non-primary-key indexes on the table via pg_indexes.
-func listIndexesImpl(ctx context.Context, db *sql.DB, name string) ([]dbschema.IndexDef, error) {
+// label names the collection in error messages (see [collectionLabel]).
+func listIndexesImpl(ctx context.Context, db *sql.DB, schema, name string, label quotedCollection) ([]dbschema.IndexDef, error) {
 	// pg_indexes holds precomputed indexdef DDL. We exclude indexes that are
 	// the backing store for PRIMARY KEY constraints by joining to pg_constraint.
 	rows, err := db.QueryContext(ctx,
 		`SELECT i.indexname, i.indexdef
-		 FROM pg_indexes i
-		 WHERE i.schemaname = 'public'
-		   AND i.tablename  = $1
+		 FROM pg_catalog.pg_indexes i
+		 WHERE i.schemaname = $1::text
+		   AND i.tablename  = $2::text
+		   AND EXISTS (
+		       SELECT 1 FROM pg_catalog.pg_class AS c
+		       JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+		       WHERE n.nspname = i.schemaname
+		         AND c.relname = i.tablename
+		         AND `+relationVisibleSQL+`
+		   )
 		   AND NOT EXISTS (
-		       SELECT 1 FROM pg_constraint c
-		       JOIN pg_class t ON t.oid = c.conrelid
+		       SELECT 1 FROM pg_catalog.pg_constraint c
+		       JOIN pg_catalog.pg_class t ON t.oid = c.conrelid
+		       JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
 		       WHERE c.contype = 'p'
+		         AND c.connamespace = t.relnamespace
 		         AND c.conname = i.indexname
 		         AND t.relname = i.tablename
+		         AND n.nspname = i.schemaname
 		   )
 		 ORDER BY i.indexname`,
-		name,
+		schema, name,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("dalgo2postgres: listIndexesImpl %q: %w", name, err)
+		return nil, fmt.Errorf("dalgo2postgres: listIndexesImpl %s: %w", label, err)
 	}
 	defer func() { _ = rows.Close() }()
 

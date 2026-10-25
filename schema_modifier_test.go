@@ -10,6 +10,7 @@ import (
 )
 
 func TestCreateCollection_HappyPath(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	db := openTestDB(t)
 	ctx := context.Background()
 	tbl := uniqueTable(t, "users")
@@ -54,6 +55,7 @@ func TestCreateCollection_HappyPath(t *testing.T) {
 }
 
 func TestCreateCollection_IfNotExists(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	db := openTestDB(t)
 	ctx := context.Background()
 	tbl := uniqueTable(t, "ine")
@@ -73,6 +75,7 @@ func TestCreateCollection_IfNotExists(t *testing.T) {
 }
 
 func TestDropCollection(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	db := openTestDB(t)
 	ctx := context.Background()
 	tbl := uniqueTable(t, "drop")
@@ -102,6 +105,7 @@ func TestDropCollection(t *testing.T) {
 }
 
 func TestAlterCollection_AddDropRenameField(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	db := openTestDB(t)
 	ctx := context.Background()
 	tbl := uniqueTable(t, "alter")
@@ -146,6 +150,7 @@ func TestAlterCollection_AddDropRenameField(t *testing.T) {
 }
 
 func TestAlterCollection_AddDropIndex(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	db := openTestDB(t)
 	ctx := context.Background()
 	tbl := uniqueTable(t, "aidx")

@@ -1,0 +1,324 @@
+name: Go CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - '**'
+
+# A run is superseded only on a pull request. On main the group is unique per
+# ref and commit, so no run is ever cancelled: the main run cuts the version
+# tag (strongo/cicd go_bump) and must complete for every merge. The literal
+# `true` below only ever applies to pull_request groups, which are keyed by
+# pull request number.
+#
+# Do not re-run an older main run after a later merge has been tagged: the
+# shared go_bump job tags the highest existing tag plus one onto the commit it
+# runs for, not the newest commit, so the older commit would be tagged last and
+# `go get @latest` would resolve to it. The fix belongs in strongo/cicd (skip
+# the tag when the previous tag is not an ancestor of HEAD) and is not made here.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || format('{0}-{1}', github.ref, github.sha) }}
+  cancel-in-progress: true
+
+jobs:
+  strongo_workflow:
+    # Merges to main are tagged by CI (strongo/cicd go_bump), so a tag must
+    # never be cut for a commit whose PostgreSQL conformance run failed: this
+    # job, and with it the reusable workflow's Bump version job, starts only
+    # when `integration` succeeded. A job whose `needs` did not succeed is
+    # skipped unless it carries an always()/failure() condition, which this one
+    # deliberately does not.
+    needs: [integration]
+    permissions:
+      contents: write
+    uses: strongo/cicd/.github/workflows/workflow.yml@main
+    secrets:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    with:
+      cgo_enabled: false
+      code_coverage: true
+      # Backstop floor. This job runs without a database, so the DB-backed
+      # tests skip here and only the unit and sqlmock tests count; the real
+      # floor is in the integration job below. Measured as CI runs it
+      # (`go test -count=1 -cover ./...`): 86.7% on main at the merge of pull
+      # request 16, 87.3% on the head of pull request 18, and 98.7% with the
+      # names of the ddl entries under one rule, whose unit tests run the
+      # statements of every entry on a mocked handle. The floor is 97, one
+      # point below the last value, which leaves about a point in which
+      # coverage can fall unnoticed while a pull request still has room to add
+      # code only a live server tests. Must rise with the PostgreSQL wave; never
+      # lower it.
+      min_test_coverage_percent: 100
+
+  # Runs the shared dalgotest conformance suite against a real PostgreSQL.
+  #
+  # This lives here rather than in strongo/cicd on purpose: service containers
+  # cannot be passed into a reusable workflow by its caller, and `services:`
+  # cannot be made conditional — putting Postgres there would impose a database
+  # container on every fleet repo that uses the shared workflow.
+  #
+  # No test code needed changing: the DB-backed tests already skip unless
+  # DALGO2POSTGRES_TEST_DSN is set, and TestConformance creates and drops its
+  # own table, so a running server and a DSN are the whole requirement.
+  #
+  # It runs on two server versions, a matrix on the service image: 17, the version the
+  # fleet runs, and 18, the newest. Each leg is a job of its own and each must pass;
+  # DALGO2POSTGRES_EXPECT_SERVER_MAJOR makes the version test fail if a leg met another
+  # server than the one it names.
+  integration:
+    name: Conformance (PostgreSQL ${{ matrix.postgres }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['17', '18']
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: dalgo_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go test (with a live PostgreSQL)
+        # `go test` prints "ok" for a package whose tests all SKIPPED, so a
+        # green job here would not by itself prove the conformance suite ran —
+        # which is exactly the vacuously-green outcome this job exists to
+        # prevent. Run verbose and assert on the result line. -count=1 keeps the
+        # test cache out: setup-go restores the build cache, and a cached package
+        # replays the PASS lines of an earlier run, which the assertions below
+        # would read as this leg's own.
+        run: |
+          set -o pipefail
+          # Sub-tests of the shared end2end suite (TestEndToEnd) that cannot run in
+          # fold-lower mode, excluded by name and for no other reason: a key read
+          # returns the names as the table stores them (lower case) and the suite's
+          # access policy spells them Country and IsCapital, which the access layer
+          # compares exactly, so it denies a row the policy allows. The reason is
+          # asserted by TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames
+          # (Exists) and TestEndToEndIntegration_UpdateUnderRowConditionsFailsClosedOnStoredNames
+          # (Update), and TestEndToEnd reports each of them as a skip that names it (the
+          # allow-list of skips below). Keep the two lists the same.
+          not_run='^TestEndToEnd$/^query$/^access_conditions$/^(point_reads_follow_the_condition|writes_follow_the_condition)$'
+          go test -race -v -count=1 -skip "$not_run" -coverprofile=profile.cov ./... 2>&1 | tee /tmp/gotest.log
+          if grep -qE '^\s*--- SKIP: TestConformance' /tmp/gotest.log; then
+            echo "::error::TestConformance SKIPPED - the DSN did not reach the tests"
+            exit 1
+          fi
+          if ! grep -qE '^\s*--- PASS: TestConformance' /tmp/gotest.log; then
+            echo "::error::TestConformance did not run"
+            exit 1
+          fi
+          # The schema-reader integration tests skip on their own when the DSN
+          # does not reach them, and a skip leaves the job green. Match the
+          # prefix, not the names, so a new TestSchemaReaderIntegration_ test
+          # is covered without touching this guard. The integration test of
+          # NonDeterministicTextColumns has its own name, so it is listed: it
+          # skips the same way. Only a SKIP is asserted for it, not a PASS, so
+          # this job stays green on a branch that does not hold the helper yet.
+          if grep -qE '^\s*--- SKIP: (TestSchemaReaderIntegration_|TestNonDeterministicTextColumnsIntegration)' /tmp/gotest.log; then
+            echo "::error::a schema-reader integration test SKIPPED - the DSN did not reach the tests"
+            exit 1
+          fi
+          if ! grep -qE '^\s*--- PASS: TestSchemaReaderIntegration_' /tmp/gotest.log; then
+            echo "::error::no TestSchemaReaderIntegration_ test ran"
+            exit 1
+          fi
+          # The structured-query tests are the first place the typed compiler's
+          # statements and dalgo2sql's catalog queries meet a server; they skip on
+          # their own when the DSN does not reach them. The SKIP pattern matches a
+          # subtest's indented line too. A PASS line is then required for each test
+          # by name, so a test that is renamed, deleted or never reached fails the
+          # job instead of leaving it green on the others. Add a new test of the
+          # family to this list.
+          if grep -qE '^\s*--- SKIP: TestStructuredQueryIntegration_' /tmp/gotest.log; then
+            echo "::error::a structured-query integration test SKIPPED - the DSN did not reach the tests"
+            exit 1
+          fi
+          for name in \
+            CatalogOverEverySourceKind \
+            FilterWithEachConstantType \
+            OrderByLimitOffset \
+            GroupByHavingAndAggregates \
+            Join \
+            ArithmeticWithTheCast \
+            CountDistinct \
+            PlansJoinsOnTheServerOrInDALgo \
+            SubqueryRunsInDALgoOverPlainReads \
+            ConstantOfAnotherTypeThanItsColumnIsAServerError \
+            SelectAllWithAnExclusionFoldLower \
+            UnknownTableIsNotFoundWithASuggestion \
+            ExactModeAndQualifiedSchema \
+            ReadsRunOnOneLeasedConnection \
+            RecordsetReader \
+            RecordsCarryTheirKey \
+            RecordKeysFromTheCatalog \
+            EveryReadKeepsItsKeysUnique \
+            KeyReadFindsItsRecordsetOnlyUnderTheCollectionAsSpelled \
+            ContextEndsBetweenAndDuringTheStatements; do
+            if ! grep -qE "^\s*--- PASS: TestStructuredQueryIntegration_${name} \(" /tmp/gotest.log; then
+              echo "::error::TestStructuredQueryIntegration_${name} did not run to a pass"
+              exit 1
+            fi
+          done
+          # The shared end2end suite, the type matrix, the server pins, the schema reader's
+          # schemas, views, defaults and names, and the names of the DDL entries. No skip is
+          # allowed in this job but the ones listed here, which are the sub-tests of
+          # the shared suite that cannot run in fold-lower mode (see not_run above).
+          # Two checks follow: a skip that is not in the list fails the job (so a skip
+          # from any other cause does), and a listed skip that did not appear fails it
+          # too. The second check sees only that this repository's TestEndToEnd ran,
+          # because it writes the two skips itself, from its own list; it cannot see
+          # the shared suite. A rename in the shared suite is noticed for another
+          # reason: the old name in the -skip pattern then matches nothing and the
+          # renamed sub-test runs, and fails in fold-lower mode. A removal is not
+          # noticed.
+          # Last, a PASS line is required for each test by name, so a test that is
+          # renamed, deleted or never reached fails the job. Add a new test of these
+          # families to the list.
+          allowed_skips=(
+            TestEndToEnd/not_run_in_fold_lower_mode/point_reads_follow_the_condition
+            TestEndToEnd/not_run_in_fold_lower_mode/writes_follow_the_condition
+          )
+          skipped=$(grep -E '^\s*--- SKIP: ' /tmp/gotest.log | sed -E 's/^[[:space:]]*--- SKIP: ([^ ]+) .*/\1/' || true)
+          while IFS= read -r name; do
+            [ -z "$name" ] && continue
+            if ! printf '%s\n' "${allowed_skips[@]}" | grep -qxF -- "$name"; then
+              echo "::error::${name} SKIPPED and is not in the allow-list of skips of this job"
+              exit 1
+            fi
+          done <<< "$skipped"
+          for name in "${allowed_skips[@]}"; do
+            if ! grep -qE "^\s*--- SKIP: ${name} \(" /tmp/gotest.log; then
+              echo "::error::the allowed skip ${name} did not run"
+              exit 1
+            fi
+          done
+          for name in \
+            TestEndToEnd \
+            TestEndToEnd/single \
+            TestEndToEnd/multi \
+            TestEndToEnd/query \
+            TestEndToEnd/query/access_conditions \
+            TestEndToEnd/query/access_field_lists \
+            TestEndToEnd/query/access_sources \
+            TestEndToEndIntegration_RowConditionsFailClosedOnStoredNames \
+            TestEndToEndIntegration_UpdateUnderRowConditionsFailsClosedOnStoredNames \
+            TestServerVersionIntegration_IsTheOneTheJobNames \
+            TestTypeMatrixIntegration_FilterByColumnTypeAndConstantType \
+            TestTypeMatrixIntegration_ProjectionAndOrderBy \
+            TestTypeMatrixIntegration_EveryIntegerAndFloatType \
+            TestTypeMatrixIntegration_ValuesAtTheEdges \
+            TestTypeMatrixIntegration_ArithmeticOnDoublePrecision \
+            TestTypeMatrixIntegration_NumericWithAFractionIntoAnIntegerField \
+            TestTypeMatrixIntegration_ByteStringAgainstBytea \
+            TestTypeMatrixIntegration_TimestampWithoutZoneFollowsTheSessionTimeZone \
+            TestServerPinsIntegration_ColumnNamedLikeItsAliasIsTheColumn \
+            TestServerPinsIntegration_QualifiedColumnWinsOverAFunctionOfTheRow \
+            TestServerPinsIntegration_AliasesThatFoldTogetherAreRefusedBeforeTheServer \
+            TestServerPinsIntegration_SelectAllOverAJoinListsTheBasesColumnsFirst \
+            TestServerPinsIntegration_TextJoinKeysWithDifferentCollations \
+            TestServerPinsIntegration_RuntimeErrorAtRowN \
+            TestServerPinsIntegration_KeysOnlyReadFollowsTheDatabasesCollation \
+            TestServerPinsIntegration_NotNullColumnKeepsItsOrderByWithoutANullsClause \
+            TestServerPinsIntegration_NotValidNotNullColumnWithNullsUnderOrderByAndLimit \
+            TestVendoredFixturesAreTheDalgoModulesAtTheRequiredVersion \
+            TestFixturesJoinsAreVendoredWithTheirDigests \
+            TestFixturesJoinNegativeCasesAreRefusedWithTheFixturesDiagnostic \
+            TestFixturesEveryJoinFixtureIsRunByATest \
+            TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer \
+            TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer/chinook-nested \
+            TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer/chinook-hinted \
+            TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer/chinook-wildcard \
+            TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer/chinook-nested/recordset_reader \
+            TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer/chinook-hinted/recordset_reader \
+            TestFixturesIntegration_JoinsRunAsOneStatementOnTheServer/chinook-wildcard/recordset_reader \
+            TestFixturesIntegration_SubqueriesRunInDALgoOverLeafReads \
+            TestFixturesIntegration_SubqueriesRunInDALgoOverLeafReads/a_correlated_subquery_reads_the_whole_inner_table_once_for_each_row_of_the_outer_table \
+            TestPushdownIntegration_GroupByOver150000GroupsRunsOnTheServer \
+            TestPushdownIntegration_GroupByOver150000GroupsRunsOnTheServer/through_the_records_reader \
+            TestPushdownIntegration_GroupByOver150000GroupsRunsOnTheServer/through_the_recordset_reader \
+            TestPushdownIntegration_JoinOver50000RowsRunsOnTheServer \
+            TestPushdownIntegration_JoinOver50000RowsRunsOnTheServer/through_the_records_reader \
+            TestPushdownIntegration_JoinOver50000RowsRunsOnTheServer/through_the_recordset_reader \
+            TestPushdownIntegration_WithoutTheNativeRouteTheSameQueriesAreRefused \
+            TestAccessIntegration_RowConditionWithAQuoteReturnsExactlyThePermittedRows/exact_mode \
+            TestAccessIntegration_RowConditionWithAQuoteReturnsExactlyThePermittedRows/fold-lower_mode \
+            TestAccessIntegration_HiddenFieldUnderAnAliasAndAnEmptyProjectionAreDenied/exact_mode \
+            TestAccessIntegration_HiddenFieldUnderAnAliasAndAnEmptyProjectionAreDenied/fold-lower_mode \
+            TestAccessIntegration_HiddenFieldInAJoinOrAScanOrderIsDeniedWithNoStatement/exact_mode \
+            TestAccessIntegration_HiddenFieldInAJoinOrAScanOrderIsDeniedWithNoStatement/fold-lower_mode \
+            TestAccessIntegration_AFieldListOnAJoinedSourceIsRefusedWithNoStatement/exact_mode \
+            TestAccessIntegration_AFieldListOnAJoinedSourceIsRefusedWithNoStatement/fold-lower_mode \
+            TestAccessIntegration_SessionWithNoPolicyIsDenied/exact_mode \
+            TestAccessIntegration_SessionWithNoPolicyIsDenied/fold-lower_mode \
+            TestAccessIntegration_UnconditionalAllowBehindAConditionDecidesTheRow/exact_mode \
+            TestAccessIntegration_UnconditionalAllowBehindAConditionDecidesTheRow/fold-lower_mode \
+            TestProbesIntegration_NothingACallerWritesBecomesSQL/exact_mode \
+            TestProbesIntegration_NothingACallerWritesBecomesSQL/fold-lower_mode \
+            TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath/exact_mode \
+            TestProbesIntegration_NothingACallerWritesBecomesSQLInAKeyPath/fold-lower_mode \
+            TestSchemaReaderIntegration_ListsEverySchemaButTheSystemOnes \
+            TestSchemaReaderIntegration_ListsViewsAndMaterializedViewsApartFromTables \
+            TestSchemaReaderIntegration_DescribesEveryListedCollectionOfEverySchema \
+            TestSchemaReaderIntegration_ReadsDefaultsIdentityAndGeneratedColumns \
+            TestSchemaReaderIntegration_NameOf64BytesAgainstAnObjectOf63 \
+            TestSchemaReaderIntegration_NamesAreComparedWholeInAnyDatabaseEncoding \
+            TestDDLNamesIntegration_RefusedNamesLeaveEveryObjectAsItWas; do
+            if ! grep -qE "^\s*--- PASS: ${name} \(" /tmp/gotest.log; then
+              echo "::error::${name} did not run to a pass"
+              exit 1
+            fi
+          done
+          # The server's answers to a connection that opens lazily (a wrong password, a
+          # database that is not there, a role that may not log in), each met at the first
+          # call of a handle, a session the server ends in the middle of a transaction, and
+          # a statement error that reaches the caller unchanged. They skip on their own when
+          # the DSN does not reach them, which the allow-list above already refuses; a PASS
+          # line is required for each by name, so a test that is renamed, deleted or never
+          # reached fails the job. Add a new test of the family to this list.
+          for name in \
+            WrongPasswordAtTheFirstCall \
+            MissingDatabaseAtTheFirstCall \
+            RoleThatMayNotLogInAtTheFirstCall \
+            StatementErrorsKeepTheServersMessageAndDetail \
+            ASessionTheServerEndsInATransaction; do
+            if ! grep -qE "^\s*--- PASS: TestConnectionFailureIntegration_${name} \(" /tmp/gotest.log; then
+              echo "::error::TestConnectionFailureIntegration_${name} did not run to a pass"
+              exit 1
+            fi
+          done
+          # The version test compares nothing when DALGO2POSTGRES_EXPECT_SERVER_MAJOR does
+          # not reach it, so the line it prints is required here with the major version
+          # this leg names: the leg met the server it says it did.
+          if ! grep -qF "server_version_num major ${{ matrix.postgres }})" /tmp/gotest.log; then
+            echo "::error::the server of this leg is not PostgreSQL ${{ matrix.postgres }}: no \"server_version_num major ${{ matrix.postgres }})\" line"
+            exit 1
+          fi
+        env:
+          DALGO2POSTGRES_TEST_DSN: postgres://postgres:postgres@localhost:5432/dalgo_test?sslmode=disable
+          DALGO2POSTGRES_EXPECT_SERVER_MAJOR: ${{ matrix.postgres }}
+      - name: Integration coverage floor
+        # The floor that matters: this is the only job where the database
+        # tests run. Measured as CI runs it (CI log "Integration coverage"):
+        # 94.1% on main at the merge of pull request 16 and 94.3% on the
+        # head of pull request 18. The floor is 93, one point below the second
+        # value, rounded down. Must rise with the PostgreSQL wave; never lower it.
+        run: |
+          total=$(go tool cover -func=profile.cov | awk '$1 == "total:" {print $3}' | sed 's/%//')
+          echo "Integration coverage: $total%"
+          awk -v t="$total" -v m="93" 'BEGIN { if (t < m) { print "Integration coverage " t "% is below required " m "%"; exit 1 } }'

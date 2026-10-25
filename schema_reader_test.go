@@ -10,6 +10,7 @@ import (
 )
 
 func TestListCollections_Basic(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	db := openTestDB(t)
 	ctx := context.Background()
 
@@ -43,6 +44,7 @@ func TestListCollections_Basic(t *testing.T) {
 }
 
 func TestDescribeCollection_NotFound(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	db := openTestDB(t)
 	ctx := context.Background()
 	ref := dal.NewRootCollectionRef("no_such_table_xyz_123", "")
@@ -59,6 +61,7 @@ func TestDescribeCollection_NotFound(t *testing.T) {
 }
 
 func TestDescribeCollection_BasicRoundTrip(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	db := openTestDB(t)
 	ctx := context.Background()
 	tbl := uniqueTable(t, "desc")
@@ -127,9 +130,23 @@ func TestDescribeCollection_BasicRoundTrip(t *testing.T) {
 	if len(got.PrimaryKey) != 1 || string(got.PrimaryKey[0]) != "id" {
 		t.Errorf("PrimaryKey = %v, want [id]", got.PrimaryKey)
 	}
+	if got.SourceDefinition == nil || got.SourceDefinition.Dialect != "postgres" {
+		t.Fatalf("SourceDefinition = %+v, want PostgreSQL native metadata", got.SourceDefinition)
+	}
+	columns := make(map[string]dbschema.SourceColumnDef, len(got.SourceDefinition.Columns))
+	for _, column := range got.SourceDefinition.Columns {
+		columns[column.Name] = column
+	}
+	if column := columns["created_at"]; column.DeclaredType != "timestamp with time zone" || column.NotNull {
+		t.Errorf("created_at source metadata = %+v, want nullable timestamp with time zone", column)
+	}
+	if column := columns["id"]; column.PrimaryKeyPosition != 1 || !column.NotNull {
+		t.Errorf("id source metadata = %+v, want primary-key position 1 and NOT NULL", column)
+	}
 }
 
 func TestListIndexes_ExcludesPK(t *testing.T) {
+	// Not parallel: connects to the shared DALGO2POSTGRES_TEST_DSN database.
 	db := openTestDB(t)
 	ctx := context.Background()
 	tbl := uniqueTable(t, "lidx")
