@@ -42,7 +42,7 @@ func (d *Database) DescribeCollection(ctx context.Context, ref *dal.CollectionRe
 	if err != nil {
 		return nil, leaveAdapter(err)
 	}
-	return guarded(describeCollectionImpl(ctx, d.sqlDB, schema, name, collectionLabel(ref.Schema(), name)))
+	return guarded(describeCollectionImpl(ctx, d.catalogQueries(), schema, name, collectionLabel(ref.Schema(), name)))
 }
 
 // ListIndexes returns the non-primary-key indexes on the named table via
@@ -52,14 +52,14 @@ func (d *Database) ListIndexes(ctx context.Context, ref *dal.CollectionRef) ([]d
 	if err != nil {
 		return nil, leaveAdapter(err)
 	}
-	return guarded(listIndexesImpl(ctx, d.sqlDB, schema, name, collectionLabel(ref.Schema(), name)))
+	return guarded(listIndexesImpl(ctx, d.catalogQueries(), schema, name, collectionLabel(ref.Schema(), name)))
 }
 
 // ---- DescribeCollection impl ----
 
 // describeCollectionImpl is the inner reader, factored so tests can reuse it.
 // label names the collection in error messages (see [collectionLabel]).
-func describeCollectionImpl(ctx context.Context, db *sql.DB, schema, name string, label quotedCollection) (*dbschema.CollectionDef, error) {
+func describeCollectionImpl(ctx context.Context, db catalogQueryer, schema, name string, label quotedCollection) (*dbschema.CollectionDef, error) {
 	// 1. Confirm the table or view exists, and learn whether it is a materialized
 	//    view: information_schema.columns does not list those.
 	var kind string
@@ -189,7 +189,7 @@ func describeCollectionImpl(ctx context.Context, db *sql.DB, schema, name string
 }
 
 // listPrimaryKeyColumns returns the primary key column names in key ordinal order.
-func listPrimaryKeyColumns(ctx context.Context, db *sql.DB, schema, table string) ([]string, error) {
+func listPrimaryKeyColumns(ctx context.Context, db catalogQueryer, schema, table string) ([]string, error) {
 	rows, err := db.QueryContext(ctx,
 		`SELECT a.attname::text
 		 FROM pg_catalog.pg_constraint AS con
@@ -224,7 +224,7 @@ func listPrimaryKeyColumns(ctx context.Context, db *sql.DB, schema, table string
 
 // listIndexesImpl returns non-primary-key indexes on the table via pg_indexes.
 // label names the collection in error messages (see [collectionLabel]).
-func listIndexesImpl(ctx context.Context, db *sql.DB, schema, name string, label quotedCollection) ([]dbschema.IndexDef, error) {
+func listIndexesImpl(ctx context.Context, db catalogQueryer, schema, name string, label quotedCollection) ([]dbschema.IndexDef, error) {
 	// pg_indexes holds precomputed indexdef DDL. We exclude indexes that are
 	// the backing store for PRIMARY KEY constraints by joining to pg_constraint.
 	rows, err := db.QueryContext(ctx,

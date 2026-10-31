@@ -124,7 +124,7 @@ type relation struct {
 
 // listRelations reads the collections of one schema in name order. op names the
 // public method in error messages.
-func listRelations(ctx context.Context, db *sql.DB, schema, op string) ([]relation, error) {
+func listRelations(ctx context.Context, db catalogQueryer, schema, op string) ([]relation, error) {
 	rows, err := db.QueryContext(ctx, listRelationsSQL, schema)
 	if err != nil {
 		return nil, fmt.Errorf("dalgo2postgres: %s: %w", op, err)
@@ -175,7 +175,7 @@ func (d *Database) ListSchemas(ctx context.Context) ([]string, error) {
 
 // listSchemas is the reader behind [Database.ListSchemas].
 func (d *Database) listSchemas(ctx context.Context) ([]string, error) {
-	rows, err := d.sqlDB.QueryContext(ctx, listSchemasSQL)
+	rows, err := d.catalogQueries().QueryContext(ctx, listSchemasSQL)
 	if err != nil {
 		return nil, fmt.Errorf("dalgo2postgres: ListSchemas: %w", err)
 	}
@@ -226,7 +226,7 @@ func (d *Database) listSourceViews(ctx context.Context) ([]dbschema.SourceViewDe
 	if err := checkIdentifierLength(positionSchema, schema); err != nil {
 		return nil, err
 	}
-	rows, err := d.sqlDB.QueryContext(ctx, listSourceViewsSQL, schema)
+	rows, err := d.catalogQueries().QueryContext(ctx, listSourceViewsSQL, schema)
 	if err != nil {
 		return nil, fmt.Errorf("dalgo2postgres: ListSourceViews: %w", err)
 	}
@@ -262,7 +262,7 @@ func (d *Database) readRefs(ctx context.Context, readSchema, refSchema string, v
 	if err := checkIdentifierLength(positionSchema, readSchema); err != nil {
 		return nil, err
 	}
-	relations, err := listRelations(ctx, d.sqlDB, readSchema, op)
+	relations, err := listRelations(ctx, d.catalogQueries(), readSchema, op)
 	if err != nil {
 		return nil, err
 	}
