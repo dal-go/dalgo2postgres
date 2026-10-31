@@ -183,7 +183,7 @@ func TestReadonlySchemaTransactionWorkerAndRollbackErrors(t *testing.T) {
 					return
 				}
 				if _, native := rollback.(*pgconn.PgError); native {
-					assertAClassifiedConnectionError(t, err)
+					require.NotNil(t, assertAClassifiedConnectionError(t, err))
 					assertHoldsNoConfiguration(t, "schema rollback", err)
 					return
 				}
@@ -217,7 +217,7 @@ func TestReadonlySchemaTransactionWorkerAndRollbackErrors(t *testing.T) {
 				_, err := reader.ListCollections(ctx, nil)
 				return err
 			})
-			assertAClassifiedConnectionError(t, err)
+			require.NotNil(t, assertAClassifiedConnectionError(t, err))
 			assertHoldsNoConfiguration(t, "schema native error", err)
 		})
 	}
@@ -269,7 +269,7 @@ type schemaRecordingTrace struct {
 }
 
 func (c schemaRecordingConnector) Connect(context.Context) (driver.Conn, error) {
-	return schemaRecordingConn{c.trace}, nil
+	return schemaRecordingConn(c), nil
 }
 func (schemaRecordingConnector) Driver() driver.Driver { return nil }
 
@@ -284,7 +284,7 @@ func (c schemaRecordingConn) BeginTx(_ context.Context, options driver.TxOptions
 	c.trace.mu.Lock()
 	c.trace.begins = append(c.trace.begins, options)
 	c.trace.mu.Unlock()
-	return schemaRecordingTx{c.trace}, nil
+	return schemaRecordingTx(c), nil
 }
 func (c schemaRecordingConn) QueryContext(ctx context.Context, text string, _ []driver.NamedValue) (driver.Rows, error) {
 	if text == "SHOW transaction_read_only" {
