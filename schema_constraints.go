@@ -26,7 +26,7 @@ func (d *Database) listConstraints(ctx context.Context, ref *dal.CollectionRef) 
 	if err != nil {
 		return nil, err
 	}
-	rows, err := d.sqlDB.QueryContext(ctx,
+	rows, err := d.catalogQueries().QueryContext(ctx,
 		`SELECT con.conname::text,
 		        CASE con.contype WHEN 'f' THEN 'FOREIGN KEY'
 		                         WHEN 'p' THEN 'PRIMARY KEY'
@@ -85,7 +85,7 @@ func (d *Database) listReferrers(ctx context.Context, ref *dal.CollectionRef) ([
 	if err != nil {
 		return nil, err
 	}
-	rows, err := d.sqlDB.QueryContext(ctx,
+	rows, err := d.catalogQueries().QueryContext(ctx,
 		`SELECT constraint_row.oid, source.relname AS referrer_table, source_column.attname AS referrer_col
 			 FROM pg_catalog.pg_constraint AS constraint_row
 			 JOIN pg_catalog.pg_class AS source ON source.oid = constraint_row.conrelid

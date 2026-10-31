@@ -2,14 +2,13 @@ package dalgo2postgres
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/dalgo/dbschema"
 )
 
-func readForeignKeys(ctx context.Context, db *sql.DB, schema, table string) ([]dbschema.ForeignKeyDef, error) {
+func readForeignKeys(ctx context.Context, db catalogQueryer, schema, table string) ([]dbschema.ForeignKeyDef, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT c.oid, c.conname, source_column.attname,
 		       target_ns.nspname, target.relname, target_column.attname,

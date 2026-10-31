@@ -46,8 +46,9 @@ import (
 type Database struct {
 	dal.ConcurrencyAvailable // SupportsConcurrentConnections() = true
 
-	dal.DB         // delegate for the dal.DB surface: DALgo's layer over the guarded backend, assigned by the constructors; the transaction methods call it as it is, so its errors pass the same function as the Database's
-	sqlDB  *sql.DB // direct handle for DDL + introspection queries
+	dal.DB                 // delegate for the dal.DB surface: DALgo's layer over the guarded backend, assigned by the constructors; the transaction methods call it as it is, so its errors pass the same function as the Database's
+	sqlDB   *sql.DB        // direct handle for DDL + introspection queries
+	catalog catalogQueryer // optional private transaction-bound introspection handle
 
 	schema            string         // schema the reader inspects; "" means DefaultSchema
 	identifierMode    IdentifierMode // how names are matched by the reader and written by queries

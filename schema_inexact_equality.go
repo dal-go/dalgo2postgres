@@ -67,14 +67,14 @@ func (d *Database) NonDeterministicTextColumns(ctx context.Context, ref *dal.Col
 	if err != nil {
 		return nil, leaveAdapter(err)
 	}
-	return guarded(nonDeterministicTextColumns(ctx, d.sqlDB, schema, name, collectionLabel(ref.Schema(), name)))
+	return guarded(nonDeterministicTextColumns(ctx, d.catalogQueries(), schema, name, collectionLabel(ref.Schema(), name)))
 }
 
 // nonDeterministicTextColumns is the reader behind
 // [Database.NonDeterministicTextColumns], taking the already resolved schema and
 // table name so tests reach it with a mocked handle. label names the table in
 // error messages (see [collectionLabel]).
-func nonDeterministicTextColumns(ctx context.Context, db *sql.DB, schema, table string, label quotedCollection) ([]string, error) {
+func nonDeterministicTextColumns(ctx context.Context, db catalogQueryer, schema, table string, label quotedCollection) ([]string, error) {
 	rows, err := db.QueryContext(ctx, nonDeterministicTextColumnsSQL, schema, table)
 	if err != nil {
 		return nil, fmt.Errorf("dalgo2postgres: non-deterministic text columns of %s: %w", label, err)
