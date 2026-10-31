@@ -260,12 +260,13 @@ func TestReadonlySchemaTransactionInvalidatesOnPanicAndGoexit(t *testing.T) {
 
 type schemaRecordingConnector struct{ trace *schemaRecordingTrace }
 type schemaRecordingTrace struct {
-	mu        sync.Mutex
-	begins    []driver.TxOptions
-	rollbacks int
-	entered   chan context.Context
-	hold      bool
-	modeClose func()
+	mu         sync.Mutex
+	begins     []driver.TxOptions
+	rollbacks  int
+	rolledBack chan struct{}
+	entered    chan context.Context
+	hold       bool
+	modeClose  func()
 }
 
 func (c schemaRecordingConnector) Connect(context.Context) (driver.Conn, error) {
@@ -307,6 +308,9 @@ func (tx schemaRecordingTx) Rollback() error {
 	tx.trace.mu.Lock()
 	tx.trace.rollbacks++
 	tx.trace.mu.Unlock()
+	if tx.trace.rolledBack != nil {
+		close(tx.trace.rolledBack)
+	}
 	return nil
 }
 
@@ -393,6 +397,43 @@ func TestReadonlySchemaTransactionOriginalCancellationCannotDetach(t *testing.T)
 	})
 	require.ErrorIs(t, err, context.Canceled)
 }
+
+func TestReadonlySchemaTransactionAutomaticRollbackKeepsCancellationAndWorkerError(t *testing.T) {
+	for _, workerErr := range []error{nil, errors.New("caller-owned cancellation failure")} {
+		t.Run(fmt.Sprintf("worker_error=%t", workerErr != nil), func(t *testing.T) {
+			trace := &schemaRecordingTrace{rolledBack: make(chan struct{})}
+			d := recordingSchemaDB(t, trace)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var retained *readonlySchemaView
+			err := d.RunReadonlySchemaTransaction(ctx, func(_ context.Context, reader dbschema.SchemaReader) error {
+				retained = reader.(*readonlySchemaView)
+				cancel()
+				// database/sql marks the transaction done before invoking the
+				// driver's rollback. Observe that call before adapter cleanup.
+				select {
+				case <-trace.rolledBack:
+				case <-time.After(time.Second):
+					t.Fatal("database/sql did not automatically roll back the cancelled transaction")
+				}
+				return workerErr
+			})
+			if workerErr == nil {
+				require.Same(t, context.Canceled, err)
+			} else {
+				require.Same(t, workerErr, err)
+			}
+			require.False(t, errors.Is(err, sql.ErrTxDone))
+			require.True(t, retained.closed.Load())
+			_, err = retained.ListSchemas(context.Background())
+			require.ErrorIs(t, err, errSchemaClosed)
+			trace.mu.Lock()
+			defer trace.mu.Unlock()
+			require.Equal(t, 1, trace.rollbacks)
+		})
+	}
+}
+
 func TestReadonlySchemaViewRefusesMissingCancelledAndClosedContexts(t *testing.T) {
 	life, cancel := context.WithCancel(context.Background())
 	defer cancel()
