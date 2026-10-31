@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sync"
 	"sync/atomic"
 
 	"github.com/dal-go/dalgo/dal"
@@ -114,6 +115,8 @@ type readonlySchemaView struct {
 	lifetime context.Context
 	cancel   context.CancelFunc
 	closed   atomic.Bool
+	readOnce sync.Once
+	readGate chan struct{}
 }
 
 func (v *readonlySchemaView) context(ctx context.Context) (context.Context, context.CancelFunc, error) {
@@ -142,20 +145,35 @@ func schemaValue[T any](ctx context.Context, v *readonlySchemaView, read func(co
 		return value, err
 	}
 	defer cancel()
+	// A native transaction owns one connection. Serializing only Query/Next
+	// calls is insufficient: every metadata method must finish its rows before
+	// another method can open more. Waiting callers retain their own deadline.
+	v.readOnce.Do(func() { v.readGate = make(chan struct{}, 1) })
+	select {
+	case v.readGate <- struct{}{}:
+		defer func() { <-v.readGate }()
+	case <-merged.Done():
+		return value, merged.Err()
+	}
+	if stateErr := v.readState(merged); stateErr != nil {
+		return value, stateErr
+	}
 	value, err = read(merged, v.db)
-	if v.closed.Load() {
+	if stateErr := v.readState(merged); stateErr != nil {
 		var zero T
-		return zero, errSchemaClosed
-	}
-	if lifetimeErr := v.lifetime.Err(); lifetimeErr != nil {
-		var zero T
-		return zero, lifetimeErr
-	}
-	if contextErr := merged.Err(); contextErr != nil {
-		var zero T
-		return zero, contextErr
+		return zero, stateErr
 	}
 	return value, err
+}
+
+func (v *readonlySchemaView) readState(ctx context.Context) error {
+	if v.closed.Load() {
+		return errSchemaClosed
+	}
+	if lifetimeErr := v.lifetime.Err(); lifetimeErr != nil {
+		return lifetimeErr
+	}
+	return ctx.Err()
 }
 
 func (v *readonlySchemaView) ListCollections(ctx context.Context, parent *record.Key) ([]dal.CollectionRef, error) {
