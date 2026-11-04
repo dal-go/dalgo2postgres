@@ -341,7 +341,7 @@ Limits of this combination that are not defects of one library:
 
 ### What the integration tests prove about queries
 
-Every one runs in the Conformance job on PostgreSQL 17 and 18, and the job fails when one is
+Every one runs in the Conformance job on PostgreSQL 15, 17 and 18, and the job fails when one is
 skipped, missing or not passing.
 
 - **The corpus.** The TugQL fixtures of dal-go/dalgo under `testdata/joins` and
@@ -626,11 +626,12 @@ inventory, never an authorization decision. The read-only schema transaction off
 
 **Server versions.** PostgreSQL 13 and later. An older server answers a `*dbschema.NotSupportedError`.
 The per-grant `INHERIT` and `SET` options of PostgreSQL 16 are read when present; before 16 a
-member's `rolinherit` decides inheritance and `SET ROLE` is always possible. CI runs it on 17 and 18.
+member's `rolinherit` decides inheritance and `SET ROLE` is always possible. CI runs it on 15, 17
+and 18. `AsOf` is the statement's start (`statement_timestamp()`), the time of the catalog snapshot.
 
 **Credential.** One statement, run as any role that can connect: it reads `pg_roles` (never
-`rolpassword`), `pg_auth_members`, `pg_database`, `pg_class`, `pg_namespace`, `pg_attribute` and
-`current_setting('server_version_num')`, all readable by `PUBLIC` in a default installation. Use a
+`rolpassword`), `pg_auth_members`, `pg_database`, `pg_class`, `pg_namespace`, `pg_attribute`,
+`pg_inherits` and `current_setting('server_version_num')`, all readable by `PUBLIC` in a default installation. Use a
 dedicated `LOGIN` role with no other privilege. If a DBA has revoked `SELECT` on one of those
 catalogs from `PUBLIC`, grant it back to that role; until then the call fails, and a failure is an
 error, never an empty list. One statement means one snapshot: the facts are consistent.
@@ -643,25 +644,37 @@ error, never an empty list. One statement means one snapshot: the facts are cons
   role) is `self-grant`.
 - Sources: `direct`, `membership`, `everyone` (`PUBLIC`), `ownership` (the owner, and every role
   that holds the owner's privileges), `superuser` (a superuser login, or a role that can
-  `SET ROLE` to a superuser role), `builtin-role` (`pg_read_all_data`, `pg_write_all_data`). The
-  database owner is counted as a member of `pg_database_owner` (14+).
+  `SET ROLE` to a superuser role), `builtin-role` (`pg_read_all_data`, `pg_write_all_data`, and the
+  server-file roles: `pg_read_server_files` reads the table's files, `pg_write_server_files` and
+  `pg_execute_server_program` act as the server's operating-system user, so they count as every
+  privilege; all three bypass row security). The database owner is counted as a member of
+  `pg_database_owner` (14+).
+- Partitions and inheritance (`pg_inherits`): a query on an ancestor (a partitioned parent, an
+  inheritance parent) reads this table's rows, and a descendant (a partition, a child) holds a share
+  of them. Privileges and ownership of either are listed too, `inferred`, with
+  `ancestor:schema.name` or `descendant:schema.name` as the last step of `Via`. Row security of an
+  ancestor, which applies when the rows are read through it, is not resolved.
 - Confidence: `verified` for the role's own catalog entries, `inferred` for anything reached through
-  membership.
+  membership, a relative or a built-in role.
 - Row security: superusers and `BYPASSRLS` roles bypass it, even under `FORCE ROW LEVEL SECURITY`;
   the owner bypasses it unless it is forced. `BYPASSRLS` alone grants no privilege, so such a role
   is listed only when it holds one.
 - Principals listed: every login role that holds a privilege, the owner always (as a `group` if it
   cannot log in), and `PUBLIC` as one principal of kind `everyone` when it holds a privilege; its
-  privileges are also added to every login role. A column privilege is listed only where the same
-  privilege is not held on the whole table. Namespace access says whether the role has `USAGE` on
-  the schema, without which its table privileges cannot be used.
+  privileges are also added to every login role. One privilege is listed per operation and set of
+  columns, with every grant behind it. A column privilege is folded into the whole-table one only
+  when a whole-table grant is at least as current (route: own, then inherited, then `SET ROLE` or a
+  self-grant) and as certain; otherwise both are listed. Namespace access says whether the role has
+  `USAGE` on the table's schema, without which its table privileges cannot be used: `granted` when
+  `USAGE` is in effect now (own or inherited), or when it and every privilege need `SET ROLE` or a
+  self-grant alike; `unknown` when a privilege is in effect now but `USAGE` needs such a step;
+  `missing` when nothing grants it.
 
 **Coverage.** Always `partial`, with the blind spots named: `pg_hba.conf` (connection rules), cloud
 IAM logins, replicas and backups, shared credentials, `SECURITY DEFINER` functions and views owned
 by other roles, row-security policy expressions (not read), managed-service admin roles such as
-`rds_superuser` that are not `rolsuper`, and table inheritance and partitions (each partition is a
-table of its own). A grant, a membership or an owner that names a role `pg_roles` does not list
-makes the coverage `unknown`, with a gap that names it. A table that does not exist is a not-found
+`rds_superuser` that are not `rolsuper`. A grant, a membership or an owner (of the table, a relative
+or the database) that names a role `pg_roles` does not list makes the coverage `unknown`, with a gap that names it. A table that does not exist is a not-found
 error.
 
 ## Connection errors
