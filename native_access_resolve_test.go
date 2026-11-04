@@ -15,26 +15,29 @@ import (
 // A typical application database, as pg_catalog shows it (role OIDs are made
 // up; 6171 and 6181 are the real OIDs of the built-in roles).
 const (
-	oidPostgres   = 10
-	oidAppOwner   = 100 // NOLOGIN, owns billing.invoices
-	oidApp        = 101 // the application's login
-	oidAnalysts   = 102 // NOLOGIN group
-	oidReaders    = 103 // NOLOGIN group holding SELECT; analysts is a member
-	oidAna        = 104 // analyst login, member of analysts
-	oidAuditor    = 105 // NOINHERIT login, member of readers
-	oidBypassSvc  = 106 // BYPASSRLS login with SELECT
-	oidReporting  = 107 // login with SELECT
-	oidEtl        = 108 // login with INSERT
-	oidLead       = 109 // admin of analysts, with neither INHERIT nor SET
-	oidIdle       = 110 // login with no privilege
-	oidSupport    = 111 // login with column SELECT
-	oidBackup     = 112 // member of pg_read_all_data
-	oidDba        = 113 // member of admins_su
-	oidAdminsSu   = 114 // NOLOGIN superuser role
-	oidManager    = 115 // CREATEROLE login
-	oidPgDbOwner  = 6171
-	oidReadAll    = 6181
-	oidUnknownOID = 999
+	oidPostgres    = 10
+	oidAppOwner    = 100 // NOLOGIN, owns billing.invoices
+	oidApp         = 101 // the application's login
+	oidAnalysts    = 102 // NOLOGIN group
+	oidReaders     = 103 // NOLOGIN group holding SELECT; analysts is a member
+	oidAna         = 104 // analyst login, member of analysts
+	oidAuditor     = 105 // NOINHERIT login, member of readers
+	oidBypassSvc   = 106 // BYPASSRLS login with SELECT
+	oidReporting   = 107 // login with SELECT
+	oidEtl         = 108 // login with INSERT
+	oidLead        = 109 // admin of analysts, with neither INHERIT nor SET
+	oidIdle        = 110 // login with no privilege
+	oidSupport     = 111 // login with column SELECT
+	oidBackup      = 112 // member of pg_read_all_data
+	oidDba         = 113 // member of admins_su
+	oidAdminsSu    = 114 // NOLOGIN superuser role
+	oidManager     = 115 // CREATEROLE login
+	oidPgDbOwner   = 6171
+	oidReadAll     = 6181
+	oidReadFiles   = 4569
+	oidWriteFiles  = 4570
+	oidExecProgram = 4571
+	oidUnknownOID  = 999
 )
 
 var nativeAsOf = time.Date(2026, 11, 4, 9, 30, 0, 0, time.UTC)
@@ -81,6 +84,9 @@ func appCatalog() *pgCatalog {
 			{OID: oidManager, Name: "manager", Inherit: true, CreateRole: true, Login: true},
 			{OID: oidPgDbOwner, Name: "pg_database_owner", Inherit: true},
 			{OID: oidReadAll, Name: "pg_read_all_data", Inherit: true},
+			{OID: oidReadFiles, Name: "pg_read_server_files", Inherit: true},
+			{OID: oidWriteFiles, Name: "pg_write_server_files", Inherit: true},
+			{OID: oidExecProgram, Name: "pg_execute_server_program", Inherit: true},
 		},
 		Memberships: []pgMembership{
 			edge(oidReaders, oidAnalysts, true, true),
@@ -497,7 +503,7 @@ func TestNativeAccess_ConfidenceHelpers(t *testing.T) {
 	if got := weakest(nil); got != dbschema.NativeVerified {
 		t.Fatalf("weakest(nil) = %s", got)
 	}
-	if got := newPrivilege(dbschema.NativeRead, nil, nil).Confidence; got != dbschema.NativeUnknown {
+	if got := newPrivilegeSet().newPrivilege(dbschema.NativeRead, nil, nil).Confidence; got != dbschema.NativeUnknown {
 		t.Fatalf("no grants = %s", got)
 	}
 }
@@ -542,5 +548,158 @@ func TestNativeAccess_WriteAllDataBuiltinRole(t *testing.T) {
 		"delete builtin-role/inherited inferred via pg_write_all_data"}
 	if !reflect.DeepEqual(describe(idle), want) || idle.NamespaceAccess != dbschema.NativeNamespaceGranted {
 		t.Fatalf("got %q %s", describe(idle), idle.NamespaceAccess)
+	}
+}
+
+// H1: a current column privilege is never hidden behind a whole-table
+// privilege that is only potential (here: a self-grant through ADMIN OPTION).
+func TestNativeAccess_ColumnPrivilegeIsKeptBesideAPotentialTablePrivilege(t *testing.T) {
+	t.Parallel()
+	cat := appCatalog()
+	cat.Memberships = append(cat.Memberships,
+		pgMembership{Role: oidReaders, Member: oidSupport, Admin: true, Inherit: ptr(false), Set: ptr(false)})
+	support := principalNamed(t, resolve(cat), "support")
+	want := []string{"read membership/self-grant inferred via readers", "read[email,name] direct/self verified"}
+	if lines := describe(support); !reflect.DeepEqual(lines, want) {
+		t.Fatalf("got %q\nwant %q", lines, want)
+	}
+	if support.Confidence != dbschema.NativeInferred {
+		t.Fatalf("confidence %s", support.Confidence)
+	}
+}
+
+// L2: one operation on the same fields is one privilege listing every grant.
+func TestNativeAccess_SameFieldsFromTwoGrantsAreOnePrivilege(t *testing.T) {
+	t.Parallel()
+	cat := appCatalog()
+	cat.Roles = append(cat.Roles, pgRole{OID: 300, Name: "mailers", Inherit: true})
+	cat.Memberships = append(cat.Memberships, edge(300, oidEtl, true, true))
+	cat.ColumnACL = append(cat.ColumnACL,
+		pgColumnACL{Column: "email", Grantee: oidEtl, Privilege: "SELECT"},
+		pgColumnACL{Column: "email", Grantee: 300, Privilege: "SELECT"})
+	etl := principalNamed(t, resolve(cat), "etl")
+	want := []string{"read[email] direct/self verified", "read[email] membership/inherited inferred via mailers",
+		"insert direct/self verified"}
+	if lines := describe(etl); !reflect.DeepEqual(lines, want) {
+		t.Fatalf("got %q\nwant %q", lines, want)
+	}
+	if len(etl.Privileges) != 2 || len(etl.Privileges[0].Grants) != 2 || etl.Privileges[0].Confidence != dbschema.NativeVerified {
+		t.Fatalf("privileges: %+v", etl.Privileges)
+	}
+}
+
+// M1: privileges and ownership of the table's ancestors and descendants in
+// pg_inherits reach its rows; they are inferred, with the relative last in Via.
+func TestNativeAccess_PartitionsAndInheritance(t *testing.T) {
+	t.Parallel()
+	cat := appCatalog()
+	cat.Relatives = []pgRelative{
+		{OID: 501, Schema: "billing", Name: "invoices_all", Relation: "ancestor", Owner: oidAppOwner},
+		{OID: 502, Schema: "billing", Name: "invoices_2026", Relation: "descendant", Owner: oidIdle},
+	}
+	cat.TableACL = append(cat.TableACL,
+		pgACL{Rel: 501, Grantee: oidEtl, Privilege: "SELECT"},
+		pgACL{Rel: 502, Grantee: 0, Privilege: "SELECT"})
+	cat.ColumnACL = append(cat.ColumnACL, pgColumnACL{Rel: 501, Column: "total", Grantee: oidAna, Privilege: "UPDATE"})
+	got := resolve(cat)
+	if got.Coverage.Level != dbschema.NativeCoveragePartial || slices.Contains(got.Coverage.BlindSpots, "inheritance-and-partitions") ||
+		!slices.Contains(got.Coverage.Covered, "inheritance-and-partitions") {
+		t.Fatalf("coverage: %+v", got.Coverage)
+	}
+	for _, tt := range []struct {
+		principal string
+		want      string
+	}{
+		{"etl", "read direct/self inferred via ancestor:billing.invoices_all"},
+		{"ana", "update[total] direct/self inferred via ancestor:billing.invoices_all"},
+		{"idle", "truncate ownership/self inferred via descendant:billing.invoices_2026"},
+		{"idle", "read everyone/self inferred via descendant:billing.invoices_2026"},
+		{"app_owner", "read ownership/self inferred via ancestor:billing.invoices_all"},
+		{"PUBLIC", "read everyone/self inferred via descendant:billing.invoices_2026"},
+	} {
+		if lines := describe(principalNamed(t, got, tt.principal)); !slices.Contains(lines, tt.want) {
+			t.Errorf("%s: %q missing from %q", tt.principal, tt.want, lines)
+		}
+	}
+	if c := principalNamed(t, got, "PUBLIC").Confidence; c != dbschema.NativeInferred {
+		t.Errorf("PUBLIC confidence %s", c)
+	}
+}
+
+// M2: members of the server-file roles reach the data outside SQL: reported
+// as builtin-role, inferred, bypassing row security; before 16 CREATEROLE can
+// grant itself those roles.
+func TestNativeAccess_ServerFileRoles(t *testing.T) {
+	t.Parallel()
+	cat := appCatalog()
+	cat.SchemaUsage = []int64{oidPgDbOwner}
+	cat.Memberships = append(cat.Memberships, edge(oidReadFiles, oidIdle, true, true), edge(oidExecProgram, oidEtl, true, true))
+	got := resolve(cat)
+	idle := principalNamed(t, got, "idle")
+	if want := []string{"read builtin-role/inherited inferred via pg_read_server_files"}; !reflect.DeepEqual(describe(idle), want) ||
+		idle.RowSecurity != dbschema.NativeRowSecurityBypassed || idle.NamespaceAccess != dbschema.NativeNamespaceGranted {
+		t.Fatalf("idle: %q %s %s", describe(idle), idle.RowSecurity, idle.NamespaceAccess)
+	}
+	etl := describe(principalNamed(t, got, "etl"))
+	for _, op := range []string{"read", "insert", "update", "delete", "truncate"} {
+		if !slices.Contains(etl, op+" builtin-role/inherited inferred via pg_execute_server_program") {
+			t.Errorf("etl: no %s through pg_execute_server_program in %q", op, etl)
+		}
+	}
+	cat = pre16(appCatalog())
+	manager := describe(principalNamed(t, resolve(cat), "manager"))
+	for _, want := range []string{"read builtin-role/self-grant inferred via pg_read_server_files",
+		"truncate builtin-role/self-grant inferred via pg_write_server_files"} {
+		if !slices.Contains(manager, want) {
+			t.Errorf("manager: %q missing from %q", want, manager)
+		}
+	}
+}
+
+// L1: schema USAGE reachable only through a self-grant or SET ROLE does not
+// make a current privilege's namespace access "granted".
+func TestNativeAccess_NamespaceOnlyThroughAPotentialRouteIsUnknown(t *testing.T) {
+	t.Parallel()
+	cat := appCatalog()
+	cat.SchemaUsage = []int64{oidPgDbOwner, oidAnalysts}
+	cat.TableACL = append(cat.TableACL, acl(oidIdle, "SELECT")...)
+	cat.Memberships = append(cat.Memberships,
+		pgMembership{Role: oidAnalysts, Member: oidIdle, Admin: true, Inherit: ptr(false), Set: ptr(false)},
+		edge(oidAnalysts, oidAuditor, false, true))
+	got := resolve(cat)
+	for name, want := range map[string]dbschema.NativeNamespaceAccess{
+		"idle":    dbschema.NativeNamespaceUnknown, // direct SELECT; USAGE only by self-grant
+		"auditor": dbschema.NativeNamespaceGranted, // SELECT and USAGE both after SET ROLE
+		"lead":    dbschema.NativeNamespaceGranted, // both by self-grant
+	} {
+		if got := principalNamed(t, got, name).NamespaceAccess; got != want {
+			t.Errorf("%s: got %s, want %s", name, got, want)
+		}
+	}
+}
+
+func TestNativeAccess_MoreUnresolvedInput(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		mutate func(*pgCatalog)
+		code   string
+	}{
+		{"database owner unknown", func(c *pgCatalog) { c.DatabaseOwner = ptr(int64(oidUnknownOID)) }, gapUnresolvedDatabaseOwner},
+		{"privilege on an unknown relation", func(c *pgCatalog) {
+			c.TableACL = append(c.TableACL, pgACL{Rel: 777, Grantee: oidEtl, Privilege: "SELECT"})
+		}, gapUnresolvedRelative},
+		{"relative owner unknown", func(c *pgCatalog) {
+			c.Relatives = []pgRelative{{OID: 501, Schema: "billing", Name: "p", Relation: "ancestor", Owner: oidUnknownOID}}
+		}, gapUnresolvedOwner},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cat := appCatalog()
+			tt.mutate(cat)
+			got := resolve(cat)
+			if got.Coverage.Level != dbschema.NativeCoverageUnknown || len(got.Coverage.Gaps) != 1 || got.Coverage.Gaps[0].Code != tt.code {
+				t.Fatalf("coverage: %+v", got.Coverage)
+			}
+		})
 	}
 }
