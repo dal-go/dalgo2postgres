@@ -39,7 +39,7 @@ func newNativeFixture(t *testing.T) nativeFixture {
 		t.Fatal(err)
 	}
 	f.pg16 = version >= pg16Version
-	roles := []string{"owner", "app", "readers", "analysts", "ana", "auditor", "bypass", "su", "lead", "catalog"}
+	roles := []string{"owner", "app", "readers", "analysts", "ana", "auditor", "bypass", "su", "lead", "catalog", "files"}
 	t.Cleanup(func() {
 		ctx := context.Background()
 		for _, r := range roles {
@@ -62,6 +62,7 @@ func newNativeFixture(t *testing.T) nativeFixture {
 		`CREATE ROLE ` + q("su") + ` LOGIN SUPERUSER`,
 		`CREATE ROLE ` + q("lead") + ` LOGIN`,
 		`CREATE ROLE ` + q("catalog") + ` LOGIN PASSWORD 'catalog-only'`,
+		`CREATE ROLE ` + q("files") + ` LOGIN IN ROLE pg_read_server_files`,
 		`GRANT ` + q("readers") + ` TO ` + q("analysts"),
 		`GRANT ` + q("analysts") + ` TO ` + q("ana"),
 		`GRANT ` + q("readers") + ` TO ` + q("auditor"),
@@ -75,6 +76,10 @@ func newNativeFixture(t *testing.T) nativeFixture {
 		`GRANT UPDATE (total) ON ` + s + `.invoices TO ` + q("ana"),
 		`CREATE TABLE ` + s + `.notes (id integer PRIMARY KEY)`,
 		`GRANT SELECT ON ` + s + `.notes TO PUBLIC`,
+		`CREATE TABLE ` + s + `.events (id integer, note text) PARTITION BY RANGE (id)`,
+		`CREATE TABLE ` + s + `.events_1 PARTITION OF ` + s + `.events FOR VALUES FROM (0) TO (100)`,
+		`GRANT SELECT ON ` + s + `.events TO ` + q("readers"),
+		`GRANT INSERT ON ` + s + `.events_1 TO ` + q("app"),
 	}
 	if f.pg16 {
 		statements = append(statements, `GRANT `+q("analysts")+` TO `+q("lead")+` WITH ADMIN TRUE, INHERIT FALSE, SET FALSE`)
@@ -132,9 +137,9 @@ func TestSchemaReaderIntegration_NativeAccessOfATypicalAppDatabase(t *testing.T)
 		t.Fatalf("answer: %+v %+v", got.Coverage, got.RowSecurity)
 	}
 	mine := f.mine(got)
-	want := []string{"ana", "app", "auditor", "bypass", "owner", "su"}
+	want := []string{"ana", "app", "auditor", "bypass", "files", "owner", "su"}
 	if f.pg16 {
-		want = []string{"ana", "app", "auditor", "bypass", "lead", "owner", "su"}
+		want = []string{"ana", "app", "auditor", "bypass", "files", "lead", "owner", "su"}
 	}
 	var names []string
 	for name := range mine {
@@ -182,6 +187,11 @@ func TestSchemaReaderIntegration_NativeAccessOfATypicalAppDatabase(t *testing.T)
 	if mine["ana"].NamespaceAccess != dbschema.NativeNamespaceGranted {
 		t.Errorf("ana reaches the schema through readers: %s", mine["ana"].NamespaceAccess)
 	}
+	files := mine["files"]
+	if !reflect.DeepEqual(describe(files), []string{"read builtin-role/inherited inferred via pg_read_server_files"}) ||
+		files.RowSecurity != dbschema.NativeRowSecurityBypassed {
+		t.Errorf("files: %q %s", describe(files), files.RowSecurity)
+	}
 	if _, listed := mine["PUBLIC"]; listed {
 		t.Error("PUBLIC holds nothing on invoices")
 	}
@@ -211,5 +221,28 @@ func TestSchemaReaderIntegration_NativeAccessOfAMissingTable(t *testing.T) {
 	got, err := f.db.ReadNativeAccess(context.Background(), &ref)
 	if got != nil || err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("got %v, %v", got, err)
+	}
+}
+
+// A partition is reached through its partitioned parent's privileges, and the
+// parent through its partitions'.
+func TestSchemaReaderIntegration_NativeAccessThroughPartitions(t *testing.T) {
+	f := newNativeFixture(t)
+	parent := "ancestor:" + f.schema + ".events"
+	child := "descendant:" + f.schema + ".events_1"
+	partition := f.mine(f.read(t, f.db, "events_1"))
+	if got := describe(partition["ana"]); !reflect.DeepEqual(got,
+		[]string{"read membership/inherited inferred via " + f.role("analysts") + ">" + f.role("readers") + ">" + parent}) {
+		t.Errorf("ana on the partition: %q", got)
+	}
+	if got := describe(partition["app"]); !reflect.DeepEqual(got, []string{"insert direct/self verified"}) {
+		t.Errorf("app on the partition: %q", got)
+	}
+	whole := f.read(t, f.db, "events")
+	if !slices.Contains(whole.Coverage.Covered, "inheritance-and-partitions") || len(whole.Coverage.Gaps) != 0 {
+		t.Errorf("coverage: %+v", whole.Coverage)
+	}
+	if got := describe(f.mine(whole)["app"]); !reflect.DeepEqual(got, []string{"insert direct/self inferred via " + child}) {
+		t.Errorf("app on the parent: %q", got)
 	}
 }
