@@ -652,8 +652,11 @@ error, never an empty list. One statement means one snapshot: the facts are cons
 - Partitions and inheritance (`pg_inherits`): a query on an ancestor (a partitioned parent, an
   inheritance parent) reads this table's rows, and a descendant (a partition, a child) holds a share
   of them. Privileges and ownership of either are listed too, `inferred`, with
-  `ancestor:schema.name` or `descendant:schema.name` as the last step of `Via`. Row security of an
-  ancestor, which applies when the rows are read through it, is not resolved.
+  `ancestor:schema.name` or `descendant:schema.name` as the last step of `Via`. A privilege through a
+  descendant covers only that partition's or child's rows, even when it lists no columns: read it as
+  a share of the table, never the whole of it. Rows read through a relative follow that relative's
+  row security (a relative without it, or one the principal owns unless forced, counts as
+  `bypassed`) and need `USAGE` on that relative's schema, not the table's.
 - Confidence: `verified` for the role's own catalog entries, `inferred` for anything reached through
   membership, a relative or a built-in role.
 - Row security: superusers and `BYPASSRLS` roles bypass it, even under `FORCE ROW LEVEL SECURITY`;
@@ -663,12 +666,14 @@ error, never an empty list. One statement means one snapshot: the facts are cons
   cannot log in), and `PUBLIC` as one principal of kind `everyone` when it holds a privilege; its
   privileges are also added to every login role. One privilege is listed per operation and set of
   columns, with every grant behind it. A column privilege is folded into the whole-table one only
-  when a whole-table grant is at least as current (route: own, then inherited, then `SET ROLE` or a
-  self-grant) and as certain; otherwise both are listed. Namespace access says whether the role has
-  `USAGE` on the table's schema, without which its table privileges cannot be used: `granted` when
-  `USAGE` is in effect now (own or inherited), or when it and every privilege need `SET ROLE` or a
-  self-grant alike; `unknown` when a privilege is in effect now but `USAGE` needs such a step;
-  `missing` when nothing grants it.
+  when a whole-table grant through the same relation is at least as current (route: own, then
+  inherited, then `SET ROLE`, then a self-grant) and as certain; otherwise both are listed. Namespace access says whether the role has
+  `USAGE` on the schema of the relation each privilege comes through, without which the privilege
+  cannot be used: `granted` when one of the most current privileges has its schema reached at least
+  as currently (in effect now: own or inherited; or, when every privilege needs `SET ROLE` or a
+  self-grant, by such a step too); `unknown` when only a less current route reaches some
+  privilege's schema; `missing` when no privilege's schema is reached. The principal's row-security
+  effect is the most revealing one among its privileges.
 
 **Coverage.** Always `partial`, with the blind spots named: `pg_hba.conf` (connection rules), cloud
 IAM logins, replicas and backups, shared credentials, `SECURITY DEFINER` functions and views owned

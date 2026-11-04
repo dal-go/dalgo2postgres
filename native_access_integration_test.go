@@ -230,13 +230,38 @@ func TestSchemaReaderIntegration_NativeAccessThroughPartitions(t *testing.T) {
 	f := newNativeFixture(t)
 	parent := "ancestor:" + f.schema + ".events"
 	child := "descendant:" + f.schema + ".events_1"
+	// A second partition in a schema nobody has USAGE on, and row security on
+	// the first partition only: rows read through the parent follow the
+	// parent's schema and row security, not the partition's.
+	arc := f.role("arc")
+	t.Cleanup(func() {
+		_, _ = f.db.sqlDB.ExecContext(context.Background(), `DROP SCHEMA IF EXISTS `+exactIdent(arc)+` CASCADE`)
+	})
+	execAll(t, f.db,
+		`CREATE SCHEMA `+exactIdent(arc),
+		`CREATE TABLE `+exactIdent(arc)+`.events_2 PARTITION OF `+exactIdent(f.schema)+`.events FOR VALUES FROM (100) TO (200)`,
+		`ALTER TABLE `+exactIdent(f.schema)+`.events_1 ENABLE ROW LEVEL SECURITY`,
+	)
 	partition := f.mine(f.read(t, f.db, "events_1"))
-	if got := describe(partition["ana"]); !reflect.DeepEqual(got,
+	ana := partition["ana"]
+	if got := describe(ana); !reflect.DeepEqual(got,
 		[]string{"read membership/inherited inferred via " + f.role("analysts") + ">" + f.role("readers") + ">" + parent}) {
 		t.Errorf("ana on the partition: %q", got)
 	}
-	if got := describe(partition["app"]); !reflect.DeepEqual(got, []string{"insert direct/self verified"}) {
-		t.Errorf("app on the partition: %q", got)
+	if ana.RowSecurity != dbschema.NativeRowSecurityBypassed {
+		t.Errorf("ana reads the partition through a parent without row security: %s", ana.RowSecurity)
+	}
+	if app := partition["app"]; !reflect.DeepEqual(describe(app), []string{"insert direct/self verified"}) ||
+		app.RowSecurity != dbschema.NativeRowSecurityApplies {
+		t.Errorf("app on the partition: %q %s", describe(app), app.RowSecurity)
+	}
+	ref := dal.NewQualifiedRootCollectionRef(arc, "events_2", "")
+	other, err := f.db.ReadNativeAccess(context.Background(), &ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ns := f.mine(other)["ana"].NamespaceAccess; ns != dbschema.NativeNamespaceGranted {
+		t.Errorf("ana reaches %s.events_2 through the parent's schema: %s", arc, ns)
 	}
 	whole := f.read(t, f.db, "events")
 	if !slices.Contains(whole.Coverage.Covered, "inheritance-and-partitions") || len(whole.Coverage.Gaps) != 0 {
