@@ -276,6 +276,10 @@ func errorCalls(s standIn) map[string]errorCall {
 			_, err := db.NonDeterministicTextColumns(ctx, &ref)
 			return []error{err}
 		}),
+		"Database.ReadNativeAccess": onLazyDatabase(func(ctx context.Context, db *Database) []error {
+			_, err := db.ReadNativeAccess(ctx, &ref)
+			return []error{err}
+		}),
 		"Database.RunReadonlySchemaTransaction": onLazyDatabase(func(ctx context.Context, db *Database) []error {
 			return []error{db.RunReadonlySchemaTransaction(ctx, func(context.Context, dbschema.SchemaReader) error { return nil })}
 		}),

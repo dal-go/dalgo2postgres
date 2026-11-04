@@ -7,6 +7,7 @@ PostgreSQL-specific DALgo driver. Wraps `github.com/dal-go/dalgo2sql` to provide
   on the server (see "Structured queries")
 - `dbschema.SchemaReader` — schema introspection via `information_schema`, `pg_catalog` and `pg_indexes`: every non-system schema, views told from tables, column defaults
 - `dbschema.SourceViewReader` — ordered view columns and normalized view-definition metadata for the configured schema
+- `dbschema.NativeAccessReader` — the roles that can reach a table natively, with privileges, sources and coverage (see "Native access")
 - `ddl.SchemaModifier` and `ddl.Applier` — PostgreSQL-flavored `CREATE TABLE` / `CREATE INDEX` / `DROP TABLE` / `ALTER TABLE`
 - `dal.ConcurrencyAware` — advertises `SupportsConcurrentConnections() = true`
   (PostgreSQL supports concurrent connections from multiple goroutines and processes,
@@ -340,7 +341,7 @@ Limits of this combination that are not defects of one library:
 
 ### What the integration tests prove about queries
 
-Every one runs in the Conformance job on PostgreSQL 17 and 18, and the job fails when one is
+Every one runs in the Conformance job on PostgreSQL 15, 17 and 18, and the job fails when one is
 skipped, missing or not passing.
 
 - **The corpus.** The TugQL fixtures of dal-go/dalgo under `testdata/joins` and
@@ -614,6 +615,72 @@ defaults to `nextval(...)` (`serial`) is a plain default to the catalog and is n
   stored or virtual (PostgreSQL 18) is not reported.
 - `ListCollections` lists a foreign table and a materialized view now; before, it listed
   neither.
+
+## Native access: who can reach a table outside DALgo
+
+`ReadNativeAccess(ctx, ref)` implements `dbschema.NativeAccessReader`. It lists the PostgreSQL roles
+that can reach one table, view, materialized view, partitioned table or foreign table through their
+own credentials, with the privileges they can exercise and why. The table is found as the schema
+reader finds it (reference schema, else `WithSchema`; name per `IdentifierMode`). It is an
+inventory, never an authorization decision. The read-only schema transaction offers it too.
+
+**Server versions.** PostgreSQL 13 and later. An older server answers a `*dbschema.NotSupportedError`.
+The per-grant `INHERIT` and `SET` options of PostgreSQL 16 are read when present; before 16 a
+member's `rolinherit` decides inheritance and `SET ROLE` is always possible. CI runs it on 15, 17
+and 18. `AsOf` is the statement's start (`statement_timestamp()`), the time of the catalog snapshot.
+
+**Credential.** One statement, run as any role that can connect: it reads `pg_roles` (never
+`rolpassword`), `pg_auth_members`, `pg_database`, `pg_class`, `pg_namespace`, `pg_attribute`,
+`pg_inherits` and `current_setting('server_version_num')`, all readable by `PUBLIC` in a default installation. Use a
+dedicated `LOGIN` role with no other privilege. If a DBA has revoked `SELECT` on one of those
+catalogs from `PUBLIC`, grant it back to that role; until then the call fails, and a failure is an
+error, never an empty list. One statement means one snapshot: the facts are consistent.
+
+**What it works out.**
+- Membership is followed transitively. A privilege used automatically through membership is routed
+  `inherited`; one usable only after `SET ROLE` (a `NOINHERIT` member, or a grant with
+  `INHERIT FALSE`) is `switch-role`; one a role can obtain by granting itself membership it
+  administers (`ADMIN OPTION`, and before 16 `CREATEROLE`, which could grant any non-superuser
+  role) is `self-grant`.
+- Sources: `direct`, `membership`, `everyone` (`PUBLIC`), `ownership` (the owner, and every role
+  that holds the owner's privileges), `superuser` (a superuser login, or a role that can
+  `SET ROLE` to a superuser role), `builtin-role` (`pg_read_all_data`, `pg_write_all_data`, and the
+  server-file roles: `pg_read_server_files` reads the table's files, `pg_write_server_files` and
+  `pg_execute_server_program` act as the server's operating-system user, so they count as every
+  privilege; all three bypass row security). The database owner is counted as a member of
+  `pg_database_owner` (14+).
+- Partitions and inheritance (`pg_inherits`): a query on an ancestor (a partitioned parent, an
+  inheritance parent) reads this table's rows, and a descendant (a partition, a child) holds a share
+  of them. Privileges and ownership of either are listed too, `inferred`, with
+  `ancestor:schema.name` or `descendant:schema.name` as the last step of `Via`. A privilege through a
+  descendant covers only that partition's or child's rows, even when it lists no columns: read it as
+  a share of the table, never the whole of it. Rows read through a relative follow that relative's
+  row security (a relative without it, or one the principal owns unless forced, counts as
+  `bypassed`) and need `USAGE` on that relative's schema, not the table's.
+- Confidence: `verified` for the role's own catalog entries, `inferred` for anything reached through
+  membership, a relative or a built-in role.
+- Row security: superusers and `BYPASSRLS` roles bypass it, even under `FORCE ROW LEVEL SECURITY`;
+  the owner bypasses it unless it is forced. `BYPASSRLS` alone grants no privilege, so such a role
+  is listed only when it holds one.
+- Principals listed: every login role that holds a privilege, the owner always (as a `group` if it
+  cannot log in), and `PUBLIC` as one principal of kind `everyone` when it holds a privilege; its
+  privileges are also added to every login role. One privilege is listed per operation and set of
+  columns, with every grant behind it. A column privilege is folded into the whole-table one only
+  when a whole-table grant through the same relation is at least as current (route: own, then
+  inherited, then `SET ROLE`, then a self-grant) and as certain; otherwise both are listed. Namespace access says whether the role has
+  `USAGE` on the schema of the relation each privilege comes through, without which the privilege
+  cannot be used: `granted` when one of the most current privileges has its schema reached at least
+  as currently (in effect now: own or inherited; or, when every privilege needs `SET ROLE` or a
+  self-grant, by such a step too); `unknown` when only a less current route reaches some
+  privilege's schema; `missing` when no privilege's schema is reached. The principal's row-security
+  effect is the most revealing one among its privileges.
+
+**Coverage.** Always `partial`, with the blind spots named: `pg_hba.conf` (connection rules), cloud
+IAM logins, replicas and backups, shared credentials, `SECURITY DEFINER` functions and views owned
+by other roles, row-security policy expressions (not read), managed-service admin roles such as
+`rds_superuser` that are not `rolsuper`. A grant, a membership or an owner (of the table, a relative
+or the database) that names a role `pg_roles` does not list makes the coverage `unknown`, with a gap that names it. A table that does not exist is a not-found
+error.
 
 ## Connection errors
 

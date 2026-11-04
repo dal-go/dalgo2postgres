@@ -52,7 +52,7 @@ func TestReadonlySchemaTransactionPreservesAllNarrowCapabilities(t *testing.T) {
 		require.False(t, raw)
 		_, closer := any(reader).(io.Closer)
 		require.False(t, closer)
-		allowed := map[string]bool{"ListCollections": true, "DescribeCollection": true, "ListIndexes": true, "ListConstraints": true, "ListReferrers": true, "ListSchemas": true, "ListSchemaCollections": true, "ListViews": true, "ListSchemaViews": true, "ListSourceViews": true, "NonDeterministicTextColumns": true}
+		allowed := map[string]bool{"ListCollections": true, "DescribeCollection": true, "ListIndexes": true, "ListConstraints": true, "ListReferrers": true, "ListSchemas": true, "ListSchemaCollections": true, "ListViews": true, "ListSchemaViews": true, "ListSourceViews": true, "NonDeterministicTextColumns": true, "ReadNativeAccess": true}
 		surface := reflect.TypeOf(reader)
 		require.Equal(t, len(allowed), surface.NumMethod())
 		for i := 0; i < surface.NumMethod(); i++ {
