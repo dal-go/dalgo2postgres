@@ -88,12 +88,6 @@ var routeRank = map[dbschema.NativeRoute]int{
 	dbschema.NativeRouteSwitchRole: 2, dbschema.NativeRouteSelfGrant: 3,
 }
 
-// routeTier orders routes by how current they are: the principal's own, then
-// inherited, then those that need an action first (SET ROLE or a self-grant).
-func routeTier(route dbschema.NativeRoute) int {
-	return min(routeRank[route], 2)
-}
-
 // currentTier is 0 for a route in effect now (the principal's own, or
 // inherited) and 1 for one that needs an action first (SET ROLE, a self-grant).
 func currentTier(route dbschema.NativeRoute) int {
@@ -152,6 +146,7 @@ type nativeResolver struct {
 	edges     map[int64][]pgMembership // by member
 	acl       map[int64][]aclEntry     // by grantee
 	relatives map[int64]pgRelative
+	ownedBy   map[int64][]pgRelative // relatives by owner
 	gaps      []dbschema.NativeAccessGap
 }
 
@@ -190,7 +185,8 @@ func resolveNativeAccess(ref dal.CollectionRef, cat *pgCatalog) *dbschema.Native
 func newNativeResolver(cat *pgCatalog) *nativeResolver {
 	r := &nativeResolver{cat: cat, pg16: cat.Version >= pg16Version,
 		roles: make(map[int64]pgRole, len(cat.Roles)), byName: make(map[string]pgRole, len(cat.Roles)),
-		edges: map[int64][]pgMembership{}, acl: map[int64][]aclEntry{}, relatives: map[int64]pgRelative{}}
+		edges: map[int64][]pgMembership{}, acl: map[int64][]aclEntry{}, relatives: map[int64]pgRelative{},
+		ownedBy: map[int64][]pgRelative{}}
 	for _, role := range cat.Roles {
 		r.roles[role.OID] = role
 		r.byName[role.Name] = role
@@ -225,6 +221,7 @@ func newNativeResolver(cat *pgCatalog) *nativeResolver {
 	}
 	for _, rel := range cat.Relatives {
 		r.relatives[rel.OID] = rel
+		r.ownedBy[rel.Owner] = append(r.ownedBy[rel.Owner], rel)
 		if _, ok := r.roles[rel.Owner]; !ok {
 			r.gap(gapUnresolvedOwner, fmt.Sprintf("owner oid %d of %s %s.%s is not in pg_roles", rel.Owner, rel.Relation, rel.Schema, rel.Name))
 		}
@@ -243,7 +240,9 @@ func (r *nativeResolver) addEntry(grantee int64, e aclEntry) {
 		r.gap(gapUnresolvedGrantee, fmt.Sprintf("a privilege is granted to oid %d, which is not in pg_roles", grantee))
 		return
 	}
-	if _, ok := r.relatives[e.rel]; !ok && e.rel != r.cat.Table.OID {
+	if e.rel == r.cat.Table.OID {
+		e.rel = selfRel
+	} else if _, ok := r.relatives[e.rel]; !ok {
 		r.gap(gapUnresolvedRelative, fmt.Sprintf("a privilege names relation oid %d, which is neither the table nor a relative", e.rel))
 		return
 	}
@@ -254,6 +253,34 @@ func (r *nativeResolver) gap(code, detail string) {
 	r.gaps = append(r.gaps, dbschema.NativeAccessGap{Code: code, Detail: detail})
 }
 
+// selfRel stands for the table itself where a relation OID is expected.
+const selfRel = int64(0)
+
+// relFacts are the row-security and schema facts of the table or a relative.
+type relFacts struct {
+	rowSecurity, forceRowSecurity bool
+	schemaOwner                   int64
+	schemaUsage                   []int64
+}
+
+func (r *nativeResolver) facts(rel int64) relFacts {
+	if rel == selfRel {
+		t := r.cat.Table
+		return relFacts{t.RowSecurity, t.ForceRowSecurity, t.SchemaOwner, r.cat.SchemaUsage}
+	}
+	x := r.relatives[rel]
+	return relFacts{x.RowSecurity, x.ForceRowSecurity, x.SchemaOwner, x.SchemaUsage}
+}
+
+// rels lists the table (selfRel) and its relatives.
+func (r *nativeResolver) rels() []int64 {
+	out := []int64{selfRel}
+	for _, rel := range r.cat.Relatives {
+		out = append(out, rel.OID)
+	}
+	return out
+}
+
 // relativeVia is the step a privilege on a relative adds to NativeGrant.Via:
 // "ancestor:schema.name" (a query on it reads this table's rows) or
 // "descendant:schema.name" (it holds a share of them).
@@ -261,16 +288,18 @@ func relativeVia(rel pgRelative) string {
 	return rel.Relation + ":" + rel.Schema + "." + rel.Name
 }
 
-// grantKey identifies a grant within one privilege set.
+// grantKey identifies a grant within one privilege set, with the relation it
+// comes through (selfRel for the table itself).
 type grantKey struct {
 	source     dbschema.NativeGrantSource
 	route      dbschema.NativeRoute
 	confidence dbschema.NativeConfidence
 	via        string
+	rel        int64
 }
 
-func keyOf(g dbschema.NativeGrant) grantKey {
-	return grantKey{source: g.Source, route: g.Route, confidence: g.Confidence, via: strings.Join(g.Via, "\x00")}
+func keyOf(g dbschema.NativeGrant, rel int64) grantKey {
+	return grantKey{source: g.Source, route: g.Route, confidence: g.Confidence, via: strings.Join(g.Via, "\x00"), rel: rel}
 }
 
 // privilegeSet collects a principal's grants.
@@ -294,13 +323,16 @@ func grantFor(source dbschema.NativeGrantSource, route dbschema.NativeRoute, via
 	return dbschema.NativeGrant{Source: source, Route: route, Via: via, Confidence: confidence}
 }
 
-func inferred(g dbschema.NativeGrant) dbschema.NativeGrant {
+// throughRelative is g as it reaches the table through a relative: inferred,
+// with the relative last in Via.
+func throughRelative(g dbschema.NativeGrant, rel pgRelative) dbschema.NativeGrant {
 	g.Confidence = dbschema.NativeInferred
+	g.Via = appendPath(g.Via, relativeVia(rel))
 	return g
 }
 
-func (s *privilegeSet) add(op dbschema.NativeOperation, column string, g dbschema.NativeGrant) {
-	k := keyOf(g)
+func (s *privilegeSet) add(op dbschema.NativeOperation, column string, g dbschema.NativeGrant, rel int64) {
+	k := keyOf(g, rel)
 	s.grants[k] = g
 	if column == "" {
 		if s.table[op] == nil {
@@ -317,22 +349,20 @@ func (s *privilegeSet) add(op dbschema.NativeOperation, column string, g dbschem
 	}
 }
 
-func (s *privilegeSet) addAll(ops []dbschema.NativeOperation, g dbschema.NativeGrant) {
+func (s *privilegeSet) addAll(ops []dbschema.NativeOperation, g dbschema.NativeGrant, rel int64) {
 	for _, op := range ops {
-		s.add(op, "", g)
+		s.add(op, "", g, rel)
 	}
 }
 
-// addACL adds the privileges grantee holds on the table and its relatives. A
-// privilege on a relative is inferred, with the relative last in Via.
+// addACL adds the privileges grantee holds on the table and its relatives.
 func (r *nativeResolver) addACL(s *privilegeSet, grantee int64, g dbschema.NativeGrant) {
 	for _, e := range r.acl[grantee] {
-		eg := g
-		if rel, ok := r.relatives[e.rel]; ok {
-			eg = inferred(g)
-			eg.Via = appendPath(g.Via, relativeVia(rel))
+		if e.rel == selfRel {
+			s.add(e.op, e.column, g, selfRel)
+		} else {
+			s.add(e.op, e.column, throughRelative(g, r.relatives[e.rel]), e.rel)
 		}
-		s.add(e.op, e.column, eg)
 	}
 }
 
@@ -342,11 +372,18 @@ func (r *nativeResolver) principal(role pgRole) (dbschema.NativePrincipal, bool)
 	t := r.cat.Table
 	reached := r.reach(role.OID)
 	set := newPrivilegeSet()
-	superuser, bypass, owner := false, false, false
-	namespaceTier := -1 // the most current route that reaches the schema; -1 for none
-	reachNamespace := func(route dbschema.NativeRoute) {
-		if tier := currentTier(route); namespaceTier < 0 || tier < namespaceTier {
-			namespaceTier = tier
+	superuser, bypass := false, false
+	owned := map[int64]bool{}     // relations whose owner's privileges the principal holds
+	schemaTier := map[int64]int{} // per relation: the most current tier reaching its schema
+	everySchema := -1             // the most current tier reaching every schema; -1 for none
+	reachSchema := func(rel int64, route dbschema.NativeRoute) {
+		if tier, ok := schemaTier[rel]; !ok || currentTier(route) < tier {
+			schemaTier[rel] = currentTier(route)
+		}
+	}
+	reachEverySchema := func(route dbschema.NativeRoute) {
+		if everySchema < 0 || currentTier(route) < everySchema {
+			everySchema = currentTier(route)
 		}
 	}
 	var superRoute dbschema.NativeRoute
@@ -360,23 +397,22 @@ func (r *nativeResolver) principal(role pgRole) (dbschema.NativePrincipal, bool)
 		r.addACL(set, oid, grantFor(source, rr.privRoute, rr.privVia))
 		ownership := grantFor(dbschema.NativeFromOwnership, rr.privRoute, rr.privVia)
 		if oid == t.Owner {
-			owner = true
-			set.addAll(allOperations, ownership)
+			owned[selfRel] = true
+			set.addAll(allOperations, ownership, selfRel)
 		}
-		for _, rel := range r.cat.Relatives {
-			if rel.Owner == oid {
-				g := inferred(ownership)
-				g.Via = appendPath(rr.privVia, relativeVia(rel))
-				set.addAll(allOperations, g)
-			}
+		for _, rel := range r.ownedBy[oid] {
+			owned[rel.OID] = true
+			set.addAll(allOperations, throughRelative(ownership, rel), rel.OID)
 		}
 		if b, ok := builtinRoles[held.Name]; ok {
-			set.addAll(b.operations, inferred(grantFor(dbschema.NativeFromBuiltinRole, rr.privRoute, rr.privVia)))
-			reachNamespace(rr.privRoute)
+			set.addAll(b.operations, grantFor(dbschema.NativeFromBuiltinRole, rr.privRoute, rr.privVia), selfRel)
+			reachEverySchema(rr.privRoute)
 			bypass = bypass || b.bypassesRowSecurity
 		}
-		if oid == t.SchemaOwner || slices.Contains(r.cat.SchemaUsage, oid) {
-			reachNamespace(rr.privRoute)
+		for _, rel := range r.rels() {
+			if f := r.facts(rel); oid == f.schemaOwner || slices.Contains(f.schemaUsage, oid) {
+				reachSchema(rel, rr.privRoute)
+			}
 		}
 		if rr.attr && held.Super && (!superuser || better(rr.attrRoute, rr.attrVia, superRoute, superVia)) {
 			superuser, superRoute, superVia = true, rr.attrRoute, rr.attrVia
@@ -386,12 +422,14 @@ func (r *nativeResolver) principal(role pgRole) (dbschema.NativePrincipal, bool)
 		}
 	}
 	if superuser {
-		set.addAll(allOperations, grantFor(dbschema.NativeFromSuperuser, superRoute, superVia))
-		reachNamespace(superRoute)
+		set.addAll(allOperations, grantFor(dbschema.NativeFromSuperuser, superRoute, superVia), selfRel)
+		reachEverySchema(superRoute)
 	}
 	r.addACL(set, publicGrantee, grantFor(dbschema.NativeFromEveryone, dbschema.NativeRouteSelf, nil))
-	if slices.Contains(r.cat.SchemaUsage, publicGrantee) {
-		reachNamespace(dbschema.NativeRouteSelf)
+	for _, rel := range r.rels() {
+		if slices.Contains(r.facts(rel).schemaUsage, publicGrantee) {
+			reachSchema(rel, dbschema.NativeRouteSelf)
+		}
 	}
 	privileges := set.privileges()
 	if len(privileges) == 0 {
@@ -401,17 +439,10 @@ func (r *nativeResolver) principal(role pgRole) (dbschema.NativePrincipal, bool)
 	if role.Login {
 		kind = dbschema.NativeLogin
 	}
-	effect := dbschema.NativeRowSecurityApplies
-	switch {
-	case !t.RowSecurity:
-		effect = dbschema.NativeRowSecurityOff
-	case superuser, bypass, owner && !t.ForceRowSecurity:
-		effect = dbschema.NativeRowSecurityBypassed
-	}
 	return dbschema.NativePrincipal{
 		Name: role.Name, Kind: kind, Superuser: role.Super, Owner: role.OID == t.Owner,
-		Privileges: privileges, RowSecurity: effect,
-		NamespaceAccess: namespaceAccess(namespaceTier, bestTier(privileges)),
+		Privileges: privileges, RowSecurity: r.rowSecurity(set, superuser || bypass, owned),
+		NamespaceAccess: namespaceAccess(set, schemaTier, everySchema),
 		Confidence:      weakest(privileges),
 	}, true
 }
@@ -426,53 +457,88 @@ func (r *nativeResolver) everyone() (dbschema.NativePrincipal, bool) {
 	if len(privileges) == 0 {
 		return dbschema.NativePrincipal{}, false
 	}
-	effect := dbschema.NativeRowSecurityOff
-	if r.cat.Table.RowSecurity {
-		effect = dbschema.NativeRowSecurityApplies
-	}
-	namespaceTier := -1
-	if slices.Contains(r.cat.SchemaUsage, publicGrantee) {
-		namespaceTier = 0
+	schemaTier := map[int64]int{}
+	for _, rel := range r.rels() {
+		if slices.Contains(r.facts(rel).schemaUsage, publicGrantee) {
+			schemaTier[rel] = 0
+		}
 	}
 	return dbschema.NativePrincipal{
-		Name: publicPrincipalName, Kind: dbschema.NativeEveryone, Privileges: privileges, RowSecurity: effect,
-		NamespaceAccess: namespaceAccess(namespaceTier, 0),
+		Name: publicPrincipalName, Kind: dbschema.NativeEveryone, Privileges: privileges,
+		RowSecurity:     r.rowSecurity(set, false, nil),
+		NamespaceAccess: namespaceAccess(set, schemaTier, -1),
 		Confidence:      weakest(privileges),
 	}, true
 }
 
-// namespaceAccess compares how the schema is reached with how a privilege is
-// ([currentTier]): granted when the schema is reached in effect now, or
-// only by SET ROLE or a self-grant when every privilege is too; unknown when a
-// privilege is in effect now but the schema is reached only by such a route;
-// missing when nothing reaches it.
-func namespaceAccess(namespaceTier, privilegeTier int) dbschema.NativeNamespaceAccess {
+// rowSecurity is the effect of row security on a principal, from the relation
+// each grant comes through: rows read through a relation follow that
+// relation's row security. A grant on the table without row security is
+// "off"; through a relative without it, or by a principal that bypasses row
+// security or owns the relation (unless forced), "bypassed". The answer is the
+// most revealing effect among the grants.
+func (r *nativeResolver) rowSecurity(set *privilegeSet, bypass bool, owned map[int64]bool) dbschema.NativeRowSecurityEffect {
+	off, bypassed := false, false
+	for k := range set.grants {
+		f := r.facts(k.rel)
+		switch {
+		case !f.rowSecurity && k.rel == selfRel:
+			off = true
+		case !f.rowSecurity, bypass, owned[k.rel] && !f.forceRowSecurity:
+			bypassed = true
+		}
+	}
 	switch {
-	case namespaceTier < 0:
-		return dbschema.NativeNamespaceMissing
-	case namespaceTier <= privilegeTier:
-		return dbschema.NativeNamespaceGranted
+	case bypassed:
+		return dbschema.NativeRowSecurityBypassed
+	case off:
+		return dbschema.NativeRowSecurityOff
 	default:
-		return dbschema.NativeNamespaceUnknown
+		return dbschema.NativeRowSecurityApplies
 	}
 }
 
-func bestTier(privileges []dbschema.NativePrivilege) int {
+// namespaceAccess says whether a principal can reach the schema of the
+// relation each grant comes through ([currentTier] compares routes). It is
+// granted when one of the principal's most current grants has its schema
+// reached at least as currently; unknown when only a less current route
+// reaches some grant's schema; missing when no grant's schema is reached.
+func namespaceAccess(set *privilegeSet, schemaTier map[int64]int, everySchema int) dbschema.NativeNamespaceAccess {
 	best := currentTier(dbschema.NativeRouteSelfGrant)
-	for _, p := range privileges {
-		for _, g := range p.Grants {
-			best = min(best, currentTier(g.Route))
+	for k := range set.grants {
+		best = min(best, currentTier(k.route))
+	}
+	granted, reached := false, false
+	for k := range set.grants {
+		tier, ok := schemaTier[k.rel]
+		if everySchema >= 0 && (!ok || everySchema < tier) {
+			tier, ok = everySchema, true
+		}
+		if !ok {
+			continue
+		}
+		reached = true
+		if grantTier := currentTier(k.route); tier <= grantTier && grantTier == best {
+			granted = true
 		}
 	}
-	return best
+	switch {
+	case granted:
+		return dbschema.NativeNamespaceGranted
+	case reached:
+		return dbschema.NativeNamespaceUnknown
+	default:
+		return dbschema.NativeNamespaceMissing
+	}
 }
 
 // privileges lists the set in a fixed order, one entry per operation and set
 // of fields with every grant behind it. A column grant is folded into the
-// whole-table privilege only when a whole-table grant of that operation is at
-// least as current (route) and as certain (confidence); otherwise both are
-// listed, so a current column privilege is never hidden behind a potential
-// whole-table one.
+// whole-table privilege only when a whole-table grant of that operation comes
+// through the same relation and is at least as current (route) and as certain
+// (confidence); otherwise both are listed, so a current column privilege is
+// never hidden behind a potential whole-table one, nor a column of every row
+// behind a share of the rows.
 func (s *privilegeSet) privileges() []dbschema.NativePrivilege {
 	var out []dbschema.NativePrivilege
 	for op, grants := range s.table {
@@ -481,7 +547,7 @@ func (s *privilegeSet) privileges() []dbschema.NativePrivilege {
 	for op, byGrant := range s.columns {
 		groups := map[string][]grantKey{}
 		for k, columns := range byGrant {
-			if s.covered(op, s.grants[k]) {
+			if s.covered(op, k) {
 				continue
 			}
 			slices.Sort(columns)
@@ -500,12 +566,11 @@ func (s *privilegeSet) privileges() []dbschema.NativePrivilege {
 	return out
 }
 
-// covered reports whether a whole-table grant of op is at least as current and
-// as certain as the column grant g.
-func (s *privilegeSet) covered(op dbschema.NativeOperation, g dbschema.NativeGrant) bool {
-	for k := range s.table[op] {
-		t := s.grants[k]
-		if routeTier(t.Route) <= routeTier(g.Route) && confidenceRank[t.Confidence] <= confidenceRank[g.Confidence] {
+// covered reports whether a whole-table grant of op, through the same
+// relation, is at least as current and as certain as the column grant c.
+func (s *privilegeSet) covered(op dbschema.NativeOperation, c grantKey) bool {
+	for t := range s.table[op] {
+		if t.rel == c.rel && routeRank[t.route] <= routeRank[c.route] && confidenceRank[t.confidence] <= confidenceRank[c.confidence] {
 			return true
 		}
 	}
@@ -513,21 +578,18 @@ func (s *privilegeSet) covered(op dbschema.NativeOperation, g dbschema.NativeGra
 }
 
 func (s *privilegeSet) newPrivilege(op dbschema.NativeOperation, fields []string, keys []grantKey) dbschema.NativePrivilege {
+	slices.SortFunc(keys, func(a, b grantKey) int {
+		return cmp.Or(cmp.Compare(routeRank[a.route], routeRank[b.route]),
+			strings.Compare(string(a.source), string(b.source)),
+			strings.Compare(string(a.confidence), string(b.confidence)),
+			strings.Compare(a.via, b.via), cmp.Compare(a.rel, b.rel))
+	})
 	grants := make([]dbschema.NativeGrant, len(keys))
+	confidence := dbschema.NativeUnknown
 	for i, k := range keys {
 		grants[i] = s.grants[k]
-	}
-	slices.SortFunc(grants, func(a, b dbschema.NativeGrant) int {
-		ka, kb := keyOf(a), keyOf(b)
-		return cmp.Or(cmp.Compare(routeRank[a.Route], routeRank[b.Route]),
-			strings.Compare(string(ka.source), string(kb.source)),
-			strings.Compare(string(ka.confidence), string(kb.confidence)),
-			strings.Compare(ka.via, kb.via))
-	})
-	confidence := dbschema.NativeUnknown
-	for _, g := range grants {
-		if confidenceRank[g.Confidence] < confidenceRank[confidence] {
-			confidence = g.Confidence
+		if confidenceRank[k.confidence] < confidenceRank[confidence] {
+			confidence = k.confidence
 		}
 	}
 	return dbschema.NativePrivilege{Operation: op, Fields: fields, Confidence: confidence, Grants: grants}

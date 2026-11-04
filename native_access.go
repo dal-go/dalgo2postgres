@@ -37,6 +37,8 @@ const minNativeAccessVersion = 130000
 // or an inheritance parent) and its descendants (partitions, inheritance
 // children), are read with their owners and privileges: a query on an ancestor
 // reads the table's rows, and a query on a descendant reads its share of them.
+// Each relative's row-security flags and its schema's USAGE grantees are read
+// too: rows read through a relative follow its row security and its schema.
 //
 // A NULL relacl or nspacl means the default privileges, which acldefault
 // spells out (the owner holds every privilege, PUBLIC none on a table; the
@@ -58,7 +60,8 @@ const nativeAccessSQL = `
 		UNION
 		SELECT i.inhrelid FROM pg_catalog.pg_inherits AS i JOIN down AS d ON i.inhparent = d.oid
 	), rel AS (
-		SELECT c.oid, c.relowner, c.relacl, n.nspname, c.relname, k.relation
+		SELECT c.oid, c.relowner, c.relacl, c.relrowsecurity, c.relforcerowsecurity,
+		       n.nspname, n.nspowner, n.nspacl, c.relname, k.relation
 		FROM (SELECT t.oid, 'self' AS relation FROM tbl AS t
 		      UNION ALL SELECT u.oid, 'ancestor' FROM up AS u
 		      UNION ALL SELECT d.oid, 'descendant' FROM down AS d) AS k
@@ -88,7 +91,13 @@ const nativeAccessSQL = `
 		          FROM tbl AS t),
 		'relatives', (SELECT pg_catalog.json_agg(pg_catalog.json_build_object(
 		                  'oid', r.oid::bigint, 'schema', r.nspname, 'name', r.relname,
-		                  'relation', r.relation, 'owner', r.relowner::bigint) ORDER BY r.relation, r.nspname, r.relname)
+		                  'relation', r.relation, 'owner', r.relowner::bigint,
+		                  'rowSecurity', r.relrowsecurity, 'forceRowSecurity', r.relforcerowsecurity,
+		                  'schemaOwner', r.nspowner::bigint,
+		                  'schemaUsage', (SELECT pg_catalog.json_agg(a.grantee::bigint ORDER BY a.grantee)
+		                                  FROM pg_catalog.aclexplode(
+		                                      COALESCE(r.nspacl, pg_catalog.acldefault('n', r.nspowner))) AS a
+		                                  WHERE a.privilege_type = 'USAGE')) ORDER BY r.relation, r.nspname, r.relname)
 		              FROM rel AS r WHERE r.relation <> 'self'),
 		'tableAcl', (SELECT pg_catalog.json_agg(pg_catalog.json_build_object(
 		                 'rel', r.oid::bigint, 'grantee', a.grantee::bigint, 'privilege', a.privilege_type)
@@ -135,6 +144,13 @@ type pgRelative struct {
 	Name     string `json:"name"`
 	Relation string `json:"relation"` // "ancestor" or "descendant"
 	Owner    int64  `json:"owner"`
+	// RowSecurity and ForceRowSecurity are the relative's own flags: rows
+	// read through it follow its row security.
+	RowSecurity      bool `json:"rowSecurity"`
+	ForceRowSecurity bool `json:"forceRowSecurity"`
+	// SchemaOwner and SchemaUsage are its schema's owner and USAGE grantees.
+	SchemaOwner int64   `json:"schemaOwner"`
+	SchemaUsage []int64 `json:"schemaUsage"`
 }
 
 type pgRole struct {

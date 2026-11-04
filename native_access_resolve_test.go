@@ -703,3 +703,100 @@ func TestNativeAccess_MoreUnresolvedInput(t *testing.T) {
 		})
 	}
 }
+
+// partitioned puts billing.invoices under a partitioned parent in the given
+// schema; idle reads the parent.
+func partitioned(parentSchema string, rowSecurity, force bool, parentUsage []int64) *pgCatalog {
+	cat := appCatalog()
+	cat.Relatives = []pgRelative{{OID: 501, Schema: parentSchema, Name: "all", Relation: "ancestor", Owner: oidAppOwner,
+		RowSecurity: rowSecurity, ForceRowSecurity: force, SchemaOwner: oidAppOwner, SchemaUsage: parentUsage}}
+	cat.TableACL = append(cat.TableACL, pgACL{Rel: 501, Grantee: oidIdle, Privilege: "SELECT"})
+	return cat
+}
+
+// Rows read through a relative follow that relative's row security.
+func TestNativeAccess_RowSecurityFollowsTheRelative(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name               string
+		rowSecurity, force bool
+		ownerOfParent      bool
+		want               dbschema.NativeRowSecurityEffect
+	}{
+		{"parent without row security", false, false, false, dbschema.NativeRowSecurityBypassed},
+		{"parent with row security", true, false, false, dbschema.NativeRowSecurityApplies},
+		{"owner of the parent", true, false, true, dbschema.NativeRowSecurityBypassed},
+		{"owner of a forced parent", true, true, true, dbschema.NativeRowSecurityApplies},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cat := partitioned("billing", tt.rowSecurity, tt.force, nil)
+			if tt.ownerOfParent {
+				cat.Relatives[0].Owner = oidIdle
+			}
+			if got := principalNamed(t, resolve(cat), "idle").RowSecurity; got != tt.want {
+				t.Fatalf("got %s, want %s", got, tt.want)
+			}
+		})
+	}
+	cat := partitioned("billing", false, false, nil)
+	cat.TableACL = append(cat.TableACL, pgACL{Rel: 501, Grantee: 0, Privilege: "SELECT"})
+	if got := principalNamed(t, resolve(cat), "PUBLIC").RowSecurity; got != dbschema.NativeRowSecurityBypassed {
+		t.Fatalf("PUBLIC through the parent: %s", got)
+	}
+}
+
+// Namespace access is checked against the schema of the relation a grant comes
+// through.
+func TestNativeAccess_NamespaceFollowsTheRelative(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name        string
+		tableUsage  []int64
+		parentUsage []int64
+		want        dbschema.NativeNamespaceAccess
+	}{
+		{"USAGE on the parent's schema only", []int64{oidPgDbOwner}, []int64{0}, dbschema.NativeNamespaceGranted},
+		{"USAGE on the table's schema only", []int64{0, oidPgDbOwner}, nil, dbschema.NativeNamespaceMissing},
+		{"neither", []int64{oidPgDbOwner}, nil, dbschema.NativeNamespaceMissing},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cat := partitioned("archive", true, false, tt.parentUsage)
+			cat.SchemaUsage = tt.tableUsage
+			if got := principalNamed(t, resolve(cat), "idle").NamespaceAccess; got != tt.want {
+				t.Fatalf("got %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+// A column grant usable after SET ROLE is not folded under a whole-table
+// grant that needs a self-grant.
+func TestNativeAccess_SwitchRoleColumnGrantIsKeptBesideASelfGrant(t *testing.T) {
+	t.Parallel()
+	cat := appCatalog()
+	cat.Roles = append(cat.Roles, pgRole{OID: 400, Name: "colgrp", Inherit: true})
+	cat.Memberships = append(cat.Memberships, edge(400, oidIdle, false, true),
+		pgMembership{Role: oidReaders, Member: oidIdle, Admin: true, Inherit: ptr(false), Set: ptr(false)})
+	cat.ColumnACL = append(cat.ColumnACL, pgColumnACL{Column: "email", Grantee: 400, Privilege: "SELECT"})
+	want := []string{"read membership/self-grant inferred via readers", "read[email] membership/switch-role inferred via colgrp"}
+	if got := describe(principalNamed(t, resolve(cat), "idle")); !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+}
+
+// A descendant's whole-table grant (a share of the rows) does not absorb an
+// ancestor's column grant (that column of every row).
+func TestNativeAccess_DescendantGrantDoesNotAbsorbAnAncestorColumnGrant(t *testing.T) {
+	t.Parallel()
+	cat := appCatalog()
+	cat.Relatives = []pgRelative{
+		{OID: 501, Schema: "billing", Name: "all", Relation: "ancestor", Owner: oidAppOwner},
+		{OID: 502, Schema: "billing", Name: "part", Relation: "descendant", Owner: oidAppOwner},
+	}
+	cat.ColumnACL = append(cat.ColumnACL, pgColumnACL{Rel: 501, Column: "email", Grantee: oidIdle, Privilege: "SELECT"})
+	cat.TableACL = append(cat.TableACL, pgACL{Rel: 502, Grantee: oidIdle, Privilege: "SELECT"})
+	want := []string{"read direct/self inferred via descendant:billing.part", "read[email] direct/self inferred via ancestor:billing.all"}
+	if got := describe(principalNamed(t, resolve(cat), "idle")); !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+}
