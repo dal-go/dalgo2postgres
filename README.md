@@ -7,6 +7,7 @@ PostgreSQL-specific DALgo driver. Wraps `github.com/dal-go/dalgo2sql` to provide
   on the server (see "Structured queries")
 - `dbschema.SchemaReader` — schema introspection via `information_schema`, `pg_catalog` and `pg_indexes`: every non-system schema, views told from tables, column defaults
 - `dbschema.SourceViewReader` — ordered view columns and normalized view-definition metadata for the configured schema
+- `dbschema.NativeAccessReader` — the roles that can reach a table natively, with privileges, sources and coverage (see "Native access")
 - `ddl.SchemaModifier` and `ddl.Applier` — PostgreSQL-flavored `CREATE TABLE` / `CREATE INDEX` / `DROP TABLE` / `ALTER TABLE`
 - `dal.ConcurrencyAware` — advertises `SupportsConcurrentConnections() = true`
   (PostgreSQL supports concurrent connections from multiple goroutines and processes,
@@ -614,6 +615,54 @@ defaults to `nextval(...)` (`serial`) is a plain default to the catalog and is n
   stored or virtual (PostgreSQL 18) is not reported.
 - `ListCollections` lists a foreign table and a materialized view now; before, it listed
   neither.
+
+## Native access: who can reach a table outside DALgo
+
+`ReadNativeAccess(ctx, ref)` implements `dbschema.NativeAccessReader`. It lists the PostgreSQL roles
+that can reach one table, view, materialized view, partitioned table or foreign table through their
+own credentials, with the privileges they can exercise and why. The table is found as the schema
+reader finds it (reference schema, else `WithSchema`; name per `IdentifierMode`). It is an
+inventory, never an authorization decision. The read-only schema transaction offers it too.
+
+**Server versions.** PostgreSQL 13 and later. An older server answers a `*dbschema.NotSupportedError`.
+The per-grant `INHERIT` and `SET` options of PostgreSQL 16 are read when present; before 16 a
+member's `rolinherit` decides inheritance and `SET ROLE` is always possible. CI runs it on 17 and 18.
+
+**Credential.** One statement, run as any role that can connect: it reads `pg_roles` (never
+`rolpassword`), `pg_auth_members`, `pg_database`, `pg_class`, `pg_namespace`, `pg_attribute` and
+`current_setting('server_version_num')`, all readable by `PUBLIC` in a default installation. Use a
+dedicated `LOGIN` role with no other privilege. If a DBA has revoked `SELECT` on one of those
+catalogs from `PUBLIC`, grant it back to that role; until then the call fails, and a failure is an
+error, never an empty list. One statement means one snapshot: the facts are consistent.
+
+**What it works out.**
+- Membership is followed transitively. A privilege used automatically through membership is routed
+  `inherited`; one usable only after `SET ROLE` (a `NOINHERIT` member, or a grant with
+  `INHERIT FALSE`) is `switch-role`; one a role can obtain by granting itself membership it
+  administers (`ADMIN OPTION`, and before 16 `CREATEROLE`, which could grant any non-superuser
+  role) is `self-grant`.
+- Sources: `direct`, `membership`, `everyone` (`PUBLIC`), `ownership` (the owner, and every role
+  that holds the owner's privileges), `superuser` (a superuser login, or a role that can
+  `SET ROLE` to a superuser role), `builtin-role` (`pg_read_all_data`, `pg_write_all_data`). The
+  database owner is counted as a member of `pg_database_owner` (14+).
+- Confidence: `verified` for the role's own catalog entries, `inferred` for anything reached through
+  membership.
+- Row security: superusers and `BYPASSRLS` roles bypass it, even under `FORCE ROW LEVEL SECURITY`;
+  the owner bypasses it unless it is forced. `BYPASSRLS` alone grants no privilege, so such a role
+  is listed only when it holds one.
+- Principals listed: every login role that holds a privilege, the owner always (as a `group` if it
+  cannot log in), and `PUBLIC` as one principal of kind `everyone` when it holds a privilege; its
+  privileges are also added to every login role. A column privilege is listed only where the same
+  privilege is not held on the whole table. Namespace access says whether the role has `USAGE` on
+  the schema, without which its table privileges cannot be used.
+
+**Coverage.** Always `partial`, with the blind spots named: `pg_hba.conf` (connection rules), cloud
+IAM logins, replicas and backups, shared credentials, `SECURITY DEFINER` functions and views owned
+by other roles, row-security policy expressions (not read), managed-service admin roles such as
+`rds_superuser` that are not `rolsuper`, and table inheritance and partitions (each partition is a
+table of its own). A grant, a membership or an owner that names a role `pg_roles` does not list
+makes the coverage `unknown`, with a gap that names it. A table that does not exist is a not-found
+error.
 
 ## Connection errors
 
