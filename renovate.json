@@ -37,6 +37,47 @@
         "typescript"
       ],
       "allowedVersions": "<7"
+    },
+    {
+      "description": "Update the SHA-pinned first-party CI workflow for compatible patch releases",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchDepTypes": [
+        "action",
+        "workflow"
+      ],
+      "matchPackageNames": [
+        "strongo/cicd"
+      ],
+      "matchFileNames": [
+        ".github/workflows/ci.yml"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "pinDigests": true,
+      "automerge": true
+    },
+    {
+      "description": "Automerge official Go compiler patch releases without changing the module's minimum Go version",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchDatasources": [
+        "golang-version"
+      ],
+      "matchDepTypes": [
+        "toolchain"
+      ],
+      "matchPackageNames": [
+        "go"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "groupName": "Go toolchain patches",
+      "automerge": true
     }
   ]
 }
