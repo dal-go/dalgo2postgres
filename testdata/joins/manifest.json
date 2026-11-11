@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "sourceModule": "github.com/dal-go/dalgo",
-  "sourceVersion": "v0.100.0",
-  "sourceCommit": "82c6327e7249dfade304cfd6f7b0da954aa726b0",
+  "sourceVersion": "v0.102.3",
+  "sourceCommit": "133d43712d8a01abd9f90ee4a2ef0ff7a00393ea",
   "sourcePath": "tugql/testdata/joins",
   "files": {
     "chinook-hinted.tugql.yaml": "691b7456da751808f634b7b0fc8e4b1eb9e26b7b648af59376af2fcd00b189c4",
