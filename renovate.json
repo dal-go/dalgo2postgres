@@ -78,6 +78,41 @@
       ],
       "groupName": "Go toolchain patches",
       "automerge": true
+    },
+    {
+      "description": "Review DALgo and its SQL adapter with fixture provenance",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchPackageNames": [
+        "github.com/dal-go/dalgo",
+        "github.com/dal-go/dalgo2sql"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "DALgo fixture dependencies",
+      "dependencyDashboardApproval": true,
+      "automerge": false
+    },
+    {
+      "description": "Review pgx and its pool with PostgreSQL conformance",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchPackageNames": [
+        "github.com/jackc/pgx/v5",
+        "github.com/jackc/puddle/v2"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "PostgreSQL driver dependencies",
+      "dependencyDashboardApproval": true,
+      "automerge": false
     }
-  ]
+  ],
+  "branchConcurrentLimit": 3
 }
