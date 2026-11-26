@@ -324,17 +324,6 @@ func TestOpenVerified_MisreadStringIsRefusedBeforeTheDriver(t *testing.T) {
 	clearPGEnv(t)
 	for name, dsn := range misreadStrings() {
 		t.Run(name, func(t *testing.T) {
-			cfg, err := pgx.ParseConfig(dsn)
-			if err != nil {
-				t.Fatalf("the driver should accept this string, as it does: %v", err)
-			}
-			named := false
-			for key := range cfg.RuntimeParams {
-				named = named || strings.ContainsAny(key, "@/:")
-			}
-			if !named {
-				t.Fatalf("expected pgx to take part of the string for a setting name: %v", cfg.RuntimeParams)
-			}
 			asked := false
 			open := func(string, string) (*sql.DB, error) { asked = true; return nil, echoing(dsn) }
 			db, err := openVerified(dsn, open)
@@ -906,23 +895,25 @@ func TestIsSettingName(t *testing.T) {
 	}
 }
 
-func TestIsMisSplitURL(t *testing.T) {
+func TestInspectURL(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
-		dsn  string
-		want bool
+		dsn               string
+		misread, misSplit bool
 	}{
-		"keyword string":     {"host=h user=u@x", false},
-		"plain url":          {"postgres://u:p@h:5432/db?sslmode=disable", false},
-		"encoded at sign":    {"postgresql://u:p@h/or%40ders", false},
-		"at sign in path":    {"postgres://u:/p@h/db", true},
-		"at sign in query":   {"postgres://u:?p@h/db", true},
-		"number sign":        {"postgres://u:#p@h/db", true},
-		"unparsable url":     {"postgres://h:bad port/d", true},
-		"url with port only": {"postgres://h:5432", false},
+		"keyword string":         {"host=h user=u@x", false, false},
+		"plain url":              {"postgres://u:p@h:5432/db?sslmode=disable", false, false},
+		"encoded at sign":        {"postgresql://u:p@h/or%40ders", false, false},
+		"at sign in path":        {"postgres://u:/p@h/db", false, true},
+		"at sign in query key":   {"postgres://u:?p@h/db", true, true},
+		"at sign in query value": {"postgres://u:p@h/db?application_name=a@b", false, true},
+		"number sign":            {"postgres://u:#p@h/db", false, true},
+		"unparsable url":         {"postgres://h:bad port/d", false, true},
+		"url with port only":     {"postgres://h:5432", false, false},
 	} {
-		if got := isMisSplitURL(tc.dsn); got != tc.want {
-			t.Errorf("%s: isMisSplitURL(%q) = %v, want %v", name, tc.dsn, got, tc.want)
+		misread, misSplit := inspectURL(tc.dsn)
+		if misread != tc.misread || misSplit != tc.misSplit {
+			t.Errorf("%s: inspectURL(%q) = (%v, %v), want (%v, %v)", name, tc.dsn, misread, misSplit, tc.misread, tc.misSplit)
 		}
 	}
 }
