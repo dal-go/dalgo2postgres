@@ -400,6 +400,12 @@ func inspectURL(dsn string) (misread, misSplit bool) {
 			return true, true
 		}
 	}
+	// Without user information, an at sign in the query means the password's
+	// tail and the real authority were pushed there by an unescaped question
+	// mark, even when the first word reads as a valid setting name.
+	if u.User == nil && strings.Contains(u.RawQuery, "@") {
+		return true, true
+	}
 	// A slash or number sign can terminate the authority early. A correctly
 	// escaped at sign in the path or query does not split the authority.
 	return false, strings.Contains(dsn, "#") || strings.Contains(u.EscapedPath()+u.RawQuery, "@")

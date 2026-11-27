@@ -311,11 +311,12 @@ func TestNewDatabase_MisSplitURLLeaksNothing(t *testing.T) {
 func misreadStrings() map[string]string {
 	rest := secretUser + ":" + secretPassword + "@" + visibleHost + ":6432/" + visibleDB + "?sslmode=disable"
 	return map[string]string{
-		"double quoted URL":       `"postgres://` + rest + `"`,
-		"leading space":           " postgres://" + rest,
-		"upper case scheme":       "POSTGRES://" + rest,
-		"foreign scheme":          "postgresql+psycopg2://" + rest,
-		"question mark mis-split": "postgres://zelda-admin.invalid:?" + secretPassword + "@" + visibleHost + "/" + visibleDB,
+		"double quoted URL":            `"postgres://` + rest + `"`,
+		"leading space":                " postgres://" + rest,
+		"upper case scheme":            "POSTGRES://" + rest,
+		"foreign scheme":               "postgresql+psycopg2://" + rest,
+		"question mark mis-split":      "postgres://zelda-admin.invalid:?" + secretPassword + "@" + visibleHost + "/" + visibleDB,
+		"valid setting name mis-split": "postgres://zelda-admin.invalid:5432?application_name=" + secretPassword + "@" + visibleHost + "/" + visibleDB,
 	}
 }
 
@@ -910,6 +911,8 @@ func TestInspectURL(t *testing.T) {
 		"number sign":            {"postgres://u:#p@h/db", false, true},
 		"unparsable url":         {"postgres://h:bad port/d", false, true},
 		"url with port only":     {"postgres://h:5432", false, false},
+		"authority pushed into a valid setting name":   {"postgres://localhost:5432?application_name=secret@intended.example/db", true, true},
+		"at sign in query value with user information": {"postgres://u@h/db?application_name=a@b", false, true},
 	} {
 		misread, misSplit := inspectURL(tc.dsn)
 		if misread != tc.misread || misSplit != tc.misSplit {
