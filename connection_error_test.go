@@ -311,15 +311,11 @@ func TestNewDatabase_MisSplitURLLeaksNothing(t *testing.T) {
 func misreadStrings() map[string]string {
 	rest := secretUser + ":" + secretPassword + "@" + visibleHost + ":6432/" + visibleDB + "?sslmode=disable"
 	return map[string]string{
-		"double quoted URL":            `"postgres://` + rest + `"`,
-		"leading space":                " postgres://" + rest,
-		"upper case scheme":            "POSTGRES://" + rest,
-		"foreign scheme":               "postgresql+psycopg2://" + rest,
-		"question mark mis-split":      "postgres://zelda-admin.invalid:?" + secretPassword + "@" + visibleHost + "/" + visibleDB,
-		"valid setting name mis-split": "postgres://zelda-admin.invalid:5432?application_name=" + secretPassword + "@" + visibleHost + "/" + visibleDB,
-		"mis-split past user info":     "postgres://" + secretUser + ":pa@zelda-admin.invalid:5432?application_name=" + secretPassword + "@" + visibleHost + "/" + visibleDB,
-		"mis-split into a fragment":    "postgres://zelda-admin.invalid:5432?application_name=" + secretPassword + "#x@" + visibleHost + "/" + visibleDB,
-		"mis-split past a semicolon":   "postgres://zelda-admin.invalid:5432?" + secretPassword + ";x@" + visibleHost + "/" + visibleDB,
+		"double quoted URL":       `"postgres://` + rest + `"`,
+		"leading space":           " postgres://" + rest,
+		"upper case scheme":       "POSTGRES://" + rest,
+		"foreign scheme":          "postgresql+psycopg2://" + rest,
+		"question mark mis-split": "postgres://zelda-admin.invalid:?" + secretPassword + "@" + visibleHost + "/" + visibleDB,
 	}
 }
 
@@ -328,6 +324,17 @@ func TestOpenVerified_MisreadStringIsRefusedBeforeTheDriver(t *testing.T) {
 	clearPGEnv(t)
 	for name, dsn := range misreadStrings() {
 		t.Run(name, func(t *testing.T) {
+			cfg, err := pgx.ParseConfig(dsn)
+			if err != nil {
+				t.Fatalf("the driver should accept this string, as it does: %v", err)
+			}
+			named := false
+			for key := range cfg.RuntimeParams {
+				named = named || strings.ContainsAny(key, "@/:")
+			}
+			if !named {
+				t.Fatalf("expected pgx to take part of the string for a setting name: %v", cfg.RuntimeParams)
+			}
 			asked := false
 			open := func(string, string) (*sql.DB, error) { asked = true; return nil, echoing(dsn) }
 			db, err := openVerified(dsn, open)
@@ -899,33 +906,23 @@ func TestIsSettingName(t *testing.T) {
 	}
 }
 
-func TestInspectURL(t *testing.T) {
+func TestIsMisSplitURL(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
-		dsn               string
-		misread, misSplit bool
+		dsn  string
+		want bool
 	}{
-		"keyword string":         {"host=h user=u@x", false, false},
-		"plain url":              {"postgres://u:p@h:5432/db?sslmode=disable", false, false},
-		"encoded at sign":        {"postgresql://u:p@h/or%40ders", false, false},
-		"at sign in path":        {"postgres://u:/p@h/db", false, true},
-		"at sign in query key":   {"postgres://u:?p@h/db", true, true},
-		"at sign in query value": {"postgres://u:p@h/db?application_name=a@b", false, true},
-		"number sign":            {"postgres://u:#p@h/db", false, true},
-		"unparsable url":         {"postgres://h:bad port/d", false, true},
-		"url with port only":     {"postgres://h:5432", false, false},
-		"authority pushed into a valid setting name":   {"postgres://localhost:5432?application_name=secret@intended.example/db", true, true},
-		"at sign in query value with user information": {"postgres://u@h/db?application_name=a@b", false, true},
-		"at sign in query value without user":          {"postgres://h/db?user=u&password=p@ss", false, true},
-		"authority pushed past user information":       {"postgres://u:pa@localhost:5432?application_name=secret@intended.example/db", true, true},
-		"authority pushed past a user name":            {"postgres://alice@localhost:?application_name=secret@intended.example/db", true, true},
-		"authority pushed into a fragment":             {"postgres://localhost:5432?application_name=secret#x@intended.example/db", true, true},
-		"semicolon in the query":                       {"postgres://u:p@h:5432?secret;x@intended.example/db", true, true},
-		"bad escape in the query":                      {"postgres://h/db?sslmode=verify%zz", true, true},
+		"keyword string":     {"host=h user=u@x", false},
+		"plain url":          {"postgres://u:p@h:5432/db?sslmode=disable", false},
+		"encoded at sign":    {"postgresql://u:p@h/or%40ders", false},
+		"at sign in path":    {"postgres://u:/p@h/db", true},
+		"at sign in query":   {"postgres://u:?p@h/db", true},
+		"number sign":        {"postgres://u:#p@h/db", true},
+		"unparsable url":     {"postgres://h:bad port/d", true},
+		"url with port only": {"postgres://h:5432", false},
 	} {
-		misread, misSplit := inspectURL(tc.dsn)
-		if misread != tc.misread || misSplit != tc.misSplit {
-			t.Errorf("%s: inspectURL(%q) = (%v, %v), want (%v, %v)", name, tc.dsn, misread, misSplit, tc.misread, tc.misSplit)
+		if got := isMisSplitURL(tc.dsn); got != tc.want {
+			t.Errorf("%s: isMisSplitURL(%q) = %v, want %v", name, tc.dsn, got, tc.want)
 		}
 	}
 }

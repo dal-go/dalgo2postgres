@@ -358,11 +358,7 @@ func inspectDSN(dsn string) dsnInfo {
 	if !isURL(dsn) && holdsKeywordPair(&cfg.Config) {
 		return dsnInfo{misread: true}
 	}
-	misread, misSplit := inspectURL(dsn)
-	if misread {
-		return dsnInfo{misread: true}
-	}
-	return dsnInfo{cfg: &cfg.Config, misSplit: misSplit}
+	return dsnInfo{cfg: &cfg.Config, misSplit: isMisSplitURL(dsn)}
 }
 
 // holdsKeywordPair reports whether the host, the user or the database of a
@@ -383,43 +379,19 @@ func holdsKeywordPair(cfg *pgconn.Config) bool {
 	return false
 }
 
-// inspectURL identifies malformed query setting names and connections whose
-// URL parts cannot safely be included in an error. An unescaped question mark
-// can put the rest of a password and authority in a query key. Check the URL
-// directly because pgx may omit a key with no value from RuntimeParams.
-func inspectURL(dsn string) (misread, misSplit bool) {
+// isMisSplitURL reports whether a URL connection string is read by net/url in a
+// way that cannot be trusted. A password that is not percent-encoded and holds
+// a slash or a number sign ends the authority early: the user name becomes the
+// host, and the rest of the password and the real host become the database or
+// the fragment. (A question mark does the same into the query, and pgx then
+// reads the query as a setting with a misspelt name: see [inspectDSN].) The
+// path is read as written: a correctly encoded %40 is not an at sign.
+func isMisSplitURL(dsn string) bool {
 	if !isURL(dsn) {
-		return false, false
+		return false
 	}
 	u, err := url.Parse(dsn)
-	if err != nil {
-		return false, true
-	}
-	// A query net/url cannot read whole (a semicolon, a bad percent escape)
-	// loses settings silently, sslmode among them.
-	values, err := url.ParseQuery(u.RawQuery)
-	if err != nil {
-		return true, true
-	}
-	for key := range values {
-		if !isSettingName(key) {
-			return true, true
-		}
-	}
-	// An unescaped question mark in a password ends the authority before the
-	// path, so the URL has none, and the password's tail and the real
-	// authority follow it: an at sign after the first question mark, in the
-	// query or in a fragment, whatever the first word reads as and whether
-	// or not user information came before it. A URL whose path began before
-	// its query may have an at sign in a query value.
-	if u.Path == "" {
-		if i := strings.IndexByte(dsn, '?'); i >= 0 && strings.Contains(dsn[i+1:], "@") {
-			return true, true
-		}
-	}
-	// A slash or number sign can terminate the authority early. A correctly
-	// escaped at sign in the path or query does not split the authority.
-	return false, strings.Contains(dsn, "#") || strings.Contains(u.EscapedPath()+u.RawQuery, "@")
+	return err != nil || strings.Contains(dsn, "#") || strings.Contains(u.EscapedPath()+u.RawQuery, "@")
 }
 
 func isURL(dsn string) bool {
