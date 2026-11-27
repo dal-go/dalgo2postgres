@@ -317,6 +317,9 @@ func misreadStrings() map[string]string {
 		"foreign scheme":               "postgresql+psycopg2://" + rest,
 		"question mark mis-split":      "postgres://zelda-admin.invalid:?" + secretPassword + "@" + visibleHost + "/" + visibleDB,
 		"valid setting name mis-split": "postgres://zelda-admin.invalid:5432?application_name=" + secretPassword + "@" + visibleHost + "/" + visibleDB,
+		"mis-split past user info":     "postgres://" + secretUser + ":pa@zelda-admin.invalid:5432?application_name=" + secretPassword + "@" + visibleHost + "/" + visibleDB,
+		"mis-split into a fragment":    "postgres://zelda-admin.invalid:5432?application_name=" + secretPassword + "#x@" + visibleHost + "/" + visibleDB,
+		"mis-split past a semicolon":   "postgres://zelda-admin.invalid:5432?" + secretPassword + ";x@" + visibleHost + "/" + visibleDB,
 	}
 }
 
@@ -913,6 +916,12 @@ func TestInspectURL(t *testing.T) {
 		"url with port only":     {"postgres://h:5432", false, false},
 		"authority pushed into a valid setting name":   {"postgres://localhost:5432?application_name=secret@intended.example/db", true, true},
 		"at sign in query value with user information": {"postgres://u@h/db?application_name=a@b", false, true},
+		"at sign in query value without user":          {"postgres://h/db?user=u&password=p@ss", false, true},
+		"authority pushed past user information":       {"postgres://u:pa@localhost:5432?application_name=secret@intended.example/db", true, true},
+		"authority pushed past a user name":            {"postgres://alice@localhost:?application_name=secret@intended.example/db", true, true},
+		"authority pushed into a fragment":             {"postgres://localhost:5432?application_name=secret#x@intended.example/db", true, true},
+		"semicolon in the query":                       {"postgres://u:p@h:5432?secret;x@intended.example/db", true, true},
+		"bad escape in the query":                      {"postgres://h/db?sslmode=verify%zz", true, true},
 	} {
 		misread, misSplit := inspectURL(tc.dsn)
 		if misread != tc.misread || misSplit != tc.misSplit {

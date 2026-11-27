@@ -395,16 +395,27 @@ func inspectURL(dsn string) (misread, misSplit bool) {
 	if err != nil {
 		return false, true
 	}
-	for key := range u.Query() {
+	// A query net/url cannot read whole (a semicolon, a bad percent escape)
+	// loses settings silently, sslmode among them.
+	values, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return true, true
+	}
+	for key := range values {
 		if !isSettingName(key) {
 			return true, true
 		}
 	}
-	// Without user information, an at sign in the query means the password's
-	// tail and the real authority were pushed there by an unescaped question
-	// mark, even when the first word reads as a valid setting name.
-	if u.User == nil && strings.Contains(u.RawQuery, "@") {
-		return true, true
+	// An unescaped question mark in a password ends the authority before the
+	// path, so the URL has none, and the password's tail and the real
+	// authority follow it: an at sign after the first question mark, in the
+	// query or in a fragment, whatever the first word reads as and whether
+	// or not user information came before it. A URL whose path began before
+	// its query may have an at sign in a query value.
+	if u.Path == "" {
+		if i := strings.IndexByte(dsn, '?'); i >= 0 && strings.Contains(dsn[i+1:], "@") {
+			return true, true
+		}
 	}
 	// A slash or number sign can terminate the authority early. A correctly
 	// escaped at sign in the path or query does not split the authority.

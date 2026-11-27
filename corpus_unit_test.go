@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -190,6 +192,8 @@ func TestVendoredFixturesAreTheDalgoModulesAtTheRequiredVersion(t *testing.T) {
 	// manifests say.
 	version := requiredDalgoVersion(t)
 	upstream := dalgoModuleDir(t)
+	commit := dalgoOriginCommit(t, version)
+	commits := map[string]bool{}
 	for _, name := range []string{"joins", "subqueries"} {
 		dir := filepath.Join("testdata", name)
 		for _, problem := range vendoredProblems(dir, dalgoModule, version) {
@@ -199,13 +203,42 @@ func TestVendoredFixturesAreTheDalgoModulesAtTheRequiredVersion(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if want := "tugql/testdata/" + name; manifest.SourcePath != want || manifest.SourceCommit == "" {
-			t.Errorf("%s: sourcePath %q and sourceCommit %q, want %q and a commit", dir, manifest.SourcePath, manifest.SourceCommit, want)
+		if want := "tugql/testdata/" + name; manifest.SourcePath != want || !fullCommit.MatchString(manifest.SourceCommit) {
+			t.Errorf("%s: sourcePath %q and sourceCommit %q, want %q and a full commit hash", dir, manifest.SourcePath, manifest.SourceCommit, want)
 		}
+		if commit != "" && manifest.SourceCommit != commit {
+			t.Errorf("%s: sourceCommit %s, but %s %s is commit %s", dir, manifest.SourceCommit, dalgoModule, version, commit)
+		}
+		commits[manifest.SourceCommit] = true
 		for _, problem := range upstreamProblems(dir, filepath.Join(upstream, filepath.FromSlash(manifest.SourcePath))) {
 			t.Error(problem)
 		}
 	}
+	if len(commits) != 1 {
+		t.Errorf("the manifests name %d source commits, want one: both are vendored from one version", len(commits))
+	}
+}
+
+var fullCommit = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// dalgoOriginCommit is the commit the module cache records for dalgo at
+// version (the proxy's Origin), or "" when it records none.
+func dalgoOriginCommit(t *testing.T, version string) string {
+	t.Helper()
+	cache, err := exec.Command("go", "env", "GOMODCACHE").Output()
+	if err != nil {
+		t.Fatalf("go env GOMODCACHE: %v", err)
+	}
+	info, err := os.ReadFile(filepath.Join(strings.TrimSpace(string(cache)), "cache", "download", filepath.FromSlash(dalgoModule), "@v", version+".info"))
+	if err != nil {
+		t.Logf("no module cache info for %s %s: %v", dalgoModule, version, err)
+		return ""
+	}
+	var origin struct{ Origin struct{ Hash string } }
+	if err := json.Unmarshal(info, &origin); err != nil {
+		t.Fatalf("%s %s info: %v", dalgoModule, version, err)
+	}
+	return origin.Origin.Hash
 }
 
 func TestNormalizeRowsAndSameCell(t *testing.T) {
