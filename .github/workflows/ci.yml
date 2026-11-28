@@ -34,7 +34,7 @@ jobs:
     needs: [integration]
     permissions:
       contents: write
-    uses: strongo/cicd/.github/workflows/workflow.yml@b9bc69e5e3c3123956fc82a41d393cdd0cb23cbf # v1.25.5
+    uses: strongo/cicd/.github/workflows/workflow.yml@55305a14a3ac17ee84001f9e0d3c74aca62ce2a0 # v1.26.1
     secrets:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     with:
