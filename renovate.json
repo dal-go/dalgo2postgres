@@ -1,8 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended"
-  ],
+  "extends": ["github>dal-go/dalgo-renovate-config"],
   "automerge": false,
   "automergeType": "pr",
   "platformAutomerge": true,
